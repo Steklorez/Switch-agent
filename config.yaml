@@ -1,0 +1,25 @@
+# Limits enforced by switchagent/extractor.py before and during safe archive
+# extraction. Deliberately generous defaults (Switch cartridge dumps can be
+# tens of GB, romfs mods can have thousands of small files) -- these exist to
+# stop a malicious/corrupt archive from filling the disk or creating an
+# absurd number of files, not to reject legitimate large game content.
+
+extraction:
+  # Total uncompressed bytes an archive is allowed to produce in work/<job-id>/.
+  # ~37 GiB default: covers a 32 GB XCI dump (max real Switch cartridge size)
+  # with headroom, while still being a hard, finite cap.
+  max_extracted_size_bytes: 40000000000
+
+  # Total number of files (not directories) an archive is allowed to contain.
+  max_file_count: 20000
+
+  # Maximum path depth (number of path components, including the filename)
+  # for any single entry inside an archive.
+  max_directory_depth: 24
+
+# Web UI's library source directory (see docs/WEB-UI.md) -- an existing,
+# permanent downloads folder scanned read-only for NSP/NSZ/XCI/XCZ/archives/
+# atmosphere mods. Never required to move files into inbox/ -- that
+# separate, still-supported workflow is untouched.
+library:
+  source_dir: "D:\\shared\\Download"

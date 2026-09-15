@@ -1,0 +1,208 @@
+{% extends "base.html" %}
+{% block title %}{{ view.display_name }} — SwitchAgent{% endblock %}
+
+{#
+  W3-004 Device Details.
+
+  Hard rules this template exists to honour:
+
+   * The raw, serial-bearing device_id NEVER appears here -- not as text,
+     not as an attribute value, not in a URL. The page is addressed by
+     mtp.windows.device_fingerprint() and device_detail.js resolves that
+     fingerprint back to the raw id server-side, at action time, via
+     GET /api/devices/by-fingerprint/{fingerprint}, purely so it can call
+     the EXISTING rename/storage-mapping endpoints unchanged.
+   * The activity section is titled "SwitchAgent activity" and is never
+     called "Installed games". SwitchAgent can only ever prove what it
+     attempted and transferred, never what the console ended up with.
+   * There is no remote-delete / forget-device action here, by design.
+#}
+
+{% block content %}
+<div class="page-header">
+  <div>
+    <h2 class="detail-title">
+      <span class="device-dot {{ 'connected' if view.connected else 'disconnected' }}"></span>
+      {{ view.display_name }}
+    </h2>
+    <div class="card-meta">
+      {{ "Connected" if view.connected else "Disconnected" }} ·
+      fingerprint <code id="device-fingerprint">{{ view.device_fingerprint }}</code>
+    </div>
+  </div>
+  <a class="btn btn-secondary" href="/devices">← Devices</a>
+</div>
+
+<section class="detail-section">
+  <h3>Device</h3>
+  <table class="detail-table">
+    <tr><th>Friendly name</th><td>{{ view.friendly_name or "— (not set)" }}</td></tr>
+    <tr><th>Reports itself as</th><td>{{ view.last_known_display_name or "—" }}</td></tr>
+    <tr><th>Status</th><td>{{ "Connected" if view.connected else "Disconnected" }}</td></tr>
+    <tr><th>Fingerprint</th><td><code>{{ view.device_fingerprint }}</code></td></tr>
+    <tr><th>First seen</th><td>{{ view.first_seen_at or "—" }}</td></tr>
+    <tr><th>Last seen</th><td>{{ view.last_seen_at or "—" }}</td></tr>
+  </table>
+  <form class="device-rename-form" id="device-rename-form">
+    <input type="text" name="friendly_name" value="{{ view.friendly_name or '' }}"
+           placeholder="{{ view.display_name }}">
+    <button type="submit" class="btn btn-small">Rename</button>
+  </form>
+</section>
+
+<section class="detail-section" id="device-storages">
+  <h3>Storage</h3>
+  {% if not view.storages %}
+  <p class="settings-hint">
+    {% if view.connected %}No storage information yet — refreshing in the background.
+    {% else %}No storage has been observed for this Switch yet (it has not been seen connected).{% endif %}
+  </p>
+  {% else %}
+  <table class="storage-table">
+    <thead>
+      <tr><th>Storage (as reported)</th><th>Logical name</th><th>Mapping</th><th>Space</th><th></th></tr>
+    </thead>
+    <tbody>
+      {% for s in view.storages %}
+      <tr data-raw-storage-name="{{ s.raw_name }}">
+        <td>{{ s.raw_name }}</td>
+        <td>{{ s.effective_logical_name }}</td>
+        <td>
+          {% if s.mapping_source == "MANUAL" %}<strong>MANUAL</strong>{% else %}AUTO{% endif %}
+          <span class="settings-hint">(auto would be {{ s.auto_logical_name }})</span>
+        </td>
+        <td>
+          {% if s.free_bytes is not none and s.total_bytes is not none %}
+          {{ s.free_bytes|filesize }} free of {{ s.total_bytes|filesize }}
+          {% else %}—{% endif %}
+        </td>
+        <td>
+          <select class="storage-mapping-select">
+            <option value="" {{ "selected" if s.mapping_source == "AUTO" }}>AUTO: {{ s.auto_logical_name }}</option>
+            {% for logical in allowed_storage_mappings %}
+            <option value="{{ logical }}" {{ "selected" if s.mapping_source == "MANUAL" and s.effective_logical_name == logical }}>{{ logical }}</option>
+            {% endfor %}
+          </select>
+          <button type="button" class="btn btn-small storage-mapping-save">Save</button>
+        </td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  {% endif %}
+</section>
+
+<section class="detail-section" id="device-diagnostics">
+  <h3>Diagnostics</h3>
+  <table class="detail-table">
+    <tr><th>Storages known</th><td>{{ view.diagnostics.storage_count }} ({{ view.diagnostics.writable_storage_count }} writable)</td></tr>
+    <tr><th>SD Card storage</th><td>{{ "yes" if view.diagnostics.has_sd_card else "not seen" }}</td></tr>
+    <tr><th>SD Card install target</th><td>{{ "yes" if view.diagnostics.has_sd_install else "not seen" }}</td></tr>
+    <tr><th>Manual storage mappings</th><td>{{ view.diagnostics.manual_mapping_count }}</td></tr>
+    <tr><th>Jobs ever targeted here</th><td>{{ view.diagnostics.job_count }} ({{ view.diagnostics.unfinished_job_count }} not finished)</td></tr>
+    <tr><th>Jobs that recorded an error</th><td>{{ view.diagnostics.error_job_count }}</td></tr>
+    <tr><th>Overall app health</th><td>{{ view.diagnostics.app_overall_status }}</td></tr>
+  </table>
+  <button type="button" class="btn btn-secondary" id="export-device-diagnostics">
+    Export diagnostics for this device
+  </button>
+  <pre id="device-diagnostics-output" class="diagnostics-output" hidden></pre>
+</section>
+
+{% if view.open_conflicts %}
+<section class="detail-section" id="device-open-conflicts">
+  <h3>Destination conflicts needing attention</h3>
+  <ul class="plain-list">
+    {% for j in view.open_conflicts %}
+    <li class="conflict-card">
+      <p class="conflict-explanation">{{ j.display_name }}</p>
+      <dl class="conflict-details">
+        <dt>Storage</dt><dd>{{ j.target_storage }}</dd>
+        {% if j.destination_conflict_path %}
+        <dt>Destination</dt><dd class="conflict-path">{{ j.destination_conflict_path }}</dd>
+        {% endif %}
+        <dt>Time</dt><dd>{{ j.finished_at or j.created_at }}</dd>
+      </dl>
+      <p class="settings-hint">Resolve the conflict manually on the device, then Retry from the Queue page.</p>
+    </li>
+    {% endfor %}
+  </ul>
+</section>
+{% endif %}
+
+<section class="detail-section" id="device-activity">
+  <h3>SwitchAgent activity</h3>
+  <p class="settings-hint">
+    Everything SwitchAgent has recorded for this Switch. This is a log of what SwitchAgent attempted and
+    transferred — it is not a list of what the console currently holds, which SwitchAgent cannot read.
+  </p>
+  <div class="detail-counters">
+    <span class="detail-counter">Attempts: <strong>{{ view.summary.total }}</strong></span>
+    <span class="detail-counter">Transfer verified: <strong>{{ view.summary.transport_verified }}</strong></span>
+    <span class="detail-counter">Transfer unconfirmed: <strong>{{ view.summary.transport_unverified }}</strong></span>
+    <span class="detail-counter">Confirmed by you — worked: <strong>{{ view.summary.console_confirmed_success }}</strong></span>
+    <span class="detail-counter">Confirmed by you — failed: <strong>{{ view.summary.console_confirmed_failed }}</strong></span>
+    <span class="detail-counter">Failed: <strong>{{ view.summary.failed }}</strong></span>
+    <span class="detail-counter">Interrupted: <strong>{{ view.summary.interrupted }}</strong></span>
+    <span class="detail-counter">Destination conflicts: <strong>{{ view.summary.destination_conflict }}</strong></span>
+  </div>
+
+  {% if not view.entries %}
+  <p class="empty-state">SwitchAgent has never attempted a transfer to this Switch.</p>
+  {% else %}
+
+  <h4>Game families</h4>
+  <ul class="plain-list" id="device-activity-families">
+    {% for f in view.families %}
+    <li>
+      <a href="/games/{{ f.base_title_id }}"><strong>{{ f.name }}</strong></a>
+      <span class="card-meta">
+        <code>{{ f.base_title_id }}</code> · {{ f.summary.total }} attempt(s) · last {{ f.last_activity_at }}
+      </span>
+    </li>
+    {% endfor %}
+  </ul>
+
+  <h4>Batches</h4>
+  <ul class="plain-list" id="device-activity-batches">
+    {% for b in view.batches %}
+    <li class="batch-group" data-batch-id="{{ b.batch_id if b.batch_id is not none else '' }}">
+      <div class="batch-header">
+        <span class="batch-title">
+          {% if b.batch_id is not none %}Batch #{{ b.batch_id }}{% else %}Single transfer{% endif %}
+        </span>
+        <span class="batch-progress">{{ b.entries|length }} item(s) · {{ b.created_at }}</span>
+      </div>
+      <ul class="plain-list activity-list">
+        {% for e in b.entries %}
+        <li class="activity-row activity-{{ e.kind|lower }}">
+          <div class="activity-claim">{{ e.label }}</div>
+          <div class="card-meta">
+            {{ e.display_name }}
+            {% if e.family_base_title_id %} · <a href="/games/{{ e.family_base_title_id }}"><code>{{ e.title_id }}</code></a>
+            {% else %} · <code>{{ e.title_id or "—" }}</code>{% endif %}
+            {% if e.target_storage %} · {{ e.target_storage }}{% endif %} · {{ e.created_at }}
+          </div>
+          <div class="card-meta">
+            Transport outcome: <strong>{{ e.outcome.replace("_", " ") }}</strong> ·
+            Console confirmation:
+            {% if e.user_verified_outcome == "SUCCESS" %}<strong>confirmed successful by you</strong>
+            {% elif e.user_verified_outcome == "FAILED" %}<strong>confirmed failed by you</strong>
+            {% elif e.outcome == "DONE_UNVERIFIED" %}<strong>not confirmed</strong>
+            {# Only DONE_UNVERIFIED rows can ever be user-confirmed (see
+               services.set_history_verification). #}
+            {% else %}<strong>does not apply to this outcome</strong>{% endif %}
+          </div>
+          {% if e.error %}<div class="history-error">{{ e.error }}</div>{% endif %}
+        </li>
+        {% endfor %}
+      </ul>
+    </li>
+    {% endfor %}
+  </ul>
+  {% endif %}
+</section>
+{% endblock %}
+{% block scripts %}
+<script src="/static/device_detail.js"></script>
+{% endblock %}

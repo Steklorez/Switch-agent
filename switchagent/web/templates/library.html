@@ -1,0 +1,201 @@
+{% extends "base.html" %}
+{% block title %}Library — SwitchAgent{% endblock %}
+{% block styles %}<link rel="stylesheet" href="/static/card_motion.css?v=7">{% endblock %}
+
+{% macro card_status(e) %}
+<div class="card-status status-{{ e.status|lower }}">{{ e.status.replace("_", " ") }}</div>
+{% if e.confirmed_on_device %}<div class="card-status status-on-device">On Switch</div>{% endif %}
+{% if e.job %}<div class="card-meta">→ {{ e.job.target_device_label }}</div>{% endif %}
+{% endmacro %}
+
+{% macro destination_label(e) %}{% if e.content_type == "ATMOSPHERE_MOD" %}SD Card (merge){% else %}SD Card install{% endif %}{% endmacro %}
+
+{% macro game_card(e, family=None) %}
+<div class="card {{ 'recent-transfer' if e.recent_transfer_until }}" data-id="{{ e.id }}" data-recent-until="{{ e.recent_transfer_until or '' }}">
+  {% if family %}<a class="tile-art" href="/games/{{ family }}" aria-label="{{ e.name }} — details">
+  {% else %}<button type="button" class="tile-art card-body" data-detail-url="/api/library/{{ e.id }}" aria-label="{{ e.name }} — details">{% endif %}
+    <span class="cover-placeholder" aria-hidden="true">{{ e.name[:1] }}</span>
+    {% if family or e.base_title_id %}<img class="game-cover" data-cover-id="{{ family or e.base_title_id }}" alt="" hidden>{% endif %}
+  {% if family %}</a>{% else %}</button>{% endif %}
+  <label class="card-checkbox">
+    <input type="checkbox" class="select-box" value="{{ e.id }}" data-name="{{ e.name }}"
+           data-size="{{ e.size }}" data-destination="{{ destination_label(e) }}"
+           {% if family %}data-family="{{ family }}" data-role="base"{% endif %}
+           {{ "disabled" if not e.can_install }}>
+  </label>
+  <div class="card-body" data-detail-url="/api/library/{{ e.id }}">
+    <div class="card-name" title="{{ e.name }}">{{ e.name|game_name }}</div>
+    <div class="card-meta tile-meta"><span>{{ e.package_format or e.file_type }}</span><span>{{ e.size|filesize }}</span></div>
+    <div class="card-meta tile-meta"><span>Added</span><time datetime="{{ e.first_seen_at }}">{{ e.first_seen_at[:16]|replace('T', ' ') }}</time></div>
+    {{ card_status(e) }}
+  </div>
+</div>
+{% endmacro %}
+
+{% macro variant_row(e, label, family=None) %}
+<div class="variant-row {{ 'recent-transfer' if e.recent_transfer_until }}" data-recent-until="{{ e.recent_transfer_until or '' }}">
+  <input type="checkbox" class="select-box" value="{{ e.id }}" data-name="{{ e.name }}"
+         data-size="{{ e.size }}" data-destination="{{ destination_label(e) }}"
+         {% if family %}data-family="{{ family }}"{% endif %}
+         {{ "disabled" if not e.can_install }}>
+  <div class="variant-body card-body" data-detail-url="/api/library/{{ e.id }}">
+    <span class="variant-label">{{ label }} — {{ e.name }}</span>
+    <span class="card-meta">{{ e.size|filesize }}</span>
+    <span class="card-status status-{{ e.status|lower }}">{{ e.status.replace("_", " ") }}</span>
+  </div>
+</div>
+{% endmacro %}
+
+{% block content %}
+{% if library_onboarding %}
+<div class="onboarding-banner" id="onboarding-{{ library_onboarding.id }}">
+  <h3>{{ library_onboarding.heading }}</h3>
+  <p>{{ library_onboarding.body }}</p>
+  {% if library_onboarding.actions %}
+  <div class="onboarding-actions">
+    {% for action in library_onboarding.actions %}
+      {% if action.href == "#rescan" %}
+      <button type="button" class="btn btn-small rescan-trigger" data-scan-url="/api/scan" data-status-url="/api/scan/status">{{ action.label }}</button>
+      {% else %}
+      <a class="btn btn-small" href="{{ action.href }}">{{ action.label }}</a>
+      {% endif %}
+    {% endfor %}
+  </div>
+  {% endif %}
+</div>
+{% endif %}
+{% if show_installed_games_hint %}
+<a href="/settings#dbi-installed-games-hint" class="corner-hint" id="installed-games-hint">
+  Switch connected, but the "Installed games" list isn't available — click to enable it in DBI
+</a>
+{% endif %}
+<div class="library-toolbar">
+  <form method="get" action="/" class="toolbar-form">
+    <input type="search" name="search" placeholder="Search games..." value="{{ search }}" class="search-box">
+    <select name="kind" class="filter-select" onchange="this.form.submit()">
+      {% for key, label in [("games","Games"), ("updates","Updates"), ("dlc","DLC"), ("mods","Mods")] %}
+      <option value="{{ key }}" {{ "selected" if kind == key }}>{{ label }}</option>
+      {% endfor %}
+    </select>
+    <select name="format" class="filter-select" onchange="this.form.submit()">
+      <option value="">All formats</option>
+      {% for fmt in ["NSP","NSZ","XCI","XCZ"] %}
+      <option value="{{ fmt }}" {{ "selected" if format_filter == fmt }}>{{ fmt }}</option>
+      {% endfor %}
+    </select>
+    <select name="sort" class="filter-select" onchange="this.form.submit()">
+      {% for key, label in [("date_added","Recently added"), ("name","Name"), ("size","Size"),
+                             ("last_scanned","Last scanned"), ("date_modified","Date modified")] %}
+      <option value="{{ key }}" {{ "selected" if sort == key }}>{{ label }}</option>
+      {% endfor %}
+    </select>
+    {# W3-003: family-level filters, applied on top of the controls above.
+       Only meaningful for the grouped "Games" kind -- the flat Updates/DLC/
+       Mods kinds have no families to filter. #}
+    <select name="filter" class="filter-select" onchange="this.form.submit()">
+      {% for key, label in [("all","All"), ("base","Base Games"), ("updates","With updates"),
+                             ("dlc","With DLC"), ("mods","With mods"), ("duplicates","Duplicates"),
+                             ("needs_review","Errors / Needs review"),
+                             ("unverified_activity","Has unverified activity"),
+                             ("failed_activity","Has failed activity")] %}
+      <option value="{{ key }}" {{ "selected" if group_filter == key }}>{{ label }}</option>
+      {% endfor %}
+    </select>
+    {# W3-003 device-activity filter. Its meaning is narrow and stated on
+       screen, never implied: "SwitchAgent has ever recorded a transfer
+       attempt for this game targeting that Switch". It is NOT "installed
+       on" -- SwitchAgent cannot prove that in general. #}
+    <select name="device_activity" class="filter-select" id="device-activity-filter"
+            title="Shows games SwitchAgent has ever attempted a transfer for, targeting the selected Switch. This is a record of what SwitchAgent did — not proof the game is present on that console."
+            onchange="this.form.submit()">
+      <option value="">SwitchAgent activity on device: any</option>
+      {% for d in devices %}
+      <option value="{{ d.device_fingerprint }}" {{ "selected" if device_activity == d.device_fingerprint }}>
+        SwitchAgent activity on {{ d.display_name }}
+      </option>
+      {% endfor %}
+    </select>
+    <button type="submit" class="btn btn-secondary">Filter</button>
+  </form>
+  <button id="rescan-btn" class="btn btn-secondary rescan-trigger" data-scan-url="/api/scan" data-status-url="/api/scan/status">
+    Rescan
+  </button>
+</div>
+{% if device_activity %}
+<p class="settings-hint" id="device-activity-note">
+  Filtered to games SwitchAgent has ever attempted a transfer for, targeting the selected Switch.
+  This is SwitchAgent's own record of what it did — it is not proof that the game is present on that console.
+</p>
+{% endif %}
+<div id="scan-status" class="scan-status" hidden></div>
+<div id="cover-status" class="scan-status" role="status" aria-live="polite">
+  <span id="cover-status-text">Checking covers…</span>
+  <button id="cover-retry" class="btn btn-small" type="button" hidden>Retry covers</button>
+</div>
+
+{% if kind == "games" %}
+  {% if not view.games %}
+  <p class="empty-state">
+    No games found in the library yet. Drop files into the configured download
+    directory and press "Rescan".
+  </p>
+  {% endif %}
+  <div class="card-grid library-tiles">
+    {% for g in view.games %}
+    <div class="game-group">
+      {% if g.base %}
+        {{ game_card(g.base, family=g.base_title_id) }}
+      {% else %}
+      <div class="card card-no-base">
+        <div class="card-name" title="{{ g.name }}">{{ g.name }}</div>
+        <div class="card-meta">base game not found in library — {{ g.base_title_id }}</div>
+      </div>
+      {% endif %}
+      {% set extras_summary %}
+        <span class="extras-pill {{ 'extras-pill-empty' if not g.updates }}">{{ g.updates|length }} updates</span>
+        <span class="extras-pill {{ 'extras-pill-empty' if not g.dlc }}">{{ g.dlc|length }} DLC</span>
+        <span class="extras-pill {{ 'extras-pill-empty' if not g.mods }}">{{ g.mods|length }} mods</span>
+        {% if g.duplicates %}<span class="extras-pill">{{ g.duplicates|length }} copies</span>{% endif %}
+      {% endset %}
+      {% if g.updates or g.dlc or g.mods or g.duplicates %}
+      <details class="game-variants">
+        <summary>
+          {{ extras_summary }}
+        </summary>
+        <div class="variants-overlay">
+        <div class="variants-scroll">
+        {% for u in g.updates %}{{ variant_row(u, "Update", family=g.base_title_id) }}{% endfor %}
+        {% for d in g.dlc %}{{ variant_row(d, "DLC", family=g.base_title_id) }}{% endfor %}
+        {% for m in g.mods %}{{ variant_row(m, "Mod", family=g.base_title_id) }}{% endfor %}
+        {% for dup in g.duplicates %}{{ variant_row(dup, "Other copy", family=g.base_title_id) }}{% endfor %}
+        </div>
+        {% if g.has_detail_page %}<a class="game-details-link" href="/games/{{ g.base_title_id }}">Game details →</a>{% endif %}
+        </div>
+      </details>
+      {% else %}
+      <div class="extras-empty-row">{{ extras_summary }}</div>
+      {% endif %}
+      {% if g.has_detail_page %}
+      <a class="game-details-link" href="/games/{{ g.base_title_id }}">Game details →</a>
+      {% endif %}
+    </div>
+    {% endfor %}
+  </div>
+{% else %}
+  {% if not view.entries %}
+  <p class="empty-state">Nothing here yet.</p>
+  {% endif %}
+  <div class="card-grid library-tiles">
+    {% for e in view.entries %}{{ game_card(e) }}{% endfor %}
+  </div>
+{% endif %}
+
+{% include "_install_selection.html" %}
+{% endblock %}
+{% block scripts %}
+<script src="/static/library.js?v=2"></script>
+<script src="/static/covers.js?v=3"></script>
+<script src="/static/library_activity.js?v=3"></script>
+<script src="/static/card_motion.js?v=3"></script>
+<script src="/static/library_live.js"></script>
+{% endblock %}

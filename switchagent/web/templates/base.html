@@ -1,0 +1,42 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1">
+<title>{% block title %}SwitchAgent{% endblock %}</title>
+<link rel="stylesheet" href="/static/style.css">
+{% block styles %}{% endblock %}
+<link rel="stylesheet" href="/static/showroom.css?v=6">
+</head>
+<body>
+<header class="topbar">
+  <div class="topbar-title">SwitchAgent <span class="build-version">v{{ app_version }}</span></div>
+  <div id="device-pill" class="device-pill" data-poll="/api/devices">…</div>
+</header>
+
+<nav class="main-nav">
+  <a href="/" class="{{ 'active' if active_page == 'library' }}">
+    <span class="nav-icon">🎮</span><span class="nav-label">Library</span>
+  </a>
+  <a href="/queue" class="{{ 'active' if active_page == 'queue' }}">
+    <span class="nav-icon">⏳</span><span class="nav-label">Queue</span>
+  </a>
+  <a href="/history" class="{{ 'active' if active_page == 'history' }}">
+    <span class="nav-icon">🕘</span><span class="nav-label">History</span>
+  </a>
+  <a href="/devices" class="{{ 'active' if active_page == 'devices' }}">
+    <span class="nav-icon">🔌</span><span class="nav-label">Devices</span>
+  </a>
+  <a href="/settings" class="{{ 'active' if active_page == 'settings' }}">
+    <span class="nav-icon">⚙</span><span class="nav-label">Settings</span>
+  </a>
+</nav>
+
+<main class="content">
+{% block content %}{% endblock %}
+</main>
+
+<script src="/static/app.js"></script>
+{% block scripts %}{% endblock %}
+</body>
+</html>

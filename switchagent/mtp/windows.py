@@ -1,0 +1,814 @@
+"""Real Windows MTP backend -- implements MtpBackend against an actual
+Nintendo Switch running DBI's MTP Responder, via pywin32's Shell.Application
++ IFileOperation.
+
+Everything here is the direct, production translation of what Stage 5A /
+5A.1 / 5B's hands-on experiments established on real hardware (see
+docs/STAGE5A-MTP-RESEARCH.md, docs/STAGE5B-REAL-MTP.md):
+
+  - device_id = FolderItem.Path (stable across reconnect, confirmed on two
+    distinct physical consoles -- see docs/STAGE5A-MTP-RESEARCH.md).
+  - Folder.CopyHere() does not reliably complete for this MTP responder
+    (tested: queued without error, file never appeared within 60s).
+  - SHFileOperation() cannot resolve a WPD virtual path at all
+    (ERROR_BAD_PATHNAME) -- string-based path resolution does not work for
+    this namespace, in any API that uses it.
+  - IFileOperation.CopyItem() DOES work, but only when the destination
+    IShellItem is built from the PIDL of an already-live Shell object
+    (SHGetIDListFromObject -> SHCreateItemFromIDList) -- never from
+    re-parsing a path string (SHCreateItemFromParsingName on a WPD path
+    fails with E_INVALIDARG, confirmed).
+  - PerformOperations() returning is NOT completion: in the successful
+    smoke test, the call returned in ~0.5s but the file only became
+    observable ~2.5s later. This backend never reports COMPLETED without a
+    separate post-transfer poll confirming the destination file exists and
+    its size has stabilized at the expected value.
+  - SD_INSTALL (DBI's virtual "install" node) does NOT behave like a real
+    filesystem: a transfer later physically confirmed (on the console's own
+    screen) to have installed correctly reported System.Size == 0 for its
+    entire observable lifetime (see docs/STAGE5B-REAL-MTP.md, "Install
+    smoke-test"). Using size-stabilization as a pass/fail signal there, the
+    same way it correctly works for SD_CARD, produced a proven false
+    negative. send_file() now branches on SIZE_VERIFIABLE_STORAGES: real
+    filesystem-like storages keep the size-based
+    verify_transfer_completion() check; install-like storages use the
+    presence-only verify_install_transport() and can return
+    TransferStatus.UNVERIFIED -- "transport accepted, DBI-side result
+    unprovable" -- which is never treated as COMPLETED and never treated as
+    FAILED by callers.
+
+One addition was made to switchagent/mtp/base.py: TransferStatus gained an
+UNVERIFIED member (see that module's docstring) for exactly this "cannot
+prove either way" case. Nothing else there changed -- this class still
+implements the ABC's 9 methods exactly as declared.
+"""
+
+from __future__ import annotations
+
+import csv
+import hashlib
+import io
+import logging
+import re
+import time
+import uuid
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Callable, Optional
+
+from .. import title_id as title_id_mod
+from .base import DeviceInfo, MtpBackend, StorageInfo, TransferResult, TransferStatus
+from .errors import (
+    DestinationNotFoundError,
+    DeviceDisconnectedError,
+    DeviceNotFoundError,
+    FileAlreadyExistsError,
+    InvalidOperationError,
+    StorageNotFoundError,
+    TransferFailedError,
+)
+
+log = logging.getLogger("switchagent.mtp.windows")
+
+THIS_PC_NAMESPACE = 0x11
+
+# Copy flags for IFileOperation.SetOperationFlags -- silent, no UI, no
+# confirmation dialogs. Same spirit as the flags already proven in
+# Projects/Switch/sync-to-switch.ps1's CopyHere() calls (docs/RESEARCH-STAGE1.md),
+# translated to the FOF_* constants IFileOperation also accepts.
+_FOF_SILENT = 4
+_FOF_NOCONFIRMATION = 16
+_FOF_NOERRORUI = 1024
+COPY_OPERATION_FLAGS = _FOF_SILENT | _FOF_NOCONFIRMATION | _FOF_NOERRORUI
+
+DEFAULT_VERIFY_TIMEOUT_SECONDS = 60.0
+DEFAULT_VERIFY_POLL_INTERVAL_SECONDS = 2.0
+DEFAULT_STABLE_READS_REQUIRED = 3
+
+# SD_INSTALL is a virtual DBI node, not a real filesystem -- proven on real
+# hardware (docs/STAGE5B-REAL-MTP.md, "Install smoke-test") that
+# System.Size is NOT a meaningful completion signal there: a transfer later
+# physically confirmed (on the console's own screen) to have installed
+# correctly reported System.Size == 0 for its entire observable lifetime.
+# So install verification only confirms the destination NAME appeared
+# (transport accepted), never compares size -- see verify_install_transport.
+DEFAULT_INSTALL_VERIFY_TIMEOUT_SECONDS = 2.0
+DEFAULT_INSTALL_PRESENCE_READS_REQUIRED = 2
+
+# Logical storage names (see logical_storage_name() below) for which
+# destination size IS a meaningful, verifiable signal -- real filesystem-like
+# storages. Anything not in this set is treated as install-like: verified by
+# presence only, never by size (see send_file()'s branch and
+# verify_install_transport()). Deliberately an allow-list, not a deny-list
+# for "SD_INSTALL" alone -- NAND_INSTALL is DBI's other virtual install
+# target and shares the same unverifiable-size characteristic, even though
+# it has never been physically tested (no NAND writes performed by this
+# project -- see docs/STATE.md safety rules); allow-listing only the
+# storages actually proven filesystem-like is the conservative default.
+SIZE_VERIFIABLE_STORAGES = frozenset({"SD_CARD", "NAND_USER", "NAND_SYSTEM", "SAVES", "ALBUM"})
+
+_SERIAL_SEGMENT_RE = re.compile(r"(usb#vid_[0-9a-f]{4}&pid_[0-9a-f]{4}#)([^#]+)(#\{)", re.IGNORECASE)
+
+
+def mask_device_id(device_id: Optional[str]) -> str:
+    """Redacts the serial-like segment of a device_id for log messages --
+    same technique as tools/mtp_probe.py's mask_serial(), duplicated here
+    (not imported) so switchagent/ stays independent of tools/, which is a
+    diagnostic-only area outside the package."""
+    if not device_id:
+        return repr(device_id)
+    return _SERIAL_SEGMENT_RE.sub(lambda m: f"{m.group(1)}[REDACTED]{m.group(3)}", device_id)
+
+
+def device_fingerprint(device_id: str) -> str:
+    """Safe-to-log stand-in for a device_id -- sha256[:16], same as
+    tools/mtp_probe.py's device_fingerprint()."""
+    return hashlib.sha256(device_id.encode("utf-8", "surrogateescape")).hexdigest()[:16]
+
+
+# ---------------------------------------------------------------------------
+# Pure logic: storage name resolution -- no COM involved, fully unit-testable
+# ---------------------------------------------------------------------------
+
+# Ordered most-specific-first: "SD Card install" must be checked before the
+# plain "SD Card" pattern, or every install storage would incorrectly match
+# SD_CARD first (confirmed real display name from Stage 5A/5A.1: "5: SD Card
+# install" -- but never hardcode the "5:" prefix, only the name text).
+_STORAGE_NAME_PATTERNS: tuple[tuple[str, tuple[str, ...]], ...] = (
+    ("SD_INSTALL", ("sd card install", "sd install")),
+    ("SD_CARD", ("sd card",)),
+    ("NAND_INSTALL", ("nand install",)),
+    ("NAND_USER", ("nand user",)),
+    ("NAND_SYSTEM", ("nand system",)),
+    ("SAVES", ("saves",)),
+    ("ALBUM", ("album",)),
+    ("INSTALLED_GAMES", ("installed games",)),
+)
+
+
+def parse_installed_applications_csv(text: str) -> set[str]:
+    """Parses DBI's own "InstalledApplications.csv" (found inside its
+    "Installed games" MTP node, real-hardware confirmed 2026-09-15) --
+    one row per installed content unit (base game OR one specific DLC; an
+    installed UPDATE bumps its base row's own version column instead of
+    adding a row) as "0x<TITLE_ID>,<version>,\"<display name>\"". Returns
+    the set of recovered BASE title ids (title_id.classify_title_variant)
+    -- the exact same base_title_id every library family is already
+    grouped and displayed under (services.family_base_title_id), so a
+    caller only needs one set-membership check per family, never a name
+    comparison. Malformed/unparseable rows are skipped, never raised on --
+    a partial read is better than none."""
+    base_ids: set[str] = set()
+    for row in csv.reader(io.StringIO(text)):
+        if not row:
+            continue
+        candidate = row[0].strip()
+        if candidate.lower().startswith("0x"):
+            candidate = candidate[2:]
+        if title_id_mod.is_valid_title_id(candidate):
+            base_ids.add(title_id_mod.classify_title_variant(candidate.upper()).base_title_id)
+    return base_ids
+
+
+def logical_storage_name(display_name: str) -> str:
+    """Maps a DBI-displayed storage name (e.g. "1: SD Card", "5: SD Card
+    install") to our logical alias (e.g. "SD_CARD", "SD_INSTALL"). Matches
+    by content, never by the leading "N:" index -- that index is not stable
+    across DBI versions/configs (confirmed: one real console had 7 storage
+    nodes, another had 8, with different numbering -- see
+    docs/STAGE5A-MTP-RESEARCH.md). Falls back to a generated identifier for
+    anything unrecognized, so list_storages() never silently drops a node."""
+    lowered = display_name.lower()
+    for logical_name, patterns in _STORAGE_NAME_PATTERNS:
+        if any(p in lowered for p in patterns):
+            return logical_name
+    fallback = re.sub(r"^\d+:\s*", "", display_name).strip().upper().replace(" ", "_")
+    return fallback or "UNKNOWN"
+
+
+def resolve_storage_name(display_name: str, overrides: Optional[dict[str, str]] = None) -> str:
+    """UI-007: the manual-override-aware counterpart to
+    logical_storage_name() above -- an explicit user mapping (see
+    device_storage_mappings in db.py, and Devices page's manual override
+    UI) always wins over the automatic pattern match, for the rare case
+    where DBI reports a raw display name none of the patterns above
+    recognize (logical_storage_name()'s own "generated identifier"
+    fallback). Exact raw display-name match only -- never fuzzy, never
+    merges with the pattern list. Falls back to logical_storage_name()
+    unchanged when no override applies (overrides=None/empty, or this
+    specific display_name has no entry), so existing AUTO-only behavior is
+    completely unaffected until a user explicitly sets one."""
+    if overrides and display_name in overrides:
+        return overrides[display_name]
+    return logical_storage_name(display_name)
+
+
+def split_dest_path(dest_path: str) -> tuple[str, str]:
+    """('atmosphere/contents/ID/romfs/x.bin') -> ('atmosphere/contents/ID/romfs', 'x.bin')
+    ('game.nsp') -> ('', 'game.nsp')"""
+    if "/" not in dest_path:
+        return "", dest_path
+    parent, _, name = dest_path.rpartition("/")
+    return parent, name
+
+
+# ---------------------------------------------------------------------------
+# Pure-ish logic: post-transfer completion verification state machine.
+# COM interaction is fully injected via `poll_fn` so this is unit-testable
+# with a scripted sequence of fake readings -- no real device, no real
+# waiting required in tests.
+# ---------------------------------------------------------------------------
+
+@dataclass(frozen=True)
+class PollReading:
+    device_present: bool
+    file_exists: bool
+    size: Optional[int]
+
+
+def verify_transfer_completion(
+    poll_fn: Callable[[], PollReading],
+    *,
+    expected_size: int,
+    timeout_seconds: float = DEFAULT_VERIFY_TIMEOUT_SECONDS,
+    poll_interval_seconds: float = DEFAULT_VERIFY_POLL_INTERVAL_SECONDS,
+    stable_reads_required: int = DEFAULT_STABLE_READS_REQUIRED,
+    sleep_fn: Callable[[float], None] = time.sleep,
+    clock_fn: Callable[[], float] = time.monotonic,
+) -> tuple[TransferStatus, int, Optional[str]]:
+    """The honesty gate: PerformOperations() returning is never treated as
+    completion (confirmed on real hardware: the call returned in ~0.5s, the
+    file only became observable ~2.5s later -- see docs/STAGE5B-REAL-MTP.md).
+    This polls poll_fn() until the destination file is seen with a size that
+    matches expected_size and stays stable for `stable_reads_required`
+    consecutive reads, or until timeout/disconnect. Returns
+    (status, bytes_observed, error_message).
+
+    - Device disappears mid-poll -> DEVICE_DISCONNECTED (matches
+      queue_worker.py's existing INTERRUPTED mapping for this status).
+    - Times out having NEVER once observed the destination at all -> not
+      COMPLETED, but UNVERIFIED rather than FAILED. Seen on real hardware
+      with small SD_CARD mod files that copied successfully within seconds
+      on the console but were never once seen by poll_fn() within the
+      full timeout window, immediately after ensure_directory() had just
+      created their parent folder -- consistent with a just-created MTP
+      folder listing not yet reflecting a file added moments later. The
+      transport call itself completed without raising, so this is the
+      same honest "cannot prove it, but not reporting a failure that
+      likely didn't happen" call SD_INSTALL already makes (see
+      verify_install_transport) -- never claims COMPLETED, just refuses to
+      claim FAILED for something never observed even once.
+    - Times out HAVING observed the file (just never at a stable, matching
+      size) -> FAILED with a clear "verification timed out" message -- we
+      saw something concrete and it didn't add up, so this stays a real
+      failure signal, not a shrug.
+    - Stabilizes at a size that does NOT match expected_size -> FAILED,
+      never COMPLETED -- this backend does not use a remote SHA-256 check
+      (real MTP gives no cheap way to compute one), only size comparison,
+      exactly as scoped."""
+    deadline = clock_fn() + timeout_seconds
+    last_size: Optional[int] = None
+    stable_count = 0
+    last_observed_size = 0
+    ever_observed = False
+
+    while clock_fn() < deadline:
+        sleep_fn(poll_interval_seconds)
+        reading = poll_fn()
+
+        if not reading.device_present:
+            return TransferStatus.DEVICE_DISCONNECTED, last_observed_size, "device disconnected during verification"
+
+        if not reading.file_exists:
+            stable_count = 0
+            last_size = None
+            continue
+
+        ever_observed = True
+
+        if reading.size is not None:
+            last_observed_size = reading.size
+
+        if reading.size is None:
+            stable_count = 0
+        elif reading.size == last_size:
+            stable_count += 1
+        else:
+            # First observation of a (possibly new) value counts as the
+            # first of the run, not zero -- otherwise stable_reads_required
+            # consecutive matching reads would actually need N+1 reads to
+            # trigger, which is not what the parameter name promises.
+            stable_count = 1
+        last_size = reading.size
+
+        if stable_count >= stable_reads_required:
+            if last_size == expected_size:
+                return TransferStatus.COMPLETED, last_size, None
+            return (
+                TransferStatus.FAILED,
+                last_observed_size,
+                f"size stabilized at {last_size}, expected {expected_size} -- not reporting success",
+            )
+
+    if not ever_observed:
+        return (
+            TransferStatus.UNVERIFIED,
+            last_observed_size,
+            f"transport call completed without error, but the destination was never observed within "
+            f"{timeout_seconds}s -- likely an MTP/Shell folder-listing lag on this device, not a failed "
+            "transfer; installation result cannot be verified via MTP on this device",
+        )
+
+    return (
+        TransferStatus.FAILED,
+        last_observed_size,
+        f"verification timed out after {timeout_seconds}s without a stable, matching size",
+    )
+
+
+def verify_install_transport(
+    poll_fn: Callable[[], PollReading],
+    *,
+    timeout_seconds: float = DEFAULT_INSTALL_VERIFY_TIMEOUT_SECONDS,
+    poll_interval_seconds: float = 0.25,
+    presence_reads_required: int = DEFAULT_INSTALL_PRESENCE_READS_REQUIRED,
+    sleep_fn: Callable[[float], None] = time.sleep,
+    clock_fn: Callable[[], float] = time.monotonic,
+) -> tuple[TransferStatus, Optional[int], Optional[str]]:
+    """The SD_INSTALL counterpart to verify_transfer_completion() -- for a
+    virtual install node, NOT a real filesystem. Deliberately does not
+    compare size against anything: real hardware evidence
+    (docs/STAGE5B-REAL-MTP.md) shows a genuinely, physically successful
+    install can report System.Size == 0 throughout, so treating size as a
+    pass/fail signal here would be a proven false negative, not caution.
+
+    This confirms the destination NAME appears and stays present for
+    `presence_reads_required` consecutive polls (guards against a transient
+    Explorer/shell cache blip, nothing more) and returns UNVERIFIED, never
+    COMPLETED -- this function has no way to confirm DBI actually finished
+    installing, only that the device accepted something under that name.
+
+    A name that never appears at all before timeout is now ALSO reported as
+    UNVERIFIED, not FAILED (real-hardware finding, 2026-09-12, reproduced on
+    two separate real installs with near-identical timing): this function
+    is only ever reached after `PerformOperations()` has already returned
+    without an aborted-operations signal (see send_file()'s caller) -- i.e.
+    the transport call itself already succeeded. On real hardware, that
+    blocking call's own duration (source.stat().st_size ~570 MB, elapsed
+    ~46s total including this function's own polling) was close enough to
+    DBI's own self-reported install time (15s, confirmed on the console
+    screen both times) that the virtual placeholder this function polls for
+    may already have been created AND removed by DBI entirely WITHIN the
+    `PerformOperations()` call, before this function's very first poll ever
+    runs -- meaning no timeout, however long, and no poll interval, however
+    short, can guarantee catching it. Given that, "the name was never
+    observed" no longer safely proves "the transport was not accepted" (the
+    same class of mistake the SD_INSTALL semantics fix already corrected
+    once for `System.Size == 0` -- this is that same lesson applied to
+    presence-timeout too, not a new, separate concern). The only way this
+    function's caller (`send_file()`) can still report `FAILED` for an
+    install-like storage is a genuine COM-level abort/exception from
+    `PerformOperations()` itself, handled entirely upstream of this
+    function -- never from this function's own polling coming up empty.
+
+    Device disappearing mid-poll -> DEVICE_DISCONNECTED, same mapping
+    queue_worker.py already understands (-> INTERRUPTED) -- this is a
+    distinct, still-legitimate signal (the device itself vanished, not
+    merely "the name wasn't seen"), unaffected by the change above."""
+    deadline = clock_fn() + timeout_seconds
+    presence_count = 0
+    last_observed_size: Optional[int] = None
+    observed_presence_at_least_once = False
+
+    while clock_fn() < deadline:
+        sleep_fn(poll_interval_seconds)
+        reading = poll_fn()
+
+        if not reading.device_present:
+            return TransferStatus.DEVICE_DISCONNECTED, last_observed_size, "device disconnected during verification"
+
+        if not reading.file_exists:
+            presence_count = 0
+            continue
+
+        observed_presence_at_least_once = True
+        last_observed_size = reading.size
+        presence_count += 1
+        if presence_count >= presence_reads_required:
+            return (
+                TransferStatus.UNVERIFIED,
+                last_observed_size,
+                "device accepted the transfer (destination name present under SD Card install); "
+                "DBI-side installation result cannot be verified via MTP on this device -- "
+                "System.Size is not a meaningful signal for this virtual node, see "
+                "docs/STAGE5B-REAL-MTP.md",
+            )
+
+    detail = (
+        "destination observed but not stably present" if observed_presence_at_least_once
+        else "destination name never observed"
+    )
+    return (
+        TransferStatus.UNVERIFIED,
+        last_observed_size,
+        f"transport call completed without error, but {detail} under SD Card install within "
+        f"{timeout_seconds}s -- DBI may already have received and installed it before this check "
+        "could observe the virtual placeholder (see docs/STATE.md, 2026-09-12 real-hardware finding); "
+        "installation result cannot be verified via MTP on this device",
+    )
+
+
+# ---------------------------------------------------------------------------
+# COM-touching backend
+# ---------------------------------------------------------------------------
+
+class RealMtpBackend(MtpBackend):
+    """One instance = one physical device, identified by `device_id`
+    (a FolderItem.Path string -- see mtp/base.py's module docstring on
+    device identity, and docs/STAGE5A-MTP-RESEARCH.md for why .Path is the
+    chosen source of truth). Never auto-selects "the first" device, never
+    matches by display name alone."""
+
+    def __init__(self, device_id: str):
+        if not device_id:
+            raise ValueError("device_id is required -- RealMtpBackend never guesses which Switch to use")
+        self._device_id = device_id
+        self._connected = False
+        self._device_item = None  # live win32com FolderItem, set by connect()
+        self._device_folder = None  # live Folder (device_item.GetFolder)
+        self._transfers: dict[str, TransferResult] = {}
+        self._storage_overrides: dict[str, str] = {}  # UI-007, see set_storage_overrides()
+
+    def set_storage_overrides(self, overrides: dict[str, str]) -> None:
+        """Replaces the whole override set each call (not merged), so a
+        cleared mapping (its device_storage_mappings row deleted) is
+        correctly forgotten on the very next refresh -- never queries
+        SQLite itself, see MtpBackend.set_storage_overrides()'s own
+        docstring."""
+        self._storage_overrides = dict(overrides)
+
+    # -- internal: live COM access, isolated so the rest of the class reads cleanly --
+
+    @staticmethod
+    def _shell():
+        import win32com.client
+        return win32com.client.Dispatch("Shell.Application")
+
+    def _find_device_item(self):
+        this_pc = self._shell().NameSpace(THIS_PC_NAMESPACE)
+        candidates = [i for i in this_pc.Items() if i.IsFolder and not i.IsFileSystem]
+        return _match_device_by_id(candidates, self._device_id)
+
+    def _device_currently_present(self) -> bool:
+        return self._find_device_item() is not None
+
+    def _require_connected(self) -> None:
+        if not self.is_connected:
+            raise DeviceDisconnectedError(
+                f"device {mask_device_id(self._device_id)} is not connected -- call connect() first"
+            )
+
+    def _get_storage_item(self, storage: str):
+        self._require_connected()
+        for child in self._device_folder.Items():
+            if resolve_storage_name(child.Name, self._storage_overrides) == storage:
+                return child
+        raise StorageNotFoundError(f"storage {storage!r} not found on device {mask_device_id(self._device_id)}")
+
+    def _navigate(self, root_item, path: str, *, create_missing: bool):
+        """Walks `path` (posix-style, "" meaning the root itself) from
+        root_item, one segment at a time -- never a whole-tree operation,
+        matching the merge-dialog pitfall already documented in
+        docs/RESEARCH-STAGE1.md. create_missing=True calls NewFolder() for
+        segments that don't exist yet and confirms each one appeared before
+        descending further (mirrors the proven poll-after-NewFolder pattern
+        from the Stage 5B write experiments) -- never assumes success just
+        because NewFolder() didn't raise."""
+        current = root_item
+        if not path:
+            return current
+        for segment in path.split("/"):
+            if not segment:
+                continue
+            folder = current.GetFolder
+            child = next((i for i in folder.Items() if i.Name == segment), None)
+            if child is None:
+                if not create_missing:
+                    raise DestinationNotFoundError(
+                        f"'{segment}' does not exist under the requested path -- call ensure_directory() first"
+                    )
+                folder.NewFolder(segment)
+                child = self._poll_for_child(folder, segment)
+                if child is None:
+                    raise InvalidOperationError(
+                        f"NewFolder({segment!r}) did not raise, but the folder never became visible -- "
+                        "not reporting success"
+                    )
+            elif not child.IsFolder:
+                raise DestinationNotFoundError(f"'{segment}' exists but is a file, not a directory")
+            current = child
+        return current
+
+    @staticmethod
+    def _poll_for_child(folder, name: str, *, attempts: int = 10, interval: float = 0.5):
+        for _ in range(attempts):
+            match = next((i for i in folder.Items() if i.Name == name), None)
+            if match is not None:
+                return match
+            time.sleep(interval)
+        return None
+
+    @staticmethod
+    def _to_ishell_item(folder_item):
+        """The PIDL bridge, confirmed the only reliable way to get an
+        IShellItem for a WPD virtual object (docs/STAGE5B-REAL-MTP.md):
+        SHCreateItemFromParsingName() on the .Path STRING fails with
+        E_INVALIDARG for this namespace -- deliberately not used here."""
+        import win32com.shell.shell as shell_api
+
+        pidl = shell_api.SHGetIDListFromObject(folder_item)
+        return shell_api.SHCreateItemFromIDList(pidl, shell_api.IID_IShellItem)
+
+    # -- MtpBackend: connection lifecycle -----------------------------------
+
+    def connect(self) -> DeviceInfo:
+        item = self._find_device_item()
+        if item is None:
+            raise DeviceNotFoundError(f"device {mask_device_id(self._device_id)} not currently reachable")
+        self._device_item = item
+        self._device_folder = item.GetFolder
+        self._connected = True
+        log.info("connected device=%s name=%r", device_fingerprint(self._device_id), item.Name)
+        return DeviceInfo(device_id=self._device_id, name=item.Name, connected=True)
+
+    def disconnect(self) -> None:
+        # Release live references -- deliberately does NOT call
+        # pythoncom.CoUninitialize() here: that would tear down the COM
+        # apartment for the whole calling thread, which could break
+        # unrelated COM usage elsewhere in the same process/thread. Letting
+        # Python's normal refcounting release these specific COM objects is
+        # sufficient and safer.
+        self._device_item = None
+        self._device_folder = None
+        self._connected = False
+        log.info("disconnected device=%s", device_fingerprint(self._device_id))
+
+    @property
+    def is_connected(self) -> bool:
+        # A real, live presence check every time -- never a cached flag on
+        # its own (see docs/STAGE5B-REAL-MTP.md, is_connected()). Both must
+        # hold: we haven't explicitly disconnected, AND the device is
+        # actually still there right now.
+        return self._connected and self._device_currently_present()
+
+    # -- MtpBackend: storage --------------------------------------------------
+
+    def list_storages(self) -> list[StorageInfo]:
+        self._require_connected()
+        result = []
+        for child in self._device_folder.Items():
+            free = _extended_property_int(child, "System.FreeSpace")
+            total = _extended_property_int(child, "System.Capacity")
+            result.append(StorageInfo(
+                name=resolve_storage_name(child.Name, self._storage_overrides), writable=True,
+                free_bytes=free, total_bytes=total, raw_name=child.Name,
+            ))
+        return result
+
+    def get_storage(self, storage: str) -> StorageInfo:
+        item = self._get_storage_item(storage)
+        free = _extended_property_int(item, "System.FreeSpace")
+        total = _extended_property_int(item, "System.Capacity")
+        return StorageInfo(name=storage, writable=True, free_bytes=free, total_bytes=total, raw_name=item.Name)
+
+    # -- MtpBackend: paths ---------------------------------------------------
+
+    def exists(self, storage: str, path: str) -> bool:
+        storage_item = self._get_storage_item(storage)
+        parent_path, name = split_dest_path(path)
+        if not name:
+            return True  # storage root always "exists"
+        try:
+            parent = self._navigate(storage_item, parent_path, create_missing=False)
+        except DestinationNotFoundError:
+            return False
+        return any(i.Name == name for i in parent.GetFolder.Items())
+
+    def ensure_directory(self, storage: str, path: str) -> None:
+        storage_item = self._get_storage_item(storage)
+        self._navigate(storage_item, path, create_missing=True)
+        log.info("ensure_directory storage=%s path=%r -> confirmed", storage, path)
+
+    # -- MtpBackend: transfer -------------------------------------------------
+
+    def send_file(
+        self, storage: str, dest_path: str, source_path: Path, *, overwrite: bool = False,
+    ) -> TransferResult:
+        self._require_connected()  # re-verifies THIS device specifically, right before touching anything
+        storage_item = self._get_storage_item(storage)
+
+        if not source_path.is_file():
+            raise InvalidOperationError(f"source file does not exist: {source_path}")
+
+        parent_path, filename = split_dest_path(dest_path)
+        parent_item = self._navigate(storage_item, parent_path, create_missing=False)
+
+        if any(i.Name == filename for i in parent_item.GetFolder.Items()) and not overwrite:
+            raise FileAlreadyExistsError(f"'{dest_path}' already exists on '{storage}'")
+
+        expected_size = source_path.stat().st_size
+        operation_id = uuid.uuid4().hex[:12]
+        t0 = time.monotonic()
+        log.info(
+            "send_file start op=%s storage=%s dest=%r source=%r size=%d",
+            operation_id, storage, dest_path, source_path.name, expected_size,
+        )
+
+        try:
+            result = self._copy_via_ifileoperation(source_path, parent_item, filename)
+        except _ComError as exc:
+            raise TransferFailedError(f"IFileOperation failed for '{dest_path}': {exc}") from exc
+
+        if result is not None:  # aborted before/without a normal PerformOperations() completion
+            status, bytes_sent, error = result
+        elif storage in SIZE_VERIFIABLE_STORAGES:
+            status, bytes_sent, error = self._verify_after_copy(
+                parent_item, filename, expected_size=expected_size,
+            )
+        else:
+            # Install-like virtual node (SD_INSTALL, NAND_INSTALL) -- size is
+            # not a meaningful signal here (see module-level comment on
+            # SIZE_VERIFIABLE_STORAGES). Never reports COMPLETED; at best
+            # UNVERIFIED (transport accepted, DBI-side result unprovable).
+            status, bytes_sent, error = self._verify_after_install_copy(parent_item, filename)
+
+        elapsed = time.monotonic() - t0
+        log.info("send_file end op=%s status=%s elapsed=%.2fs error=%s", operation_id, status.value, elapsed, error)
+
+        transfer_result = TransferResult(
+            operation_id=operation_id, status=status, storage=storage, dest_path=dest_path,
+            bytes_sent=bytes_sent, bytes_total=expected_size, error=error,
+        )
+        self._transfers[operation_id] = transfer_result
+        return transfer_result
+
+    def _copy_via_ifileoperation(self, source_path: Path, dest_folder_item, filename: str):
+        """Returns None on a normal (exception-free) PerformOperations()
+        call -- completion is NEVER inferred from that alone (see
+        verify_transfer_completion's docstring); the caller always polls
+        afterwards. Returns (status, bytes, error) directly only for the
+        case IFileOperation itself reports the operation was aborted.
+
+        Raises _ComError (wrapping the real pywintypes.com_error) for any
+        COM-level failure -- wrapped here, at the one place pywintypes is
+        actually needed, so the rest of this module doesn't have to import
+        it just to catch failures."""
+        import pythoncom
+        import pywintypes
+        import win32com.shell.shell as shell_api
+
+        try:
+            source_item = shell_api.SHCreateItemFromParsingName(str(source_path), None, shell_api.IID_IShellItem)
+            dest_item = self._to_ishell_item(dest_folder_item)
+
+            op = pythoncom.CoCreateInstance(
+                shell_api.CLSID_FileOperation, None, pythoncom.CLSCTX_ALL, shell_api.IID_IFileOperation,
+            )
+            op.SetOperationFlags(COPY_OPERATION_FLAGS)
+            op.CopyItem(source_item, dest_item, filename, None)
+            op.PerformOperations()
+            aborted = op.GetAnyOperationsAborted()
+        except pywintypes.com_error as exc:
+            raise _ComError(str(exc)) from exc
+
+        if aborted:
+            return TransferStatus.FAILED, 0, "IFileOperation reported the operation was aborted"
+        return None
+
+    def _verify_after_copy(self, parent_item, filename: str, *, expected_size: int):
+        def poll_fn() -> PollReading:
+            if not self.is_connected:
+                return PollReading(device_present=False, file_exists=False, size=None)
+            match = next((i for i in parent_item.GetFolder.Items() if i.Name == filename), None)
+            if match is None:
+                return PollReading(device_present=True, file_exists=False, size=None)
+            return PollReading(device_present=True, file_exists=True, size=_extended_property_int(match, "System.Size"))
+
+        return verify_transfer_completion(poll_fn, expected_size=expected_size)
+
+    def _verify_after_install_copy(self, parent_item, filename: str):
+        """SD_INSTALL/NAND_INSTALL counterpart to _verify_after_copy() --
+        presence-only, never size-based (see verify_install_transport())."""
+        def poll_fn() -> PollReading:
+            if not self.is_connected:
+                return PollReading(device_present=False, file_exists=False, size=None)
+            match = next((i for i in parent_item.GetFolder.Items() if i.Name == filename), None)
+            if match is None:
+                return PollReading(device_present=True, file_exists=False, size=None)
+            return PollReading(device_present=True, file_exists=True, size=_extended_property_int(match, "System.Size"))
+
+        return verify_install_transport(poll_fn)
+
+    def get_transfer_status(self, operation_id: str) -> TransferResult:
+        result = self._transfers.get(operation_id)
+        if result is None:
+            raise InvalidOperationError(f"unknown operation_id: {operation_id!r}")
+        return result
+
+    # -- installed games (see MtpBackend.list_installed_title_ids()'s own
+    # docstring for the contract) --------------------------------------------
+
+    def list_installed_title_ids(self) -> Optional[set[str]]:
+        """Real-hardware finding (2026-09-15, DBI's "Installed Games"
+        setting enabled on-console): the INSTALLED_GAMES storage node's
+        root also contains a file, "InstalledApplications.csv", that DBI
+        itself writes -- one row per installed content unit (base game or
+        one specific DLC; an installed UPDATE just bumps its base row's
+        own version column, never a separate row) as
+        "0x<TITLE_ID>,<version>,\"<display name>\"". This is exact TITLE_ID
+        data straight from the console, not a display-name guess -- far
+        more precise than matching by name, so parse_installed_
+        applications_csv() is what actually does the matching here."""
+        try:
+            item = self._get_storage_item("INSTALLED_GAMES")
+        except StorageNotFoundError:
+            return None
+        csv_item = next(
+            (c for c in item.GetFolder.Items()
+             if not c.IsFolder and c.Name.lower().startswith("installedapplications")),
+            None,
+        )
+        if csv_item is None:
+            return None
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            local_path = Path(tmp_dir) / csv_item.Name
+            self._download_file(csv_item, Path(tmp_dir))
+            text = local_path.read_text(encoding="utf-8-sig", errors="replace")
+        return parse_installed_applications_csv(text)
+
+    def _download_file(self, source_item, dest_dir: Path) -> None:
+        """Copies a real MTP file down to a local directory -- the
+        download-direction mirror of _copy_via_ifileoperation()'s upload:
+        same IFileOperation + PIDL bridge (_to_ishell_item) for the device
+        side; the local side is the DESTINATION here, a real filesystem
+        path SHCreateItemFromParsingName already handles directly (that
+        call only fails for a WPD/device path, see _to_ishell_item's own
+        docstring)."""
+        import pythoncom
+        import win32com.shell.shell as shell_api
+
+        dest_item = shell_api.SHCreateItemFromParsingName(str(dest_dir), None, shell_api.IID_IShellItem)
+        op = pythoncom.CoCreateInstance(
+            shell_api.CLSID_FileOperation, None, pythoncom.CLSCTX_ALL, shell_api.IID_IFileOperation,
+        )
+        op.SetOperationFlags(COPY_OPERATION_FLAGS)
+        op.CopyItem(self._to_ishell_item(source_item), dest_item, source_item.Name, None)
+        op.PerformOperations()
+
+
+# ---------------------------------------------------------------------------
+# small internal helpers
+# ---------------------------------------------------------------------------
+
+class _ComError(Exception):
+    """Wraps pywintypes.com_error so the rest of this module (and its
+    tests) doesn't need pywin32 imported just to catch COM failures."""
+
+
+def enumerate_devices() -> list[DeviceInfo]:
+    """Live, connection-free enumeration of every MTP device currently
+    visible under This PC -- the same Shell.Application walk
+    RealMtpBackend._find_device_item() does internally, exposed as a
+    standalone helper for callers that just need to LIST what's there
+    (CLI's mtp-test device picker, the Web UI's device list -- see
+    switchagent/web/) without constructing a backend instance per device.
+    Never caches and never touches switchagent/db.py's `devices` table --
+    callers wanting "was this seen before" history do that themselves
+    (see db.upsert_device_seen)."""
+    import win32com.client
+    shell = win32com.client.Dispatch("Shell.Application")
+    this_pc = shell.NameSpace(THIS_PC_NAMESPACE)
+    items = [i for i in this_pc.Items() if i.IsFolder and not i.IsFileSystem]
+    return [DeviceInfo(device_id=i.Path, name=i.Name, connected=True) for i in items]
+
+
+def _match_device_by_id(candidates, device_id: str):
+    """Pure matching logic over a list of duck-typed candidates (anything
+    with .Path) -- separated from live enumeration so it's unit-testable
+    with plain fake objects, no COM required."""
+    for item in candidates:
+        if item.Path == device_id:
+            return item
+    return None
+
+
+def _extended_property_int(item, key: str) -> Optional[int]:
+    try:
+        val = item.ExtendedProperty(key)
+    except Exception:  # noqa: BLE001 -- property access failing just means "unknown", not fatal
+        return None
+    if isinstance(val, int):
+        return val
+    return None

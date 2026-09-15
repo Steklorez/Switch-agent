@@ -1,0 +1,33 @@
+{% extends "base.html" %}
+{% block title %}Something went wrong — SwitchAgent{% endblock %}
+{% block content %}
+<div class="error-page">
+  <h2>Something went wrong</h2>
+  <p>
+    SwitchAgent hit an unexpected error handling that request. Nothing was sent to your Switch because of
+    this — SwitchAgent only ever transfers content to DBI; DBI performs installation on the console, and
+    this error happened entirely on SwitchAgent's own side.
+  </p>
+
+  <div class="error-actions">
+    <a class="btn" id="error-export-diagnostics-link" href="/api/diagnostics/export?format=txt"
+       download="switchagent-diagnostics.txt">Export diagnostics</a>
+    <button type="button" class="btn" id="error-copy-summary-btn">Copy issue summary</button>
+    <a class="btn" id="error-report-issue-link" href="{{ report_issue_url }}" target="_blank" rel="noopener">Report issue</a>
+  </div>
+  <p id="error-copy-status" class="settings-hint"></p>
+  <textarea id="error-issue-summary" hidden>{{ summary_text }}</textarea>
+
+  {% if technical_details %}
+  <details class="error-technical-details">
+    <summary>Show technical details</summary>
+    <pre>{{ technical_details }}</pre>
+  </details>
+  {% endif %}
+
+  <p class="settings-hint"><a href="/">Return to Library</a></p>
+</div>
+{% endblock %}
+{% block scripts %}
+<script src="/static/error.js"></script>
+{% endblock %}

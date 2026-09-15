@@ -1,0 +1,286 @@
+name: Release (Windows)
+
+# Builds SwitchAgent-Setup-x64.exe / SwitchAgent-Portable-x64.zip and
+# publishes them (plus SHA256SUMS.txt) as a GitHub Release on every push to
+# `main`, tagged with the version currently in pyproject.toml -- a commit +
+# push to main IS a release, no separate manual tag push required. Pushing
+# an explicit `v*` tag still works too (e.g. to re-publish an older
+# commit); its tag is used as-is and validated against pyproject.toml
+# instead of being derived from it. Everything runs on a real Windows
+# runner -- no cross-compiling from Linux, since the real-hardware backend
+# (switchagent/mtp/windows.py) and the installer/EXE tooling are
+# Windows-only by nature. See docs/PACKAGING.md for the full explanation
+# of every step and how to reproduce this build locally.
+
+on:
+  push:
+    branches:
+      - main  # release tag is derived from pyproject.toml's version, see "Determine release tag" below
+    tags:
+      - "v*"
+  workflow_dispatch: {}  # allows a manual, unsigned test run from the Actions tab -- build only, never publishes
+
+permissions:
+  contents: write       # to create the GitHub Release and upload assets
+
+env:
+  PYTHON_VERSION: "3.14"
+
+jobs:
+  build:
+    runs-on: windows-latest
+    env:
+      # GitHub Actions does not allow the `secrets` context inside a step's
+      # `if:` conditional directly (fails workflow validation: "Unrecognized
+      # named-value: 'secrets'") -- it IS allowed inside `env:`/`with:`, so
+      # the presence check is computed once here and the two signing steps
+      # below reference this env var instead.
+      HAS_SIGNING_CERT: ${{ secrets.WINDOWS_CERTIFICATE_BASE64 != '' }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: "pip"
+          # Cache invalidates only when a lock file's content changes -- a
+          # release with unchanged dependencies gets a warm pip cache
+          # (no re-download from PyPI), same lock files this workflow
+          # already relies on for reproducibility.
+          cache-dependency-path: |
+            requirements-lock.txt
+            requirements-build-lock.txt
+
+      # -- Release tag: derived from pyproject.toml on a main push, taken
+      # from the pushed tag otherwise (release-readiness audit) -----------
+      # Runs before any dependency install so a mismatch fails fast and
+      # cheaply. On a `v*` tag push, compares the tag's base X.Y.Z against
+      # pyproject.toml's own [project] version, tolerating a pre-release/
+      # build suffix on the tag (v0.1.0-rc1, v0.1.0+build) that
+      # pyproject.toml itself doesn't need to carry. On a push to `main`
+      # (or workflow_dispatch), there is no tag to validate -- the release
+      # tag IS `v<pyproject.toml version>`, so later steps (and, if this
+      # push is published, `gh release create`) use steps.release_tag.outputs.tag
+      # instead of github.ref_name. Reads pyproject.toml directly via
+      # stdlib tomllib, no package install needed yet.
+      - name: Determine release tag
+        id: release_tag
+        shell: pwsh
+        run: |
+          $pkgVersion = python -c "import tomllib; print(tomllib.load(open('pyproject.toml', 'rb'))['project']['version'])"
+          $pkgBase = $pkgVersion -replace '[-+].*$', ''
+          if ("${{ github.ref }}".StartsWith("refs/tags/v")) {
+            $tag = "${{ github.ref_name }}"
+            $tagBase = ($tag -replace '^v', '') -replace '[-+].*$', ''
+            Write-Host "tag=$tag tagBase=$tagBase pkgVersion=$pkgVersion pkgBase=$pkgBase"
+            if ($tagBase -ne $pkgBase) {
+              throw "Tag '$tag' (base version $tagBase) does not match pyproject.toml's version '$pkgVersion' (base $pkgBase). Bump pyproject.toml before tagging, or fix the tag."
+            }
+          } else {
+            $tag = "v$pkgVersion"
+            Write-Host "Derived release tag from pyproject.toml: $tag"
+          }
+          echo "tag=$tag" >> $env:GITHUB_OUTPUT
+
+      # -- Reproducible dependencies (Packaging Stage 10) ------------------
+      # requirements-lock.txt / requirements-build-lock.txt are hash-pinned,
+      # generated via `pip-compile --generate-hashes` from requirements.txt
+      # / requirements-build.txt -- see docs/PACKAGING.md. --require-hashes
+      # is redundant with the hashes already present (pip enforces
+      # hash-checking mode automatically once any hash is present) but
+      # kept explicit as defense in depth.
+      - name: Install locked runtime dependencies
+        run: pip install --require-hashes -r requirements-lock.txt
+
+      - name: Install locked build tooling (PyInstaller)
+        run: pip install --require-hashes -r requirements-build-lock.txt
+
+      - name: Install switchagent itself (no dependency re-resolution)
+        run: pip install -e . --no-deps
+
+      # -- Tests -------------------------------------------------------------
+      # Deliberately NOT run here. `pytest -q` (759+ tests) is the single
+      # largest time/cost item in this workflow and is already run locally
+      # before a version is tagged for release -- CI re-running the full
+      # suite on every release would roughly double this job's Windows
+      # (x2-billed) minutes for no new information. The packaged smoke
+      # test below still runs the ACTUAL built EXE and would catch a
+      # packaging-level break (missing dependency, broken entry point,
+      # etc.) even with this step gone.
+
+      # -- PyInstaller onedir build ------------------------------------------
+      - name: First-start database migration regression
+        run: python -m pytest tests/test_db_initialization.py tests/test_web_db.py tests/test_tray.py tests/test_desktop.py -q
+
+      - name: Build PyInstaller onedir bundle
+        run: pyinstaller --noconfirm packaging/SwitchAgent.spec
+
+      # -- Packaged smoke test (Stage 11) -- runs the ACTUAL built EXE,
+      # mock mode only, never touches real MTP hardware -----------------------
+      - name: Packaged smoke test
+        run: python packaging/smoke_test.py dist/SwitchAgent/SwitchAgent.exe
+
+      # -- Portable ZIP (Stage 9) ---------------------------------------------
+      - name: Build portable ZIP
+        run: python packaging/build_portable_zip.py
+
+      # -- Inno Setup installer (Stage 8) --------------------------------------
+      # windows-latest runners ship Inno Setup preinstalled at this exact,
+      # documented path (see the runner image's own software manifest,
+      # https://github.com/actions/runner-images) -- checked directly
+      # first, which is instant. A real run showed the ORIGINAL version of
+      # this step (an unconditional `Get-ChildItem -Recurse` over the
+      # entire Program Files/Program Files (x86)/LocalAppData\Programs
+      # trees) taking 8+ minutes and still not finishing on the actual
+      # runner image, which ships with a large amount of preinstalled
+      # tooling (Visual Studio, multiple SDKs, etc.) -- a real, wasteful
+      # performance bug, not a slow-but-fine step. The recursive search
+      # below is now only a fallback for the rare case the known path
+      # doesn't exist (e.g. a future runner image relocates it), and is
+      # itself narrowed to just Program Files (x86) (where Inno Setup has
+      # always installed to, 32-bit tool) rather than three huge trees.
+      - name: Locate or install Inno Setup
+        id: inno
+        shell: pwsh
+        run: |
+          $knownPath = "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe"
+          $iscc = if (Test-Path $knownPath) { $knownPath } else { $null }
+          if (-not $iscc) {
+            Write-Host "ISCC.exe not at the expected path ($knownPath) -- falling back to a narrower search"
+            $iscc = Get-ChildItem -Path "$env:ProgramFiles(x86)" `
+              -Recurse -Filter "ISCC.exe" -ErrorAction SilentlyContinue -Depth 3 | Select-Object -First 1 -ExpandProperty FullName
+          }
+          if (-not $iscc) {
+            choco install innosetup -y --no-progress
+            $iscc = if (Test-Path $knownPath) { $knownPath } else {
+              Get-ChildItem -Path "$env:ProgramFiles(x86)","$env:ProgramFiles" `
+                -Recurse -Filter "ISCC.exe" -ErrorAction SilentlyContinue -Depth 3 | Select-Object -First 1 -ExpandProperty FullName
+            }
+          }
+          if (-not $iscc) { throw "ISCC.exe not found after fallback install" }
+          echo "iscc_path=$iscc" >> $env:GITHUB_OUTPUT
+
+      - name: Build installer
+        # Uses packaging/build_installer.py so the version passed to ISCC
+        # is computed the exact same way as everywhere else (importlib.metadata
+        # -> pyproject.toml) -- never a second, independently-typed value.
+        run: python packaging/build_installer.py --iscc "${{ steps.inno.outputs.iscc_path }}"
+
+      # -- Optional Authenticode signing (Stage 12) ----------------------------
+      # Skipped entirely (never fails the build) if signing secrets are
+      # absent -- forks and local test runs always produce a valid,
+      # unsigned release. See docs/PACKAGING.md's "Code signing" section:
+      # unsigned downloads will show a Windows SmartScreen warning, and a
+      # signature alone does not guarantee that goes away immediately
+      # (reputation still has to build up).
+      - name: Sign binaries
+        if: ${{ env.HAS_SIGNING_CERT == 'true' }}
+        shell: pwsh
+        env:
+          CERT_B64: ${{ secrets.WINDOWS_CERTIFICATE_BASE64 }}
+          CERT_PASSWORD: ${{ secrets.WINDOWS_CERTIFICATE_PASSWORD }}
+        run: |
+          $certPath = Join-Path $env:RUNNER_TEMP "switchagent-signing.pfx"
+          [IO.File]::WriteAllBytes($certPath, [Convert]::FromBase64String($env:CERT_B64))
+          $signtool = Get-ChildItem -Path "${env:ProgramFiles(x86)}\Windows Kits" -Recurse -Filter "signtool.exe" `
+            -ErrorAction SilentlyContinue | Where-Object { $_.FullName -match "x64" } | Select-Object -First 1 -ExpandProperty FullName
+          if (-not $signtool) { throw "signtool.exe not found" }
+
+          & $signtool sign /f $certPath /p $env:CERT_PASSWORD /fd sha256 /tr http://timestamp.digicert.com /td sha256 `
+            "dist\SwitchAgent\SwitchAgent.exe"
+          & $signtool sign /f $certPath /p $env:CERT_PASSWORD /fd sha256 /tr http://timestamp.digicert.com /td sha256 `
+            "dist\installer\SwitchAgent-Setup-x64.exe"
+          & $signtool verify /pa "dist\SwitchAgent\SwitchAgent.exe"
+          & $signtool verify /pa "dist\installer\SwitchAgent-Setup-x64.exe"
+
+          Remove-Item $certPath -Force
+
+      # A signed EXE's contents changed -- rebuild the portable ZIP from the
+      # now-signed dist/SwitchAgent/ so the ZIP's copy is signed too.
+      - name: Rebuild portable ZIP after signing
+        if: ${{ env.HAS_SIGNING_CERT == 'true' }}
+        run: python packaging/build_portable_zip.py
+
+      # -- Checksums + release --------------------------------------------------
+      - name: Rename artifacts to their release filenames
+        shell: pwsh
+        run: |
+          Copy-Item "dist\installer\SwitchAgent-Setup-x64.exe" -Destination "SwitchAgent-Setup-x64.exe"
+          Copy-Item "dist\SwitchAgent-Portable-x64.zip" -Destination "SwitchAgent-Portable-x64.zip"
+
+      - name: Generate SHA256SUMS.txt
+        shell: pwsh
+        run: |
+          $files = "SwitchAgent-Setup-x64.exe", "SwitchAgent-Portable-x64.zip"
+          $lines = foreach ($f in $files) {
+            $hash = (Get-FileHash -Algorithm SHA256 $f).Hash.ToLower()
+            "$hash  $f"
+          }
+          $lines | Set-Content -Encoding ascii SHA256SUMS.txt
+          Get-Content SHA256SUMS.txt
+
+      - name: Upload workflow artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: switchagent-windows-release
+          path: |
+            SwitchAgent-Setup-x64.exe
+            SwitchAgent-Portable-x64.zip
+            SHA256SUMS.txt
+
+      - name: Publish GitHub Release
+        # Published as a draft, assets uploaded, THEN flipped to published --
+        # never a single `gh release create <tag> <assets...>` call. That
+        # command creates the release and uploads assets as separate
+        # sequential steps internally; a failure partway (e.g. a transient
+        # network blip on the second asset) would leave a live, PUBLISHED
+        # release missing an asset, which is exactly what must never happen
+        # (release-readiness audit finding). Staying a draft until every
+        # asset is confirmed uploaded means any failure here leaves, at
+        # worst, an invisible draft -- never a broken public release.
+        #
+        # Runs on a `v*` tag push AND on every push to `main` -- the tag
+        # from "Determine release tag" above (`v<pyproject.toml version>`
+        # on a main push) doesn't need to already exist: `gh release
+        # create --target <sha>` creates it pointed at the exact commit
+        # this job checked out, not whatever main happens to be at release
+        # time (which could have moved if a later push landed while this
+        # job was still building). Not on workflow_dispatch (manual
+        # test/build run only).
+        #
+        # Also handles reruns: if a release for this tag already exists
+        # (e.g. re-running this workflow after a previous attempt failed
+        # partway, or a later push to main lands before pyproject.toml's
+        # version is bumped again), it's deleted first -- the underlying
+        # git tag is left alone (no --cleanup-tag) -- so this step is
+        # idempotent rather than hard-failing on "release already exists".
+        if: startsWith(github.ref, 'refs/tags/v') || github.ref == 'refs/heads/main'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: pwsh
+        run: |
+          $tag = "${{ steps.release_tag.outputs.tag }}"
+          gh release view $tag 2>$null
+          if ($LASTEXITCODE -eq 0) {
+            Write-Host "Release $tag already exists -- deleting before recreating (rerun/idempotency)"
+            gh release delete $tag --yes
+          }
+
+          # A tag with a pre-release suffix (v0.1.0-rc1, v0.1.0-beta1) is
+          # published as a GitHub pre-release: it won't be shown as
+          # "Latest release" or picked up by tooling that follows that tag.
+          $prereleaseFlag = @()
+          if ($tag -match '^v[0-9]+\.[0-9]+\.[0-9]+-') {
+            $prereleaseFlag = @("--prerelease")
+          }
+
+          gh release create $tag `
+            --title "SwitchAgent $tag" `
+            --generate-notes `
+            --draft `
+            --target "${{ github.sha }}" `
+            @prereleaseFlag
+          gh release upload $tag "SwitchAgent-Setup-x64.exe" "SwitchAgent-Portable-x64.zip" "SHA256SUMS.txt"
+          gh release edit $tag --draft=false

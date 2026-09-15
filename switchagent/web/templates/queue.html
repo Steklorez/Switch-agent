@@ -1,0 +1,97 @@
+{% extends "base.html" %}
+{% block title %}Queue — SwitchAgent{% endblock %}
+{% block content %}
+<div class="page-header">
+  <h2>Queue</h2>
+  <div class="worker-controls">
+    <span class="worker-state">Worker: <strong>{{ "Paused" if worker_paused else "Running" }}</strong></span>
+    <button class="btn btn-secondary" data-worker-action="{{ 'resume' if worker_paused else 'pause' }}">
+      {{ "Resume" if worker_paused else "Pause" }}
+    </button>
+  </div>
+</div>
+
+<section id="preparation-list" aria-live="polite"></section>
+<p id="empty-state" class="empty-state" {{ "hidden" if groups }}>Queue is empty.</p>
+
+<ol id="job-list" class="job-list">
+  {% for g in groups %}
+  <li class="batch-group" data-batch-id="{{ g.batch_id if g.batch_id is not none else '' }}">
+    {% if g.total > 1 %}
+    <div class="batch-header">
+      <span class="batch-title">{{ g.display_name }}</span>
+      <span class="batch-progress">{{ g.finished }} / {{ g.total }} finished</span>
+      {% if g.conflict_count > 0 %}
+      <span class="batch-attention">{{ g.conflict_count }} item{{ "s" if g.conflict_count != 1 }} requires attention</span>
+      {% endif %}
+    </div>
+    {% endif %}
+    <ol class="batch-jobs">
+      {% for j in g.jobs %}
+      <li class="job-row {{ 'progress-active' if j.status == 'RUNNING' }}" data-job-id="{{ j.id }}" data-status="{{ j.status }}">
+        <div class="job-main">
+          <div class="job-name">{{ j.display_name }}</div>
+          <div class="job-meta">
+            {{ j.target_device_label }} · {{ j.target_storage }} · attempt {{ j.attempt_count }}
+            · created {{ j.created_at }}
+          </div>
+          {% if j.status == "WAITING_FOR_DEVICE" %}
+          <div class="job-meta">Waiting for {{ j.target_device_label }} to reconnect — resumes automatically</div>
+          {% elif j.status == "DESTINATION_CONFLICT" %}
+          <div class="conflict-card">
+            <p class="conflict-explanation">
+              SwitchAgent found an existing destination and will not overwrite it automatically.
+            </p>
+            <dl class="conflict-details">
+              <dt>Content</dt><dd>{{ j.display_name }}</dd>
+              <dt>Device</dt><dd>{{ j.target_device_label }}</dd>
+              <dt>Storage</dt><dd>{{ j.target_storage }}</dd>
+              {% if j.destination_conflict_path %}
+              <dt>Destination</dt><dd class="conflict-path" data-conflict-path="{{ j.destination_conflict_path }}">{{ j.destination_conflict_path }}</dd>
+              {% endif %}
+              <dt>Time</dt><dd>{{ j.finished_at or j.created_at }}</dd>
+            </dl>
+            <div class="conflict-actions">
+              {% if j.destination_conflict_path %}
+              <button type="button" class="btn btn-small" data-copy-conflict-path="{{ j.destination_conflict_path }}">Copy destination path</button>
+              {% endif %}
+              {# W3-006 shipped pointing at the generic /devices list as a
+                 temporary fallback, because no per-device page existed yet.
+                 W3-004 added one -- link straight at THIS job's target
+                 device (by its safe fingerprint, never the raw device_id). #}
+              <a class="btn btn-small" href="/devices/{{ j.target_device_fingerprint }}">Device Details</a>
+            </div>
+            <p class="settings-hint">Resolve the conflict manually on the device, then Retry.</p>
+          </div>
+          {% elif j.error %}<div class="job-error" title="{{ j.error }}">{{ j.error }}</div>{% endif %}
+          {% if j.possibly_stalled %}
+          <div class="job-stall-warning">
+            Possibly stalled — no observable progress for {{ (j.stall_seconds // 60)|int }} min.
+            Large MTP transfers may legitimately take a long time; this is not treated as a failure.
+          </div>
+          {% endif %}
+        </div>
+        <div class="job-status">
+          <span class="status-pill status-{{ j.status|lower }}">{{ j.status.replace("_", " ") }}</span>
+          {% if j.status == "RUNNING" %}<span class="spinner" aria-label="in progress"></span>{% endif %}
+        </div>
+        <div class="job-actions">
+          {% if not j.abandoned and j.status in ("FAILED", "INTERRUPTED", "DEVICE_UNAVAILABLE", "SOURCE_CHANGED", "DESTINATION_CONFLICT", "BLOCKED_BY_DEPENDENCY") %}
+          <button class="btn btn-small" data-job-action="retry" data-job-id="{{ j.id }}">Retry installation</button>
+          {% endif %}
+          {% if not j.abandoned and j.status in ("PENDING_CONFIRM", "CONFIRMED", "DEVICE_UNAVAILABLE", "WAITING_FOR_BASE", "WAITING_FOR_DEVICE", "FAILED", "INTERRUPTED", "SOURCE_CHANGED", "DESTINATION_CONFLICT", "BLOCKED_BY_DEPENDENCY") %}
+          <button class="btn btn-small btn-danger" data-job-action="cancel" data-job-id="{{ j.id }}">Cancel</button>
+          {% endif %}
+        </div>
+      </li>
+      {% endfor %}
+    </ol>
+  </li>
+  {% endfor %}
+</ol>
+
+<div id="toast-container" class="toast-container" aria-live="polite"></div>
+{% endblock %}
+{% block scripts %}
+<script src="/static/queue.js?v=2"></script>
+{% endblock %}

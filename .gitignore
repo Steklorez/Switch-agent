@@ -1,0 +1,34 @@
+__pycache__/
+*.py[cod]
+*.egg-info/
+
+.pytest_cache/
+.venv/
+.idea/
+
+# Runtime state -- regenerated locally, not source (real SQLite db incl.
+# WAL/SHM, per-job work dirs, the inbox/ drop folder, manual mtp-probe
+# write-test output).
+data/
+work/
+inbox/
+logs/
+# W3-005: automatic pre-restore safety backups (switchagent/restore.py step
+# 4) -- runtime state, never source. Already covered incidentally by the
+# *.zip rule below; listed explicitly so the intent is stated, not inferred.
+restore-backups/
+runtime.json
+update_check_cache.json
+tools/_write_test_artifacts/
+
+mock_switch/
+
+# PyInstaller / Inno Setup build output -- not source, rebuilt by CI and
+# by `pyinstaller packaging/SwitchAgent.spec` / `iscc packaging/SwitchAgent.iss`.
+build/
+dist/
+*.spec.bak
+packaging/output/
+*.exe
+*.zip
+SHA256SUMS.txt

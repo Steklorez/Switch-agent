@@ -1,0 +1,140 @@
+/* Shared dark showroom: quiet ambient light, crisp controls, generous spacing. */
+:root {
+  color-scheme: dark;
+  --bg: #0c1018;
+  --surface: #171e2a;
+  --surface-2: #202938;
+  --border: #303d50;
+  --text: #edf3fc;
+  --text-dim: #a6b3c7;
+  --accent: #82acff;
+}
+select option, select optgroup {
+  background-color: #202938;
+  color: #edf3fc;
+}
+input::placeholder, textarea::placeholder { color: #a6b3c7; opacity: 1; }
+body {
+  min-height: 100vh;
+  background: url('/static/showroom-bokeh.svg?v=2') center / cover fixed,
+    radial-gradient(ellipse at 36% 0%, #1c2b454d, transparent 55%),
+    radial-gradient(ellipse at 95% 65%, #34244c30, transparent 60%), #0c1018;
+  background-attachment: fixed;
+}
+.topbar, .main-nav {
+  background: rgba(17,23,34,.92);
+  /* backdrop-filter continuously re-samples whatever is visually BEHIND
+     this element -- since both bars are `position: fixed` over the
+     library grid, that means the actively-tilting/glowing cards
+     underneath, every frame they change, not just this bar's own
+     content. Lowered from 18px (still a clearly frosted-glass look,
+     just a smaller/cheaper blur kernel) rather than dropped outright --
+     the one change here with an actual, if small, visual difference. */
+  backdrop-filter: blur(10px);
+  border-color: rgba(160,188,230,.12);
+}
+.topbar { box-shadow: 0 6px 28px #0002; }
+.topbar-title { letter-spacing: -.025em; }
+.build-version { padding: 3px 7px; border: 1px solid #ffffff12; border-radius: 6px; }
+.main-nav a { border-radius: 12px; transition: background 220ms ease, color 220ms ease, box-shadow 220ms ease; }
+.main-nav a:hover { color: #edf3fc; background: #b0cbff0b; }
+.main-nav a.active {
+  color: #9cecff;
+  background: linear-gradient(110deg, #6799ee25, #6799ee08);
+  box-shadow: inset 0 0 0 1px #9dc1ff20, 0 6px 20px #0001;
+}
+.main-nav a.active .nav-icon { filter: drop-shadow(0 0 7px #27d7f6a0); }
+.btn.rescan-trigger {
+  border-color: #44d9ef; color: #e6fbff;
+  box-shadow: 0 0 0 1px #43daed40, 0 0 18px #23cbea35, inset 0 0 12px #23cbea12;
+}
+.rescan-trigger:not(:disabled):hover {
+  border-color: #a3f5ff;
+  box-shadow: 0 0 0 1px #43daed80, 0 0 28px #23cbea65, inset 0 0 14px #23cbea20;
+}
+.device-pill { border: 1px solid #ffffff0d; background: #ffffff05; }
+.device-pill.has-connected { background: #35c46f12; border-color: #35c46f30; }
+.btn, .search-box, .filter-select, .motion-controls select {
+  border-color: #aecfff25;
+  border-radius: 11px;
+  background: linear-gradient(145deg, #273245, #1b2432);
+  box-shadow: inset 0 1px #ffffff07, 0 3px 10px #0002;
+  transition: border-color 200ms ease, box-shadow 200ms ease, background-color 200ms ease;
+}
+.btn:not(:disabled):hover { border-color: #96bcff80; box-shadow: 0 4px 18px #427adc20, inset 0 1px #ffffff15; }
+.btn-primary { background: linear-gradient(135deg, #416ec3, #355aa2); border-color: #88adf47a; }
+.btn-danger { background: linear-gradient(135deg, #9d3545, #782939); border-color: #ec7b8c70; }
+.btn:focus-visible, a:focus-visible, summary:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-visible {
+  outline: 2px solid #a1c5ff; outline-offset: 3px;
+}
+.search-box:focus, .filter-select:focus { border-color: #92baff; box-shadow: 0 0 0 3px #7daaff12; }
+.library-toolbar { gap: 12px; padding: 12px; border: 1px solid #b9d3ff12; border-radius: 16px; background: #ffffff03; box-shadow: 0 12px 32px #0001; }
+.toolbar-form { gap: 10px; }
+.settings-section { padding: 20px; border: 1px solid #b9d3ff16; border-radius: 16px; background: linear-gradient(135deg, #1b2430b3, #131b27b3); }
+.card:not(.motion-card) { border-color: #a5c4f226; }
+.library-tiles { gap: 22px; align-items: stretch; }
+.library-tiles .game-group { display: flex; flex-direction: column; }
+.library-tiles .game-group > .card { flex: 1; }
+.library-tiles .game-group { position: relative; overflow: visible; }
+.library-tiles .game-group > .card { border-radius: 15px 15px 0 0; }
+.library-tiles .game-variants { position: relative; }
+.library-tiles .variants-overlay {
+  position: absolute; top: 100%; left: -1px; right: -1px; z-index: 5;
+  background: #171e2a; border: 1px solid #547699; border-top: 0;
+  border-radius: 0 0 16px 16px;
+  box-shadow: 0 22px 40px #0009, 0 0 20px #1ee0f225;
+}
+.library-tiles .variants-scroll { max-height: min(55vh, 520px); overflow-y: auto; overscroll-behavior: contain; }
+.library-tiles .game-group:has(.game-variants[open]) { z-index: 10; transform: none; }
+.library-tiles .game-group:has(.game-variants[open]) > .game-details-link { visibility: hidden; }
+.library-tiles .game-details-link { margin-top: auto; }
+.library-tiles .game-variants summary, .library-tiles .extras-empty-row {
+  min-height: 46px; padding: 10px 8px; display: flex; align-items: center; gap: 4px;
+  white-space: nowrap; overflow-x: auto;
+}
+.library-tiles .extras-empty-row { border-top: 1px solid var(--border); }
+.library-tiles .extras-empty-row::before { content: ''; width: 8px; flex: none; }
+.library-tiles .extras-pill { padding: 3px 5px; font-size: .68rem; }
+.library-tiles .extras-pill-empty { background: transparent; color: var(--text-dim); }
+/* Outer shadows remain visible without changing the card's clipped artwork.
+   The halo used to BE the card's own box-shadow, swapped in on
+   :hover/.is-hovered and cross-faded over 360ms (card_motion.css's own
+   `transition: ... box-shadow 360ms ease`) -- animating a 5-layer
+   box-shadow is one of the most repaint-heavy things CSS can do (every
+   intermediate frame re-rasterizes all five blurred layers), and with
+   several nearby cards "active" at once (card_motion.js's 85px proximity
+   radius) that cost multiplies. Same halo, same timing, far cheaper: a
+   separate layer with the halo shadow baked in permanently and only its
+   OPACITY animated (compositor-only, no repaint) instead of the shadow
+   itself. Layers on top of the card's own resting shadow rather than
+   replacing it -- negligible visually (the resting shadow is a soft, dark
+   ambient one under a bright colored glow), but never fights it. */
+.library-tiles .motion-card { --halo: 30,224,242; }
+.library-tiles .motion-card::before {
+  content: ""; pointer-events: none; position: absolute; inset: 0; z-index: 2;
+  border-radius: inherit; opacity: 0;
+  box-shadow: 0 0 0 3px rgba(var(--halo),.95),
+    0 0 16px 4px rgba(var(--halo),.55),
+    0 0 42px 10px rgba(var(--halo),.28),
+    0 20px 85px 12px rgba(var(--halo),.17);
+  transition: opacity 220ms ease;
+}
+.library-tiles .motion-card:hover::before,
+.library-tiles .motion-card.is-hovered::before,
+.library-tiles .motion-card:focus-within::before {
+  opacity: 1;
+}
+@media (min-width: 768px) {
+  .main-nav { padding: 16px 10px; gap: 6px; }
+  .main-nav a { padding: 13px 12px; }
+  .content { padding-top: 26px; }
+  .content:has(.library-tiles) { padding: 26px 26px 90px; }
+}
+@media (max-width: 520px) {
+  .library-tiles { gap: 12px; }
+  .library-toolbar { padding: 8px; }
+  .settings-section { padding: 14px; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .main-nav a, .btn, .search-box, .filter-select, .motion-controls select { transition: none; }
+}

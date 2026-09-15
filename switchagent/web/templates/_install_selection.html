@@ -1,0 +1,65 @@
+{# Shared selection bar + item-detail modal + install-confirmation modal.
+
+   Extracted verbatim from library.html so W3-001's Game Details page can
+   render the EXACT same markup and load the EXACT same /static/library.js
+   -- one selection/confirm implementation, one job-creation path
+   (POST /api/jobs -> services.create_and_confirm_jobs), never a second
+   pipeline that could drift from the Library page's own semantics.
+
+   Requires `devices` in the template context (both pages already pass it).
+   library.js binds by id/class only, so nothing here may be renamed
+   without updating that file.
+
+   The target <select>'s option values are device FINGERPRINTS, not raw
+   device_ids: a device_id embeds the console's real USB serial (see
+   mtp/windows.py's mask_device_id) and this markup is rendered into pages
+   whose HTML a user may well share. services.resolve_target_device_id()
+   turns the fingerprint back into the real id server-side inside the
+   unchanged POST /api/jobs path -- raw device_ids are still accepted there
+   too, so nothing else in the app had to change. #}
+<dialog id="detail-modal" class="modal">
+  <div class="modal-body" id="detail-modal-body"></div>
+  <button class="btn btn-secondary" onclick="document.getElementById('detail-modal').close()">Close</button>
+</dialog>
+
+{% set connected_devices = devices|selectattr("connected")|list %}
+<div id="selection-bar" class="selection-bar" hidden>
+  <div class="selection-summary">
+    <span id="selection-count">0</span> selected · <span id="selection-size">0 B</span>
+  </div>
+  {% if not connected_devices %}
+  <div class="selection-target no-device-warning">No Switch connected</div>
+  {% else %}
+  <div class="selection-target">
+    <label for="target-device">Target:</label>
+    <select id="target-device" data-connected-count="{{ connected_devices|length }}">
+      <option value="">Select Switch…</option>
+      {% for d in devices %}
+      <option value="{{ d.device_fingerprint }}" {{ "disabled" if not d.connected }}>
+        {{ d.display_name }}{{ "" if d.connected else " (disconnected)" }}
+      </option>
+      {% endfor %}
+    </select>
+  </div>
+  {% endif %}
+  <button id="install-selected-btn" class="btn btn-primary" {{ "disabled" if not connected_devices }}>
+    Install selected
+  </button>
+</div>
+
+<dialog id="confirm-modal" class="modal">
+  <div class="modal-body">
+    <h3>Install <span id="confirm-count"></span> item(s)</h3>
+    <p>Target: <strong id="confirm-target"></strong></p>
+    <p>Destination: <strong id="confirm-destination"></strong></p>
+    <p>Total size: <strong id="confirm-size"></strong></p>
+    <p>Overwrite: <strong>No — existing files on the Switch are never replaced</strong></p>
+    <p class="settings-hint">Uncheck anything below you don't want to install.</p>
+    <ul id="confirm-list" class="confirm-list"></ul>
+    <div id="confirm-result" class="confirm-result" hidden></div>
+  </div>
+  <div class="modal-actions">
+    <button class="btn btn-secondary" id="confirm-cancel-btn">Cancel</button>
+    <button class="btn btn-primary" id="confirm-install-btn">Confirm Install</button>
+  </div>
+</dialog>
