@@ -1,0 +1,83 @@
+{% extends "base.html" %}
+{% block title %}Devices — SwitchAgent{% endblock %}
+{% block content %}
+<h2>Devices</h2>
+{% if device_onboarding %}
+<div class="onboarding-banner" id="onboarding-{{ device_onboarding.id }}">
+  <h3>{{ device_onboarding.heading }}</h3>
+  <p>{{ device_onboarding.body }}</p>
+  {% if device_onboarding.steps %}
+  <ol class="onboarding-steps">
+    {% for step in device_onboarding.steps %}<li>{{ step }}</li>{% endfor %}
+  </ol>
+  {% endif %}
+</div>
+{% endif %}
+{% if not devices %}
+<p class="empty-state">No Switch has ever been seen by this server yet.</p>
+{% endif %}
+<ul class="device-list">
+  {% for d in devices %}
+  <li class="device-row">
+    <span class="device-dot {{ 'connected' if d.connected else 'disconnected' }}"></span>
+    <div class="device-info">
+      <form class="device-rename-form" data-device-id="{{ d.device_id }}" data-url="/api/devices/{{ d.device_id }}/rename">
+        <input type="text" name="friendly_name" value="{{ d.friendly_name or '' }}"
+               placeholder="{{ d.display_name }}">
+        <button type="submit" class="btn btn-small">Save</button>
+      </form>
+      <div class="device-meta">
+        {{ "Connected" if d.connected else "Disconnected" }}
+        · fingerprint <code>{{ d.device_fingerprint }}</code>
+        · last seen {{ d.last_seen_at }}
+        {% if d.last_known_display_name %} · reports as "{{ d.last_known_display_name }}"{% endif %}
+        {# W3-004: the per-device page. Addressed by fingerprint, never the
+           raw device_id -- this is a URL a human sees. #}
+        · <a href="/devices/{{ d.device_fingerprint }}">Device details →</a>
+      </div>
+      {% set storages = storages_by_device.get(d.device_id, []) %}
+      {% if storages %}
+      <table class="storage-table">
+        <thead>
+          <tr><th>Storage</th><th>Mapping</th><th>Space</th><th></th></tr>
+        </thead>
+        <tbody>
+          {% for s in storages %}
+          <tr data-device-id="{{ d.device_id }}" data-raw-storage-name="{{ s.raw_name }}">
+            <td>{{ s.raw_name }}</td>
+            <td>
+              {% if s.mapping_source == "MANUAL" %}
+              <strong>{{ s.effective_logical_name }}</strong> <span class="settings-hint">(MANUAL)</span>
+              {% else %}
+              {{ s.effective_logical_name }} <span class="settings-hint">(AUTO)</span>
+              {% endif %}
+            </td>
+            <td>
+              {% if s.free_bytes is not none and s.total_bytes is not none %}
+              {{ s.free_bytes|filesize }} free of {{ s.total_bytes|filesize }}
+              {% else %}—{% endif %}
+            </td>
+            <td>
+              <select class="storage-mapping-select">
+                <option value="" {{ "selected" if s.mapping_source == "AUTO" }}>AUTO: {{ s.auto_logical_name }}</option>
+                {% for logical in allowed_storage_mappings %}
+                <option value="{{ logical }}" {{ "selected" if s.mapping_source == "MANUAL" and s.effective_logical_name == logical }}>{{ logical }}</option>
+                {% endfor %}
+              </select>
+              <button type="button" class="btn btn-small storage-mapping-save">Save</button>
+            </td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+      {% elif d.connected %}
+      <p class="settings-hint">No storage information yet — refreshing in the background.</p>
+      {% endif %}
+    </div>
+  </li>
+  {% endfor %}
+</ul>
+{% endblock %}
+{% block scripts %}
+<script src="/static/devices.js"></script>
+{% endblock %}

@@ -1,0 +1,200 @@
+{% extends "base.html" %}
+{% block title %}Settings — SwitchAgent{% endblock %}
+{% block content %}
+<h2>Settings</h2>
+<section class="settings-section">
+  <h3>Appearance</h3>
+  <label>Card animation
+    <select id="card-motion-preference" class="filter-select">
+      <option value="auto">Auto</option><option value="on">On</option><option value="off">Off</option>
+    </select>
+  </label>
+  <p class="settings-hint">Auto follows your system's reduced-motion preference. Saved automatically in this browser.</p>
+</section>
+
+<section class="settings-section">
+  <h3>Library automation</h3>
+  <form id="automation-form">
+    <p><label><input type="checkbox" id="auto-scan"> Watch folders and scan automatically</label></p>
+    <p><label>Fallback scan interval (seconds) <input type="number" id="scan-interval" min="10" max="3600" value="60"></label></p>
+    <p><label><input type="checkbox" id="auto-covers"> Download game covers in the background</label></p>
+    <p class="settings-hint">Covers: TitleDB (US English), images from Nintendo. Cached locally; unavailable covers never block scanning or installation. New files are indexed automatically; installation still requires your selection.</p>
+    <button class="btn btn-small" type="submit">Save automation settings</button>
+    <span id="automation-feedback" role="status"></span>
+  </form>
+</section>
+
+<section class="settings-section">
+  <h3>Home network</h3>
+  <p>On another device on the same network, open:</p>
+  {% for address in settings.lan_addresses %}
+  <p><a href="http://{{ address }}:{{ request.url.port or 80 }}/">http://{{ address }}:{{ request.url.port or 80 }}/</a></p>
+  {% endfor %}
+  <p class="settings-hint">If Windows prompts for network access, allow SwitchAgent access to private networks. In Windows Firewall, the app must be allowed for private (home) networks.</p>
+</section>
+
+<section class="settings-section" id="library-folder">
+  <h3>Library folders</h3>
+  {% if not settings.library_dir_configured %}
+    <p class="settings-warning">No library folder configured yet.</p>
+  {% elif not settings.library_dir_exists %}
+    <p class="settings-warning">Configured folder does not exist: {{ settings.library_dir }}</p>
+  {% endif %}
+  <ul id="library-dir-list" class="library-dir-list">
+    {% for dir in settings.library_dirs %}
+    <li class="library-dir-row" data-path="{{ dir }}">
+      <span class="library-dir-path">{{ dir }}</span>
+      <button type="button" class="library-dir-remove-btn" data-path="{{ dir }}" title="Remove" aria-label="Remove {{ dir }}">&times;</button>
+    </li>
+    {% endfor %}
+  </ul>
+  <p id="library-dir-empty" class="settings-hint" {{ "hidden" if settings.library_dirs else "" }}>No folders added yet -- add one below.</p>
+  <div class="library-dir-add-row">
+    <input type="text" id="library-dir-manual-input" placeholder="Or type a path, e.g. D:\Games\Switch">
+    <button type="button" id="library-dir-manual-add-btn" class="btn btn-small">Add</button>
+    <button type="button" id="library-dir-pick-btn" class="btn btn-small">Choose folder…</button>
+  </div>
+  <p id="library-dir-feedback" class="settings-hint" role="status"></p>
+  <p class="settings-hint">Each folder is checked before it's added. Removing one here only stops SwitchAgent watching it -- the files themselves stay on disk. The picker dialog only works on the computer running SwitchAgent; over the network, type the path instead.</p>
+</section>
+
+<section class="settings-section">
+  <h3>Worker</h3>
+  <p>
+    {{ "Paused" if settings.worker_paused else "Running" }}
+    {% if not settings.worker_running %}<span class="settings-warning">— thread not alive</span>{% endif %}
+  </p>
+  <p class="settings-hint">Last heartbeat: {{ settings.worker_last_heartbeat_at or "never" }}</p>
+  {% if settings.worker_restart_pending %}
+  <p id="restart-status" class="settings-hint">Restart queued — will apply at the worker's next safe point.</p>
+  {% else %}
+  <p id="restart-status" class="settings-hint"></p>
+  {% endif %}
+  <button type="button" id="restart-worker-btn" class="btn">Restart worker when safe</button>
+  <p class="settings-hint">
+    Never interrupts a transfer already in progress — only takes effect once the worker reaches its
+    own next safe point. If a single MTP call is genuinely hung, this cannot interrupt it; a full
+    application restart may be needed instead.
+  </p>
+</section>
+
+<section class="settings-section">
+  <h3>Archive support</h3>
+  <p>ZIP, 7Z: fully supported.</p>
+  {% if settings.rar_extraction_available %}
+    <p>RAR: supported (external tool found).</p>
+  {% else %}
+    <p class="settings-warning">RAR: extraction unavailable on this machine.</p>
+    <p class="settings-hint">RAR listing/classification still works; actually installing a .rar
+      needs an external <code>unrar</code>, <code>7z</code>, or <code>bsdtar</code> tool on PATH.</p>
+  {% endif %}
+</section>
+
+<section class="settings-section">
+  <h3>Extraction limits</h3>
+  <ul>
+    <li>Max extracted size: {{ settings.extraction_limits.max_extracted_size_bytes|filesize }}</li>
+    <li>Max file count: {{ settings.extraction_limits.max_file_count }}</li>
+    <li>Max directory depth: {{ settings.extraction_limits.max_directory_depth }}</li>
+  </ul>
+</section>
+
+<section class="settings-section">
+  <h3>Work directory</h3>
+  <p>Total staging size: {{ cleanup.total_work_size_bytes|filesize }}</p>
+  {% if cleanup.eligible_job_count > 0 %}
+  <p id="cleanup-summary">
+    {{ cleanup.eligible_job_count }} completed job(s) eligible for cleanup
+    (older than {{ cleanup.retention_days|int }} days) —
+    {{ cleanup.eligible_size_bytes|filesize }} would be freed.
+  </p>
+  {% else %}
+  <p id="cleanup-summary" class="settings-hint">Nothing eligible for cleanup right now.</p>
+  {% endif %}
+  <button type="button" id="cleanup-btn" class="btn" {{ "disabled" if cleanup.eligible_job_count == 0 }}>Clean completed staging</button>
+  <p class="settings-hint">
+    Only staged content from completed jobs (DONE / DONE_UNVERIFIED) older than the retention
+    window is ever removed. Still-queued, running, failed, or retryable jobs are never touched.
+  </p>
+  <span id="cleanup-status" class="settings-hint"></span>
+</section>
+
+<section class="settings-section" id="dbi-installed-games-hint">
+  <h3>"On Switch" highlight in the Library</h3>
+  <p>
+    <strong>Enable "Installed Games" in DBI's own settings on the console</strong> (in DBI: Settings →
+    the option that shows installed titles as an "Installed games" MTP entry — sometimes labelled
+    "Show Combined NSP in Installed Games"). Once it's on, SwitchAgent reads that list over MTP and
+    highlights any matching game in your Library green, with an "On Switch" badge — a live report from
+    DBI itself, not just SwitchAgent's own transfer history.
+  </p>
+  <p class="settings-hint">
+    Matching is by game name (DBI's listing has no TITLE_ID), so it's best-effort — case, punctuation
+    and trademark symbols are ignored, but a very different display name won't match. If the option is
+    missing or the list stays empty after enabling it, your DBI build/console may not expose this MTP
+    node at all.
+  </p>
+</section>
+
+<section class="settings-section">
+  <h3>Devices</h3>
+  <p>{{ devices|length }} known device(s) — see the <a href="/devices">Devices</a> page to rename.</p>
+</section>
+
+<section class="settings-section">
+  <h3>About</h3>
+  <p>SwitchAgent {{ settings.app_version }} ({{ settings.runtime_mode }})</p>
+  <p id="update-check-status" class="settings-hint">Checking for updates…</p>
+  <a id="update-check-link" class="btn btn-small" href="#" hidden target="_blank" rel="noopener">View release</a>
+  <button type="button" id="update-check-now-btn" class="btn btn-small">Check now</button>
+</section>
+
+<section class="settings-section">
+  <h3>Diagnostics</h3>
+  <ul class="diag-list">
+    {% for check in diagnostics.checks %}
+    <li class="diag-row">
+      <span class="diag-name">{{ check.name }}</span>
+      <span class="diag-status diag-{{ check.status|lower }}">{{ check.status }}</span>
+      {% if check.detail %}<span class="diag-detail">{{ check.detail }}</span>{% endif %}
+    </li>
+    {% endfor %}
+  </ul>
+  <button type="button" id="copy-diagnostics-btn" class="btn">Copy diagnostics</button>
+  <a href="/api/diagnostics/export?format=txt" download="switchagent-diagnostics.txt" class="btn" id="export-diagnostics-link">Export diagnostics</a>
+  <span id="copy-diagnostics-status" class="settings-hint"></span>
+  <textarea id="diagnostics-text" hidden>{{ diagnostics_text }}</textarea>
+</section>
+
+<section class="settings-section" id="backup-restore-section">
+  <h3>Backup / Restore</h3>
+  <p>
+    A backup contains your database (library, queue, history, device names and storage
+    mappings) and <code>config.yaml</code> — never the game files themselves, so it stays small.
+  </p>
+  <a href="/api/backup" class="btn" id="download-backup-link">Download backup</a>
+  <span id="backup-status" class="settings-hint"></span>
+
+  <h4>Restore from a backup</h4>
+  <p class="settings-warning">
+    Restoring REPLACES your current database and <code>config.yaml</code> with the contents of the
+    backup file. Anything recorded since that backup was taken is lost.
+  </p>
+  <form id="restore-form">
+    <input type="file" id="restore-file-input" name="file" accept=".zip,application/zip">
+    <button type="submit" id="restore-btn" class="btn btn-danger" disabled>Restore from backup</button>
+  </form>
+  <p id="restore-status" class="settings-hint"></p>
+  <p class="settings-hint">
+    Before anything is replaced, SwitchAgent fully validates the backup file and saves an
+    automatic safety copy of your current state, so a failed restore can always be undone.
+    A restore is refused outright while a transfer to a device is still running.
+  </p>
+</section>
+{% endblock %}
+{% block scripts %}
+<script src="/static/preferences.js"></script>
+<script src="/static/motion_preferences.js"></script>
+<script src="/static/settings.js"></script>
+<script src="/static/backup.js"></script>
+{% endblock %}

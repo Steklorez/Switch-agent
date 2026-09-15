@@ -1,0 +1,164 @@
+{% extends "base.html" %}
+{% block title %}{{ view.name }} — SwitchAgent{% endblock %}
+
+{#
+  W3-001 Game Details.
+
+  Two vocabularies are deliberately kept apart on this page and must never
+  be merged:
+
+    * "Library status" per entry is the SCANNER's verdict about the local
+      file (AVAILABLE / NEEDS_REVIEW / ERROR / SKIP_DUPLICATE). It says
+      nothing about any Switch.
+    * "SwitchAgent activity" per device is what SwitchAgent actually did,
+      rendered from services.classify_activity() -- which is the only
+      place allowed to decide whether a row may be described as installed.
+      A DONE_UNVERIFIED row with no user confirmation never is.
+#}
+
+{% macro destination_label(e) %}{% if e.content_type == "ATMOSPHERE_MOD" %}SD Card (merge){% else %}SD Card install{% endif %}{% endmacro %}
+
+{% macro content_row(e, label, role=None) %}
+<tr class="content-row">
+  <td class="content-select">
+    {# Same attribute contract library.html emits, so library.js's
+       "selecting the base selects the whole family" cascade and its
+       selection bar work here unchanged. `e.status` (the job-derived
+       display status) is what gates the checkbox, exactly as on the
+       Library page -- it is never rendered as text here. #}
+    <input type="checkbox" class="select-box" value="{{ e.id }}" data-name="{{ e.name }}"
+           data-size="{{ e.size }}" data-destination="{{ destination_label(e) }}"
+           data-family="{{ view.base_title_id }}"{% if role %} data-role="{{ role }}"{% endif %}
+           {{ "disabled" if e.status not in ("AVAILABLE",) }}>
+  </td>
+  <td class="content-name">
+    <div class="card-body" data-detail-url="/api/library/{{ e.id }}">{{ e.filename }}</div>
+    {% if label == "Mod" and e.mod_name %}<div class="card-meta">mod folder: {{ e.mod_name }}</div>{% endif %}
+  </td>
+  <td>{{ label }}</td>
+  <td><code>{{ e.title_id or "unknown" }}</code></td>
+  <td>{{ e.size|filesize }}</td>
+  <td><span class="card-status status-{{ e.library_status|lower }}">{{ e.library_status.replace("_", " ") }}</span></td>
+</tr>
+{% endmacro %}
+
+{% macro content_section(title, entries, label, role=None) %}
+{% if entries %}
+<section class="detail-section">
+  <h3>{{ title }} <span class="settings-hint">({{ entries|length }})</span></h3>
+  <table class="storage-table content-table">
+    <thead><tr><th></th><th>File</th><th>Content</th><th>TITLE_ID</th><th>Size</th><th>Library status</th></tr></thead>
+    <tbody>
+      {% for e in entries %}{{ content_row(e, label, role=role) }}{% endfor %}
+    </tbody>
+  </table>
+</section>
+{% endif %}
+{% endmacro %}
+
+{% block content %}
+<div class="page-header">
+  <div>
+    <h2 class="detail-title">{{ view.name }}</h2>
+    <div class="card-meta">Base TITLE_ID <code>{{ view.base_title_id }}</code></div>
+  </div>
+  <a class="btn btn-secondary" href="/">← Library</a>
+</div>
+
+<div class="detail-counters">
+  <span class="detail-counter">
+    Base game:
+    {% if view.base %}<strong>present</strong>{% else %}<strong>not in library</strong>{% endif %}
+    {% if view.base_count > 1 %}({{ view.base_count }} copies){% endif %}
+  </span>
+  <span class="detail-counter">Updates: <strong>{{ view.update_count }}</strong></span>
+  <span class="detail-counter">DLC: <strong>{{ view.dlc_count }}</strong></span>
+  <span class="detail-counter">Mods: <strong>{{ view.mod_count }}</strong></span>
+  <span class="detail-counter">Total size: <strong>{{ view.total_size|filesize }}</strong></span>
+</div>
+
+{% if not view.base %}
+<p class="settings-hint" id="no-base-note">
+  The base game itself is not in the library. Updates, DLC and mods below are still listed and can be
+  selected — SwitchAgent will hold anything that needs the base game until the base game is installed.
+</p>
+{% endif %}
+
+{% if view.base %}
+  {{ content_section("Base Game", [view.base], "Base", role="base") }}
+{% endif %}
+{{ content_section("Updates", view.updates, "Update") }}
+{{ content_section("DLC", view.dlc, "DLC") }}
+{{ content_section("Mods", view.mods, "Mod") }}
+{{ content_section("Other copies", view.duplicates, "Other copy") }}
+{% if view.needs_review %}
+<section class="detail-section" id="needs-review-section">
+  <h3>Needs review / errors <span class="settings-hint">({{ view.needs_review|length }})</span></h3>
+  <ul class="plain-list">
+    {% for e in view.needs_review %}
+    <li>
+      <strong>{{ e.filename }}</strong>
+      <span class="card-status status-{{ e.library_status|lower }}">{{ e.library_status.replace("_", " ") }}</span>
+      {% if e.error %}<div class="history-error">{{ e.error }}</div>{% endif %}
+      {% if e.note %}<div class="card-meta">{{ e.note }}</div>{% endif %}
+    </li>
+    {% endfor %}
+  </ul>
+</section>
+{% endif %}
+
+<section class="detail-section" id="family-activity">
+  <h3>SwitchAgent activity</h3>
+  <p class="settings-hint">
+    What SwitchAgent itself recorded for this game, per Switch. A completed transfer to DBI's install
+    target cannot be verified by SwitchAgent — those attempts stay marked as unconfirmed until you
+    confirm the result on the console yourself (History page).
+  </p>
+  {% for section in view.device_sections %}
+  <div class="device-activity" data-device-fingerprint="{{ section.device_fingerprint }}">
+    <div class="device-activity-header">
+      <span class="device-dot {{ 'connected' if section.connected else 'disconnected' }}"></span>
+      <a href="/devices/{{ section.device_fingerprint }}"><strong>{{ section.display_name }}</strong></a>
+      <span class="card-meta">{{ "Connected" if section.connected else "Disconnected" }}</span>
+    </div>
+    {% if not section.entries %}
+    <p class="settings-hint">No transfer for this game has ever been attempted to this Switch by SwitchAgent.</p>
+    {% else %}
+    <ul class="plain-list activity-list">
+      {% for e in section.entries %}
+      <li class="activity-row activity-{{ e.kind|lower }}">
+        <div class="activity-claim">{{ e.label }}</div>
+        <div class="card-meta">
+          {{ e.display_name }} · <code>{{ e.title_id or "—" }}</code>
+          {% if e.target_storage %} · {{ e.target_storage }}{% endif %} · {{ e.created_at }}
+        </div>
+        <div class="card-meta">
+          Transport outcome: <strong>{{ e.outcome.replace("_", " ") }}</strong> ·
+          Console confirmation:
+          {% if e.user_verified_outcome == "SUCCESS" %}<strong>confirmed successful by you</strong>
+          {% elif e.user_verified_outcome == "FAILED" %}<strong>confirmed failed by you</strong>
+          {% elif e.outcome == "DONE_UNVERIFIED" %}<strong>not confirmed</strong>
+          {# Only DONE_UNVERIFIED rows can ever be user-confirmed (see
+             services.set_history_verification) -- saying "not confirmed"
+             for anything else would read as a missing step that does not
+             exist. #}
+          {% else %}<strong>does not apply to this outcome</strong>{% endif %}
+        </div>
+        {% if e.error %}<div class="history-error">{{ e.error }}</div>{% endif %}
+      </li>
+      {% endfor %}
+    </ul>
+    {% endif %}
+  </div>
+  {% else %}
+  <p class="settings-hint">No Switch has ever been seen by this server yet.</p>
+  {% endfor %}
+</section>
+
+{% include "_install_selection.html" %}
+{% endblock %}
+{% block scripts %}
+{# The SAME script the Library page uses -- identical selection cascade,
+   identical confirmation modal, identical POST /api/jobs batch call. #}
+<script src="/static/library.js"></script>
+{% endblock %}

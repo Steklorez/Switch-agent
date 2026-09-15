@@ -1,0 +1,69 @@
+/* Soft depth with status colors and selection controls kept intact. */
+.content:has(.library-tiles) {
+  background: radial-gradient(ellipse at 15% 0%, rgba(58,83,139,.12), transparent 50%),
+              radial-gradient(ellipse at 95% 35%, rgba(66,49,108,.09), transparent 55%);
+}
+.library-tiles { perspective: 1400px; }
+.library-tiles .motion-card {
+  position: relative;
+  isolation: isolate;
+  --light-x: 50%; --light-y: 30%; --light: 0;
+  --tilt-x: 0deg; --tilt-y: 0deg; --lift: 0px;
+  transform: perspective(1000px) translateY(var(--lift)) rotateX(var(--tilt-x)) rotateY(var(--tilt-y));
+  transition: transform 360ms cubic-bezier(.2,.75,.25,1);
+  box-shadow: 0 8px 18px rgba(0,0,0,.23), 0 22px 42px -28px rgba(0,0,0,.75), inset 0 1px rgba(255,255,255,.06);
+}
+/* The moving cursor-light used to be a radial-gradient whose "at X Y"
+   center JS updated every animation frame -- a background-position-like
+   change, which forces the browser to repaint that gradient from
+   scratch every frame (unlike transform/opacity, which the compositor
+   can move for free). Same visual result, far cheaper: a fixed-size
+   circle positioned once at the card's origin and moved purely via
+   `transform: translate3d()`, which the GPU compositor handles without
+   any repaint at all. */
+.library-tiles .motion-card::after {
+  content: ""; pointer-events: none; position: absolute; z-index: 3;
+  left: 0; top: 0; width: 350px; height: 350px; margin: -175px 0 0 -175px;
+  border-radius: 50%; opacity: var(--light);
+  background: radial-gradient(circle, rgba(199,222,255,.19), rgba(170,196,255,.035) 40%, transparent 70%);
+  transform: translate3d(var(--light-x), var(--light-y), 0);
+  transition: opacity 450ms ease;
+}
+.library-tiles .motion-card .tile-art::after {
+  content: ""; pointer-events: none; position: absolute; inset: 0;
+  background: linear-gradient(180deg, rgba(255,255,255,.035), transparent 50%, rgba(7,12,21,.22));
+}
+.library-tiles .motion-card .game-cover { transition: transform 650ms cubic-bezier(.2,.75,.25,1); }
+.library-tiles .motion-card.is-hovered { z-index: 4; }
+.library-tiles .motion-card.is-hovered .game-cover { transform: scale(1.035); }
+.library-tiles .motion-card .card-body { background-image: linear-gradient(135deg, rgba(255,255,255,.025), transparent 60%); }
+.library-tiles .motion-card:focus-within { outline: 2px solid rgba(136,178,255,.7); outline-offset: 3px; }
+.library-tiles .motion-card a:focus-visible, .library-tiles .motion-card summary:focus-visible { outline: 2px solid var(--accent); outline-offset: -3px; }
+.library-tiles[data-motion-enabled="false"] .motion-card { transform: none; transition: none; }
+.library-tiles[data-motion-enabled="false"] .motion-card::after { display: none; }
+.library-tiles[data-motion-enabled="false"] .motion-card .game-cover { transform: none; transition: none; }
+.motion-controls { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; margin: 8px 0 14px; font-size: .8rem; color: var(--text-dim); }
+.motion-controls select { background: var(--surface); color: var(--text); border: 1px solid var(--border); border-radius: 6px; padding: 5px 8px; }
+
+.library-tiles .status-available, .library-rows .status-available { display: none; }
+.library-tiles .game-details-link {
+  display: flex; align-items: center; justify-content: center;
+  margin: 10px; padding: 11px 14px; min-height: 44px;
+  border: 1px solid rgba(115,164,255,.48); border-radius: 10px;
+  background: linear-gradient(135deg, rgba(79,142,247,.2), rgba(79,142,247,.08));
+  color: #cfe0ff; font-size: .9rem; font-weight: 600;
+  box-shadow: inset 0 1px rgba(255,255,255,.055);
+  transition: background-color 180ms ease, border-color 180ms ease, box-shadow 180ms ease;
+}
+.library-tiles .game-details-link:hover, .library-tiles .game-details-link:focus-visible {
+  background-color: rgba(79,142,247,.2); border-color: #8bb5ff;
+  box-shadow: 0 0 18px rgba(79,142,247,.14), inset 0 1px rgba(255,255,255,.1);
+  color: #fff;
+}
+
+.library-tiles .status-on-device { display: inline-flex; align-items: center; padding: 5px 10px; border: 1px solid rgba(129,255,179,.5); border-radius: 7px; background: rgba(39,146,87,.28); color: #a4f5c1; font-size: .75rem; font-weight: 700; letter-spacing: .05em; }
+.library-tiles .status-on-device { background: var(--ok); color: #fff; border: 0; border-radius: 999px; padding: 4px 10px; letter-spacing: normal; }
+.library-tiles .game-variants summary { display: flex; align-items: center; gap: 5px; white-space: nowrap; overflow-x: auto; scrollbar-width: thin; }
+.library-tiles .game-variants summary::before { flex: none; }
+.extras-pill { display: inline-block; flex: none; padding: 3px 7px; border-radius: 999px; background: #287f50; color: #fff; font-size: .7rem; line-height: 1.4; font-weight: 600; }
+.extras-pill-empty { background: #b85e13; color: #fff; }

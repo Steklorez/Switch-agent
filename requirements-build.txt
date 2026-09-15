@@ -1,0 +1,10 @@
+# Packaging/build-only tooling -- NOT runtime dependencies of switchagent
+# itself (nothing here is imported by any switchagent/ module). Separate
+# from requirements.txt because a plain `pip install -e .` for
+# development should never need PyInstaller pulled in.
+#
+# Locked, exact versions used for reproducible release builds live in
+# requirements-build-lock.txt -- see docs/PACKAGING.md ("Reproducible
+# dependencies") for how that's regenerated.
+
+pyinstaller>=6.0

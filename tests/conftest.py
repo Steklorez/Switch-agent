@@ -1,0 +1,68 @@
+"""Shared fixture builders for archive-based tests.
+
+Nothing here touches the real inbox/ or data/switchagent.db -- every test
+gets its own tmp_path, and DB-touching tests open a throwaway sqlite file
+inside that tmp_path.
+"""
+
+from __future__ import annotations
+
+import zipfile
+from pathlib import Path
+
+import py7zr
+import pytest
+
+from switchagent import config, db, known_folders
+
+
+def build_zip(path: Path, entries: dict[str, bytes]) -> Path:
+    with zipfile.ZipFile(path, "w") as zf:
+        for name, data in entries.items():
+            zf.writestr(name, data)
+    return path
+
+
+def build_zip_with_symlink(path: Path, link_name: str, target: str) -> Path:
+    """A zip entry that, if extracted naively, would create a symlink.
+    Emulates what a unix-made zip (e.g. via `zip --symlinks`) looks like:
+    S_IFLNK encoded in the top 16 bits of external_attr, entry content is
+    the link target text."""
+    with zipfile.ZipFile(path, "w") as zf:
+        info = zipfile.ZipInfo(link_name)
+        info.external_attr = (0xA1FF) << 16  # S_IFLNK | 0o777
+        zf.writestr(info, target.encode())
+    return path
+
+
+def build_7z(path: Path, entries: dict[str, bytes]) -> Path:
+    with py7zr.SevenZipFile(path, "w") as z:
+        for name, data in entries.items():
+            z.writestr(data, name)
+    return path
+
+
+@pytest.fixture
+def isolated_db(tmp_path, monkeypatch):
+    """A real sqlite db in a tmp dir, with config.INBOX_DIR/WORK_DIR/
+    LIBRARY_DIR also redirected there so scanner.scan_once()/
+    scan_library_once() never touch the real inbox/work/data/Download
+    folders."""
+    inbox_dir = tmp_path / "inbox"
+    work_dir = tmp_path / "work"
+    library_dir = tmp_path / "library"
+    inbox_dir.mkdir()
+    library_dir.mkdir()
+    monkeypatch.setattr(config, "INBOX_DIR", inbox_dir)
+    monkeypatch.setattr(config, "WORK_DIR", work_dir)
+    monkeypatch.setattr(config, "LIBRARY_DIR", library_dir)
+    # See tests/test_web_api.py's web_ctx fixture for why both of these
+    # matter: without them, config.library_dir_info() would silently read
+    # this machine's real config.yaml and call the real
+    # SHGetKnownFolderPath instead of staying isolated in tmp_path.
+    monkeypatch.setattr(config, "CONFIG_YAML_PATH", tmp_path / "config.yaml")
+    monkeypatch.setattr(known_folders, "downloads_dir", lambda: None)
+
+    db_path = tmp_path / "test.db"
+    with db.open_db(db_path) as conn:
+        yield conn, inbox_dir

@@ -1,0 +1,50 @@
+{% extends "base.html" %}
+{% block title %}History — SwitchAgent{% endblock %}
+{% block content %}
+<h2>History</h2>
+{% if not groups %}
+<p class="empty-state">No installs recorded yet.</p>
+{% endif %}
+<ul class="history-list">
+  {% for g in groups %}
+  <li class="batch-group" data-batch-id="{{ g.batch_id if g.batch_id is not none else '' }}">
+    {% if g.entries|length > 1 %}
+    <div class="batch-header">
+      <span class="batch-title">{{ g.entries|length }} items</span>
+    </div>
+    {% endif %}
+    <ul class="batch-jobs history-list">
+      {% for h in g.entries %}
+      <li class="history-row" data-history-id="{{ h.id }}">
+        <div class="history-name">{{ h.display_name }}</div>
+        <div class="history-meta">
+          <span class="status-pill status-{{ h.outcome|lower }}">{{ h.outcome.replace("_", " ") }}</span>
+          {{ h.target_device_label }}{% if h.target_storage %} · {{ h.target_storage }}{% endif %}
+          · {{ h.created_at }}
+        </div>
+        {% if h.error %}<div class="history-error" title="{{ h.error }}">{{ h.error }}</div>{% endif %}
+        {% if h.outcome == "DONE_UNVERIFIED" %}
+        <div class="history-verification">
+          {% if h.user_verified_outcome == "SUCCESS" %}
+          <span class="verification-note verification-success">Console: Confirmed successful by user</span>
+          <button class="btn btn-small" data-verify-action="clear" data-history-id="{{ h.id }}">Clear</button>
+          {% elif h.user_verified_outcome == "FAILED" %}
+          <span class="verification-note verification-failed">Console: Confirmed failed by user</span>
+          <button class="btn btn-small" data-verify-action="clear" data-history-id="{{ h.id }}">Clear</button>
+          {% else %}
+          <span class="verification-note">Transport accepted · Console result not confirmed</span>
+          <button class="btn btn-small" data-verify-action="SUCCESS" data-history-id="{{ h.id }}">Installed successfully</button>
+          <button class="btn btn-small btn-danger" data-verify-action="FAILED" data-history-id="{{ h.id }}">Installation failed</button>
+          {% endif %}
+        </div>
+        {% endif %}
+      </li>
+      {% endfor %}
+    </ul>
+  </li>
+  {% endfor %}
+</ul>
+{% endblock %}
+{% block scripts %}
+<script src="/static/history.js"></script>
+{% endblock %}

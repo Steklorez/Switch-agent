@@ -1,0 +1,29 @@
+# Stage 2 (scanner + SQLite) -- in use now
+watchdog>=4.0
+
+# Stage 2 (safe archive extraction + preview) -- in use now
+py7zr>=0.21
+rarfile>=4.2
+pyyaml>=6.0
+# RAR extraction additionally needs an external unrar/7z/bsdtar binary on
+# PATH -- rarfile only parses RAR headers in pure Python, it cannot
+# decompress on its own. None was found on this dev machine; see
+# docs/STAGE2.md for details. Archive *listing/classification* for .rar
+# works without it; only extractor.safe_extract() for .rar needs the tool.
+
+# Stage 3-4 (mock MTP, transfer, queue+recovery) -- in use now, stdlib only,
+# no extra packages needed beyond the ones already listed above.
+
+# Stage 5 (real Windows MTP driver) -- in use now
+pywin32>=306; sys_platform == "win32"
+
+# Stage 6 (Web UI, switchagent/web/) -- in use now
+fastapi>=0.115
+uvicorn>=0.30
+jinja2>=3.1
+python-multipart>=0.0.9
+pydantic>=2.8
+httpx>=0.27  # fastapi.testclient.TestClient's transport -- test-only, not used at runtime
+
+# Tests -- in use now
+pytest>=8.0
