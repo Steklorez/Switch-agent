@@ -243,14 +243,12 @@ def test_w3003_search_filter_and_sort_stay_within_budget_at_5000_plus_rows(perf_
             ("search_name", {"search": "Game1234"}),
             ("search_base_title_id", {"search": f"{0x0100000000010000 + 7 * 0x100000:016X}"}),
             ("filter_duplicates", {"group_filter": "duplicates"}),
-            ("filter_needs_review", {"group_filter": "needs_review"}),
-            ("filter_unverified_activity", {"group_filter": "unverified_activity"}),
-            ("filter_failed_activity", {"group_filter": "failed_activity"}),
+            ("filter_base", {"group_filter": "base"}),
             ("sort_size", {"sort": "size"}),
             ("sort_last_scanned", {"sort": "last_scanned"}),
             ("sort_name", {"sort": "name"}),
             ("combined", {
-                "search": "Game", "group_filter": "unverified_activity", "sort": "size",
+                "search": "Game", "group_filter": "duplicates", "sort": "size",
             }),
         ):
             t0 = time.monotonic()
@@ -269,29 +267,23 @@ def test_w3003_search_filter_and_sort_stay_within_budget_at_5000_plus_rows(perf_
 
 def test_w3003_filters_never_rescan_the_library_or_history_per_family(perf_ctx):
     """The concrete PERF-001 regression guard, asserted structurally rather
-    than only by wall clock: rendering the WHOLE grouped view with the new
-    activity filters must read library_items and install_history a small,
-    constant number of times -- never once per family (there are ~2,300
-    families in this corpus, so a per-family read would show up instantly
-    as a count in the thousands)."""
+    than only by wall clock: rendering the WHOLE grouped view must read
+    library_items a small, constant number of times -- never once per
+    family (there are ~2,300 families in this corpus, so a per-family read
+    would show up instantly as a count in the thousands)."""
     from switchagent import queue_worker
 
     with db.open_db(perf_ctx.db_path) as conn:
         _seed_perf_library(conn, base_count=2000)
         _seed_perf_activity(conn)
 
-        calls = {"library_items": 0, "history": 0, "family_name_source": 0}
+        calls = {"library_items": 0, "family_name_source": 0}
         real_list_library_items = db.list_library_items
-        real_list_all_history = db.list_all_install_history
         real_find_source = queue_worker.find_family_base_name_source
 
         def counting_library_items(c):
             calls["library_items"] += 1
             return real_list_library_items(c)
-
-        def counting_history(c):
-            calls["history"] += 1
-            return real_list_all_history(c)
 
         def counting_find_source(c, family_title_id, *, library_items=None):
             calls["family_name_source"] += 1
@@ -305,31 +297,25 @@ def test_w3003_filters_never_rescan_the_library_or_history_per_family(perf_ctx):
             return real_find_source(c, family_title_id, library_items=library_items)
 
         db.list_library_items = counting_library_items
-        db.list_all_install_history = counting_history
         queue_worker.find_family_base_name_source = counting_find_source
         # services.py imports these as module attributes of db/queue_worker,
         # so patching them there is what the call sites actually see.
         try:
-            services.list_library_view(
-                conn, kind="games", group_filter="unverified_activity", sort="size",
-            )
+            services.list_library_view(conn, kind="games", group_filter="base", sort="size")
         finally:
             db.list_library_items = real_list_library_items
-            db.list_all_install_history = real_list_all_history
             queue_worker.find_family_base_name_source = real_find_source
 
     assert calls["library_items"] <= 2, f"library_items read {calls['library_items']} times"
-    assert calls["history"] <= 2, f"install_history read {calls['history']} times"
-    # Lower bounds: an upper-bound-only assertion here would also pass if the
+    # Lower bound: an upper-bound-only assertion here would also pass if the
     # monkeypatched instrumentation above silently stopped intercepting the
     # real call (e.g. a future refactor changing services.py to
     # `from ..db import list_library_items` instead of the current
     # `db.list_library_items(...)` module-attribute call the monkeypatch
-    # relies on) -- the counters would stay at 0 and this test would keep
-    # "passing" while measuring nothing. Prove each counter is actually wired
-    # to a real call site.
+    # relies on) -- the counter would stay at 0 and this test would keep
+    # "passing" while measuring nothing. Prove it's actually wired to a real
+    # call site.
     assert calls["library_items"] >= 1, "library_items instrumentation never fired -- monkeypatch silently disarmed"
-    assert calls["history"] >= 1, "install_history instrumentation never fired -- monkeypatch silently disarmed"
     assert calls["family_name_source"] > 0, "find_family_base_name_source instrumentation never fired -- monkeypatch silently disarmed"
 
 
