@@ -94,10 +94,7 @@
        Mods kinds have no families to filter. #}
     <select name="filter" class="filter-select" onchange="this.form.submit()">
       {% for key, label in [("all","All"), ("base","Base Games"), ("updates","With updates"),
-                             ("dlc","With DLC"), ("mods","With mods"), ("duplicates","Duplicates"),
-                             ("needs_review","Errors / Needs review"),
-                             ("unverified_activity","Has unverified activity"),
-                             ("failed_activity","Has failed activity")] %}
+                             ("dlc","With DLC"), ("mods","With mods"), ("duplicates","Duplicates")] %}
       <option value="{{ key }}" {{ "selected" if group_filter == key }}>{{ label }}</option>
       {% endfor %}
     </select>
