@@ -11,7 +11,14 @@
       const btn = form.querySelector("button");
       btn.disabled = true;
       try {
-        const res = await fetch(form.dataset.url, {
+        // The raw device_id embeds the device's USB descriptor path (can
+        // contain '#', '&', ...) -- unencoded, a literal '#' is read as a
+        // URL fragment and silently truncates the path before it ever
+        // reaches the server, so the device_id the server sees never
+        // matches any row (device_detail.js already encodes its own
+        // fingerprint-addressed URLs for the same reason).
+        const url = `/api/devices/${encodeURIComponent(form.dataset.deviceId)}/rename`;
+        const res = await fetch(url, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ friendly_name: input.value || null }),
@@ -32,7 +39,7 @@
   document.querySelectorAll(".storage-mapping-save").forEach((btn) => {
     btn.addEventListener("click", async () => {
       const row = btn.closest("tr");
-      const deviceId = row.dataset.deviceId;
+      const deviceId = encodeURIComponent(row.dataset.deviceId);
       const rawStorageName = row.dataset.rawStorageName;
       const select = row.querySelector(".storage-mapping-select");
       const logicalName = select.value;

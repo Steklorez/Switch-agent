@@ -68,6 +68,19 @@ Name: "english"; MessagesFile: "compiler:Default.isl"
 [Tasks]
 Name: "desktopicon"; Description: "Create a &desktop shortcut"; GroupDescription: "Additional icons:"; Flags: unchecked
 
+[InstallDelete]
+; Inno Setup only ever adds/overwrites whatever [Files] lists -- it never
+; diffs against what a PREVIOUS version put there, so a file dropped from
+; a later release (a retired template, an old static asset, ...) would
+; otherwise sit on disk forever as orphaned garbage after an in-place
+; upgrade. Wiping the whole {app} tree first, on every install (fresh or
+; upgrade), guarantees the result always matches exactly what this
+; version's [Files] section lays down -- safe because {app} is ONLY
+; program files (see the block at the end of this script); user data
+; lives entirely under a separate %LOCALAPPDATA%\SwitchAgent and is never
+; touched here.
+Type: filesandordirs; Name: "{app}"
+
 [Files]
 ; The full PyInstaller onedir bundle -- SwitchAgent.exe plus _internal\.
 ; recursesubdirs/createallsubdirs preserves the bundle's own internal

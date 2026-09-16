@@ -29,6 +29,11 @@
   </div>
   {% if not connected_devices %}
   <div class="selection-target no-device-warning">No Switch connected</div>
+  {% elif connected_devices|length > 1 %}
+  {# Only one console is ever expected to be connected at a time -- with
+     two, there's no reliable way to guess which one the user means, so
+     this refuses rather than silently picking one for them. #}
+  <div class="selection-target no-device-warning">Multiple Switches connected — disconnect all but one to install</div>
   {% else %}
   <div class="selection-target">
     <label for="target-device">Target:</label>
@@ -42,7 +47,7 @@
     </select>
   </div>
   {% endif %}
-  <button id="install-selected-btn" class="btn btn-primary" {{ "disabled" if not connected_devices }}>
+  <button id="install-selected-btn" class="btn btn-primary" {{ "disabled" if connected_devices|length != 1 }}>
     Install selected
   </button>
 </div>

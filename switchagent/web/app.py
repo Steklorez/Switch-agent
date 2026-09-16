@@ -258,11 +258,12 @@ def create_app(ctx: WebContext) -> FastAPI:
     ):
         # W3-003: `filter` and `device_activity` are additive query params --
         # omitting them reproduces the exact pre-W3-003 view. `device_activity`
-        # is a device FINGERPRINT, never the raw device_id (a query string is
-        # user-visible; see services.device_label()'s docstring).
+        # is just a presence flag now (see services.list_library_view's
+        # has_device_activity) -- only one console is ever expected to be
+        # connected at a time, so there's no longer a specific device to name.
         view = services.list_library_view(
             conn, kind=kind, search=search, format_filter=format, sort=sort,
-            group_filter=filter, device_activity_fingerprint=device_activity or None,
+            group_filter=filter, has_device_activity=bool(device_activity),
             installed_on_device_base_ids=ctx.get_known_installed_title_ids(),
         )
         devices = services.list_devices(conn, ctx)

@@ -103,17 +103,15 @@
     </select>
     {# W3-003 device-activity filter. Its meaning is narrow and stated on
        screen, never implied: "SwitchAgent has ever recorded a transfer
-       attempt for this game targeting that Switch". It is NOT "installed
-       on" -- SwitchAgent cannot prove that in general. #}
+       attempt for this game". It is NOT "installed on" -- SwitchAgent
+       cannot prove that in general. Only one console is ever expected to
+       be connected at a time, so this is just a presence flag now, not a
+       per-device choice. #}
     <select name="device_activity" class="filter-select" id="device-activity-filter"
-            title="Shows games SwitchAgent has ever attempted a transfer for, targeting the selected Switch. This is a record of what SwitchAgent did — not proof the game is present on that console."
+            title="Shows games SwitchAgent has ever attempted a transfer for. This is a record of what SwitchAgent did — not proof the game is present on the console."
             onchange="this.form.submit()">
-      <option value="">SwitchAgent activity on device: any</option>
-      {% for d in devices %}
-      <option value="{{ d.device_fingerprint }}" {{ "selected" if device_activity == d.device_fingerprint }}>
-        SwitchAgent activity on {{ d.display_name }}
-      </option>
-      {% endfor %}
+      <option value="">SwitchAgent activity: any</option>
+      <option value="yes" {{ "selected" if device_activity }}>Has SwitchAgent activity</option>
     </select>
     <button type="submit" class="btn btn-secondary">Filter</button>
   </form>
@@ -123,8 +121,8 @@
 </div>
 {% if device_activity %}
 <p class="settings-hint" id="device-activity-note">
-  Filtered to games SwitchAgent has ever attempted a transfer for, targeting the selected Switch.
-  This is SwitchAgent's own record of what it did — it is not proof that the game is present on that console.
+  Filtered to games SwitchAgent has ever attempted a transfer for.
+  This is SwitchAgent's own record of what it did — it is not proof that the game is present on the console.
 </p>
 {% endif %}
 <div id="scan-status" class="scan-status" hidden></div>

@@ -233,8 +233,6 @@ def test_w3003_search_filter_and_sort_stay_within_budget_at_5000_plus_rows(perf_
     """Wall-clock ceilings, in the same style (and with the same generous
     budget) as PERF-001's own assertions above -- catching an O(N^2)-class
     blowup, which would show up as many seconds, not a fraction of one."""
-    from switchagent.mtp.windows import device_fingerprint
-
     with db.open_db(perf_ctx.db_path) as conn:
         counts = _seed_perf_library(conn, base_count=2000)
         assert counts["total"] >= 5000  # the mandate's own floor, unchanged
@@ -248,13 +246,13 @@ def test_w3003_search_filter_and_sort_stay_within_budget_at_5000_plus_rows(perf_
             ("filter_needs_review", {"group_filter": "needs_review"}),
             ("filter_unverified_activity", {"group_filter": "unverified_activity"}),
             ("filter_failed_activity", {"group_filter": "failed_activity"}),
-            ("device_activity", {"device_activity_fingerprint": device_fingerprint("mock-switch-parent")}),
+            ("device_activity", {"has_device_activity": True}),
             ("sort_size", {"sort": "size"}),
             ("sort_last_scanned", {"sort": "last_scanned"}),
             ("sort_name", {"sort": "name"}),
             ("combined", {
                 "search": "Game", "group_filter": "unverified_activity", "sort": "size",
-                "device_activity_fingerprint": device_fingerprint("mock-switch-parent"),
+                "has_device_activity": True,
             }),
         ):
             t0 = time.monotonic()

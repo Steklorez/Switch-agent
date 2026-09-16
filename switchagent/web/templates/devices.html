@@ -21,7 +21,7 @@
   <li class="device-row">
     <span class="device-dot {{ 'connected' if d.connected else 'disconnected' }}"></span>
     <div class="device-info">
-      <form class="device-rename-form" data-device-id="{{ d.device_id }}" data-url="/api/devices/{{ d.device_id }}/rename">
+      <form class="device-rename-form" data-device-id="{{ d.device_id }}">
         <input type="text" name="friendly_name" value="{{ d.friendly_name or '' }}"
                placeholder="{{ d.display_name }}">
         <button type="submit" class="btn btn-small">Save</button>
