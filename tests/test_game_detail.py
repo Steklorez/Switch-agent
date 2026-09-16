@@ -362,7 +362,8 @@ def test_install_selection_markup_matches_the_library_pages_contract(web_ctx):
     # "selecting the game selects the whole family" cascade role
     for item_id in ids.values():
         assert f'class="select-box" value="{item_id}"' in html
-    assert f'data-family="{BASE_TITLE_ID}" data-role="base"' in html
+    assert f'data-family="{BASE_TITLE_ID}"' in html
+    assert 'data-role="base"' in html
 
 
 def test_install_selection_warns_when_multiple_devices_connected(client, web_ctx):

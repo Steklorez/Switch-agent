@@ -52,19 +52,30 @@
   </button>
 </div>
 
-<dialog id="confirm-modal" class="modal">
+<dialog id="confirm-modal" class="modal" aria-labelledby="confirm-title">
+  <header class="confirm-header">
+    <h3 id="confirm-title">Install <span id="confirm-count"></span> item(s)</h3>
+  </header>
+
   <div class="modal-body">
-    <h3>Install <span id="confirm-count"></span> item(s)</h3>
-    <p>Target: <strong id="confirm-target"></strong></p>
-    <p>Destination: <strong id="confirm-destination"></strong></p>
-    <p>Total size: <strong id="confirm-size"></strong></p>
-    <p>Overwrite: <strong>No — existing files on the Switch are never replaced</strong></p>
-    <p class="settings-hint">Uncheck anything below you don't want to install.</p>
     <ul id="confirm-list" class="confirm-list"></ul>
     <div id="confirm-result" class="confirm-result" hidden></div>
   </div>
-  <div class="modal-actions">
-    <button class="btn btn-secondary" id="confirm-cancel-btn">Cancel</button>
-    <button class="btn btn-primary" id="confirm-install-btn">Confirm Install</button>
-  </div>
+
+  <footer class="confirm-footer">
+    <p class="confirm-summary">
+      Total: <strong id="confirm-count-2"></strong> item(s) ·
+      Total size: <strong id="confirm-size"></strong> ·
+      Destination: <strong id="confirm-destination"></strong> ·
+      Target: <strong id="confirm-target"></strong>
+    </p>
+    <p class="confirm-guarantee">
+      Overwrite: <strong>No — existing files on the Switch are never replaced.</strong>
+      Remove anything below you don't want to install.
+    </p>
+    <div class="modal-actions">
+      <button class="btn btn-secondary" id="confirm-cancel-btn">Cancel</button>
+      <button class="btn btn-primary" id="confirm-install-btn">Confirm Install</button>
+    </div>
+  </footer>
 </dialog>

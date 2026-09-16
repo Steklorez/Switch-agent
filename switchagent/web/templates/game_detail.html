@@ -28,6 +28,7 @@
        Library page -- it is never rendered as text here. #}
     <input type="checkbox" class="select-box" value="{{ e.id }}" data-name="{{ e.name }}"
            data-size="{{ e.size }}" data-destination="{{ destination_label(e) }}"
+           data-cover-id="{{ view.base_title_id }}"
            data-family="{{ view.base_title_id }}" data-family-name="{{ view.name }}"{% if role %} data-role="{{ role }}"{% endif %}
            {{ "disabled" if e.status not in ("AVAILABLE",) }}>
   </td>
