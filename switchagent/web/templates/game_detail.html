@@ -28,7 +28,7 @@
        Library page -- it is never rendered as text here. #}
     <input type="checkbox" class="select-box" value="{{ e.id }}" data-name="{{ e.name }}"
            data-size="{{ e.size }}" data-destination="{{ destination_label(e) }}"
-           data-family="{{ view.base_title_id }}"{% if role %} data-role="{{ role }}"{% endif %}
+           data-family="{{ view.base_title_id }}" data-family-name="{{ view.name }}"{% if role %} data-role="{{ role }}"{% endif %}
            {{ "disabled" if e.status not in ("AVAILABLE",) }}>
   </td>
   <td class="content-name">
@@ -87,9 +87,9 @@
 {% if view.base %}
   {{ content_section("Base Game", [view.base], "Base", role="base") }}
 {% endif %}
-{{ content_section("Updates", view.updates, "Update") }}
-{{ content_section("DLC", view.dlc, "DLC") }}
-{{ content_section("Mods", view.mods, "Mod") }}
+{{ content_section("Updates", view.updates, "Update", role="update") }}
+{{ content_section("DLC", view.dlc, "DLC", role="dlc") }}
+{{ content_section("Mods", view.mods, "Mod", role="mod") }}
 {{ content_section("Other copies", view.duplicates, "Other copy") }}
 {% if view.needs_review %}
 <section class="detail-section" id="needs-review-section">

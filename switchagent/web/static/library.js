@@ -8,7 +8,7 @@
 (function () {
   "use strict";
 
-  const selected = new Map(); // id -> {name, size, destination}
+  const selected = new Map(); // id -> {name, size, destination, role, familyName, family}
 
   const selectionBar = document.getElementById("selection-bar");
   const selectionCount = document.getElementById("selection-count");
@@ -50,6 +50,9 @@
           name: box.dataset.name,
           size: parseInt(box.dataset.size, 10) || 0,
           destination: box.dataset.destination || "SD Card install",
+          role: box.dataset.role || null,
+          familyName: box.dataset.familyName || null,
+          family: box.dataset.family || null,
         });
       } else {
         selected.delete(id);
@@ -150,27 +153,103 @@
   const confirmCancelBtn = document.getElementById("confirm-cancel-btn");
   const confirmInstallBtn = document.getElementById("confirm-install-btn");
 
+  // role -> tag label shown on child/flat rows in the confirm list. "base"
+  // and null are intentionally absent -- those rows never get a tag.
+  const CONFIRM_ROLE_LABELS = { update: "Update", dlc: "DLC", mod: "Mod", duplicate: "Other copy" };
+
+  // Builds one row (either a nested group child, or a standalone flat row)
+  // as a <li data-id="..."> -- shared so both cases stay in sync. Flat rows
+  // also show the destination, matching today's pre-tree look for
+  // standalone items; nested children don't repeat it (the group already
+  // groups everything for one game/destination).
+  function renderConfirmRow(id, v, className, includeDestination) {
+    const li = document.createElement("li");
+    li.className = className;
+    li.dataset.id = id;
+
+    const label = v.role ? CONFIRM_ROLE_LABELS[v.role] : null;
+    if (label) {
+      const tagSpan = document.createElement("span");
+      tagSpan.className = "confirm-tag confirm-tag-" + v.role;
+      tagSpan.textContent = "[" + label + "]";
+      li.appendChild(tagSpan);
+    }
+
+    const nameSpan = document.createElement("span");
+    nameSpan.textContent = includeDestination
+      ? v.name + " (" + formatBytes(v.size) + ") — " + v.destination
+      : v.name + " (" + formatBytes(v.size) + ")";
+    li.appendChild(nameSpan);
+
+    const removeBtn = document.createElement("button");
+    removeBtn.type = "button";
+    removeBtn.className = "confirm-item-remove";
+    removeBtn.dataset.id = id;
+    removeBtn.setAttribute("aria-label", "Remove " + v.name);
+    removeBtn.textContent = "✕";
+    li.appendChild(removeBtn);
+
+    return li;
+  }
+
+  // Builds the group header + nested children list for one family with 2+
+  // selected entries -- header carries the per-group remove button, the
+  // <ul> right after it carries one .confirm-child row per selected member
+  // of that family (in `selected`'s insertion order).
+  function renderConfirmGroup(family, familyName) {
+    const li = document.createElement("li");
+    li.className = "confirm-group";
+
+    const nameSpan = document.createElement("span");
+    nameSpan.className = "confirm-group-name";
+    nameSpan.textContent = familyName || "";
+    li.appendChild(nameSpan);
+
+    const removeBtn = document.createElement("button");
+    removeBtn.type = "button";
+    removeBtn.className = "confirm-item-remove confirm-group-remove";
+    removeBtn.dataset.family = family;
+    removeBtn.setAttribute("aria-label", "Remove " + (familyName || "") + " and all its selected items");
+    removeBtn.textContent = "✕";
+    li.appendChild(removeBtn);
+
+    const ul = document.createElement("ul");
+    ul.className = "confirm-children";
+    selected.forEach((v, id) => {
+      if (v.family !== family) return;
+      ul.appendChild(renderConfirmRow(id, v, "confirm-child", false));
+    });
+    li.appendChild(ul);
+
+    return li;
+  }
+
   function renderConfirmList() {
     confirmCount.textContent = String(selected.size);
     let totalSize = 0;
     const destinations = new Set();
-    confirmList.innerHTML = "";
-    selected.forEach((v, id) => {
+    const familyCounts = new Map();
+    selected.forEach((v) => {
       totalSize += v.size;
       destinations.add(v.destination);
-      const li = document.createElement("li");
-      li.dataset.id = id;
-      const nameSpan = document.createElement("span");
-      nameSpan.textContent = v.name + " — " + v.destination;
-      const removeBtn = document.createElement("button");
-      removeBtn.type = "button";
-      removeBtn.className = "confirm-item-remove";
-      removeBtn.setAttribute("aria-label", "Remove " + v.name);
-      removeBtn.textContent = "✕";
-      li.appendChild(nameSpan);
-      li.appendChild(removeBtn);
-      confirmList.appendChild(li);
+      if (v.family) familyCounts.set(v.family, (familyCounts.get(v.family) || 0) + 1);
     });
+
+    confirmList.innerHTML = "";
+    const renderedFamilies = new Set();
+    selected.forEach((v, id) => {
+      // Only group families with 2+ selected members -- a lone pick from
+      // an otherwise-family-eligible game (e.g. just its one DLC) stays a
+      // plain flat row, not a 1-item group.
+      if (v.family && familyCounts.get(v.family) >= 2) {
+        if (renderedFamilies.has(v.family)) return;
+        renderedFamilies.add(v.family);
+        confirmList.appendChild(renderConfirmGroup(v.family, v.familyName));
+        return;
+      }
+      confirmList.appendChild(renderConfirmRow(id, v, "confirm-list-item", true));
+    });
+
     confirmSize.textContent = formatBytes(totalSize);
     // A batch can legitimately mix destinations (a game install + an
     // atmosphere mod merge) -- never claim a single destination that
@@ -186,11 +265,30 @@
   // Lets the user drop an individual Update/DLC/Mod (or anything else)
   // right at the confirmation step, not just before opening the modal --
   // unchecks the matching card checkbox too, so the two stay in sync if
-  // the user cancels and looks at the page again.
+  // the user cancels and looks at the page again. A per-group remove drops
+  // every selected member of that family in one click; checked first since
+  // it's the more specific target (its button is also a .confirm-item-remove).
   confirmList.addEventListener("click", (evt) => {
-    const btn = evt.target.closest(".confirm-item-remove");
-    if (!btn) return;
-    const id = btn.closest("li").dataset.id;
+    const groupBtn = evt.target.closest(".confirm-group-remove");
+    if (groupBtn) {
+      const family = groupBtn.dataset.family;
+      Array.from(selected.entries())
+        .filter(([, v]) => v.family === family)
+        .forEach(([id]) => {
+          selected.delete(id);
+          const box = document.querySelector(`.select-box[value="${CSS.escape(id)}"]`);
+          if (box) box.checked = false;
+        });
+      updateSelectionBar();
+      renderConfirmList();
+      return;
+    }
+
+    const itemEl = evt.target.closest(".confirm-item-remove");
+    if (!itemEl) return;
+    const idHost = evt.target.closest("[data-id]");
+    if (!idHost) return;
+    const id = idHost.dataset.id;
     selected.delete(id);
     const box = document.querySelector(`.select-box[value="${CSS.escape(id)}"]`);
     if (box) box.checked = false;
