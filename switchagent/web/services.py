@@ -398,24 +398,14 @@ def list_library(
 # W3-003: family-level filters, applied to the GROUPED ("games") view on
 # top of the existing per-entry `kind`/`format`/`search` controls -- these
 # are genuinely new capability, not a rename of what was already there.
-# Each predicate takes one assembled family dict (see below) plus that
-# family's activity aggregate (build_family_activity_index(), or None when
-# SwitchAgent has never recorded an attempt for it).
+# Each predicate takes one assembled family dict (see below).
 _GROUP_FILTER_PREDICATES = {
-    "all": lambda g, a: True,
-    "base": lambda g, a: g["base"] is not None,
-    "updates": lambda g, a: bool(g["updates"]),
-    "dlc": lambda g, a: bool(g["dlc"]),
-    "mods": lambda g, a: bool(g["mods"]),
-    "duplicates": lambda g, a: bool(g["duplicates"]),
-    "needs_review": lambda g, a: any(
-        e["library_status"] in ("NEEDS_REVIEW", "ERROR") for e in _family_entries(g)
-    ),
-    # "at least one DONE_UNVERIFIED history row with no user confirmation"
-    "unverified_activity": lambda g, a: bool(a) and a["unconfirmed"] > 0,
-    # "at least one FAILED/INTERRUPTED/SOURCE_CHANGED/DESTINATION_CONFLICT
-    # row, or a DONE_UNVERIFIED row the user confirmed FAILED"
-    "failed_activity": lambda g, a: bool(a) and a["failed"] > 0,
+    "all": lambda g: True,
+    "base": lambda g: g["base"] is not None,
+    "updates": lambda g: bool(g["updates"]),
+    "dlc": lambda g: bool(g["dlc"]),
+    "mods": lambda g: bool(g["mods"]),
+    "duplicates": lambda g: bool(g["duplicates"]),
 }
 
 # W3-003 sorting, at the FAMILY level. Locked-in, documented semantics
@@ -468,7 +458,7 @@ def _search_haystack(entry: dict) -> str:
 def list_library_view(
     conn, *, kind: str = "games", search: Optional[str] = None,
     format_filter: Optional[str] = None, sort: str = "date_added", reverse: bool = True,
-    group_filter: str = "all", has_device_activity: bool = False,
+    group_filter: str = "all",
     installed_on_device_base_ids: Optional[set[str]] = None,
 ) -> dict:
     """The Library page's primary read: groups GAME_PACKAGE entries by
@@ -494,25 +484,13 @@ def list_library_view(
         Updates / DLC / Mods / Duplicates / Errors-Needs Review / Has
         unverified activity / Has failed activity.
 
-      has_device_activity -- its meaning is exactly and only: "SwitchAgent
-        has ever recorded a transfer ATTEMPT for this family, on any
-        device it has seen". Only one console is ever expected to be
-        connected at a time, so this no longer distinguishes which one
-        (see the install-selection "multiple Switches connected" guard).
-        It is NOT, and must never be presented as, "this game is
-        installed on that console" -- this app cannot know that (see the
-        activity section's header above, and library.html's own
-        on-screen wording).
-
     Sorting for kind="games" is family-level (see _FAMILY_SORT_KEYS);
     the flat kinds keep the per-entry _SORT_KEYS they always used. `search`
     likewise matches a whole FAMILY under kind="games" (any of its entries
     matching surfaces the whole card) and individual entries under the flat
     kinds -- see the comment at the filtering site for why.
 
-    installed_on_device_base_ids: unrelated to has_device_activity
-    above -- that one is inferred from SwitchAgent's OWN job history and
-    deliberately can never claim real installation; this is a set of BASE
+    installed_on_device_base_ids: a set of BASE
     title ids parsed straight from DBI's own "InstalledApplications.csv"
     (see WebContext.get_known_installed_title_ids()), the one signal in
     this module that genuinely can say "this is on that console right
@@ -618,16 +596,8 @@ def list_library_view(
 
     # W3-003: the family-level filters. The activity index is read ONCE for
     # the whole page here, never per family/per row (PERF-001's rule).
-    needs_activity = group_filter in ("unverified_activity", "failed_activity") or has_device_activity
+    needs_activity = group_filter in ("unverified_activity", "failed_activity")
     activity_index = build_family_activity_index(conn) if needs_activity else {}
-
-    if has_device_activity:
-        # Only one console is ever expected to be connected at a time (see
-        # the install-selection "multiple Switches connected" guard), so
-        # this no longer distinguishes WHICH device -- just whether
-        # SwitchAgent has ever recorded a transfer attempt for this family
-        # on any device it has seen.
-        games = [g for g in games if activity_index.get(g["base_title_id"], {}).get("device_ids")]
 
     predicate = _GROUP_FILTER_PREDICATES.get(group_filter, _GROUP_FILTER_PREDICATES["all"])
     games = [g for g in games if predicate(g, activity_index.get(g["base_title_id"]))]

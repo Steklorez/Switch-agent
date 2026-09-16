@@ -101,30 +101,12 @@
       <option value="{{ key }}" {{ "selected" if group_filter == key }}>{{ label }}</option>
       {% endfor %}
     </select>
-    {# W3-003 device-activity filter. Its meaning is narrow and stated on
-       screen, never implied: "SwitchAgent has ever recorded a transfer
-       attempt for this game". It is NOT "installed on" -- SwitchAgent
-       cannot prove that in general. Only one console is ever expected to
-       be connected at a time, so this is just a presence flag now, not a
-       per-device choice. #}
-    <select name="device_activity" class="filter-select" id="device-activity-filter"
-            title="Shows games SwitchAgent has ever attempted a transfer for. This is a record of what SwitchAgent did — not proof the game is present on the console."
-            onchange="this.form.submit()">
-      <option value="">SwitchAgent activity: any</option>
-      <option value="yes" {{ "selected" if device_activity }}>Has SwitchAgent activity</option>
-    </select>
     <button type="submit" class="btn btn-secondary">Filter</button>
   </form>
   <button id="rescan-btn" class="btn btn-secondary rescan-trigger" data-scan-url="/api/scan" data-status-url="/api/scan/status">
     Rescan
   </button>
 </div>
-{% if device_activity %}
-<p class="settings-hint" id="device-activity-note">
-  Filtered to games SwitchAgent has ever attempted a transfer for.
-  This is SwitchAgent's own record of what it did — it is not proof that the game is present on the console.
-</p>
-{% endif %}
 <div id="scan-status" class="scan-status" hidden></div>
 <div id="cover-status" class="scan-status" role="status" aria-live="polite">
   <span id="cover-status-text">Checking covers…</span>
