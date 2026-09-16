@@ -8,7 +8,19 @@
 (function () {
   "use strict";
 
-  const selected = new Map(); // id -> {name, size, destination, role, familyName, family}
+  // Inline trash-bin icon used on every confirm-list remove button (group-
+  // level and child-level) -- replaces the old plain "✕" glyph. No user data
+  // ever goes into this constant, so it's safe to assign via innerHTML;
+  // item NAMES must still only ever go through .textContent/.title below.
+  const TRASH_SVG =
+    '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" ' +
+    'stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false">' +
+    '<path d="M3 6h18"/>' +
+    '<path d="M8 6V4a1 1 0 0 1 1-1h6a1 1 0 0 1 1 1v2"/>' +
+    '<path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/>' +
+    '<path d="M10 11v6M14 11v6"/></svg>';
+
+  const selected = new Map(); // id -> {name, size, destination, role, familyName, family, coverId}
 
   const selectionBar = document.getElementById("selection-bar");
   const selectionCount = document.getElementById("selection-count");
@@ -53,6 +65,7 @@
           role: box.dataset.role || null,
           familyName: box.dataset.familyName || null,
           family: box.dataset.family || null,
+          coverId: box.dataset.coverId || box.dataset.family || "",
         });
       } else {
         selected.delete(id);
@@ -157,14 +170,105 @@
   // and null are intentionally absent -- those rows never get a tag.
   const CONFIRM_ROLE_LABELS = { update: "Update", dlc: "DLC", mod: "Mod", duplicate: "Other copy" };
 
-  // Builds one row (either a nested group child, or a standalone flat row)
-  // as a <li data-id="..."> -- shared so both cases stay in sync. Flat rows
-  // also show the destination, matching today's pre-tree look for
-  // standalone items; nested children don't repeat it (the group already
-  // groups everything for one game/destination).
-  function renderConfirmRow(id, v, className, includeDestination) {
+  // Cover-art loader for the confirm-list thumbnails. covers.js's own loader
+  // can't be reused here -- it hard-depends on #cover-status-text existing on
+  // the page (the confirm modal has no such element) and it snapshots
+  // [data-cover-id] once at page load rather than picking up rows added to
+  // the DOM afterward. Same endpoint + uppercase-id convention covers.js uses
+  // elsewhere on this page.
+  function attachConfirmCover(img) {
+    const id = (img.dataset.coverId || "").toUpperCase();
+    if (!id) return;
+    img.onload = () => { img.hidden = false; };
+    img.onerror = () => { img.hidden = true; };
+    img.src = `/api/covers/${encodeURIComponent(id)}`;
+  }
+
+  // Builds the <span class="confirm-thumb"> shared by group headers and
+  // standalone flat rows (nested .confirm-child rows never get one -- only
+  // top-level rows show cover art). Falls back to the first-letter
+  // placeholder alone when there's no coverId to try.
+  function buildConfirmThumb(name, coverId) {
+    const thumb = document.createElement("span");
+    thumb.className = "confirm-thumb";
+
+    const placeholder = document.createElement("span");
+    placeholder.className = "cover-placeholder";
+    placeholder.setAttribute("aria-hidden", "true");
+    placeholder.textContent = (name || "").charAt(0).toUpperCase();
+    thumb.appendChild(placeholder);
+
+    if (coverId) {
+      const img = document.createElement("img");
+      img.className = "game-cover";
+      img.dataset.coverId = coverId;
+      img.alt = "";
+      img.hidden = true;
+      thumb.appendChild(img);
+      attachConfirmCover(img);
+    }
+
+    return thumb;
+  }
+
+  // Builds the <div class="confirm-text"> name+meta block shared by group
+  // headers and standalone flat rows. Both name and meta are full,
+  // untruncated strings -- CSS handles ellipsis, .title carries the full
+  // name so hovering a truncated row still reveals it.
+  function buildConfirmTextBlock(name, nameClass, metaText) {
+    const wrap = document.createElement("div");
+    wrap.className = "confirm-text";
+
+    const nameSpan = document.createElement("span");
+    nameSpan.className = nameClass;
+    nameSpan.textContent = name;
+    nameSpan.title = name;
+    wrap.appendChild(nameSpan);
+
+    const metaSpan = document.createElement("span");
+    metaSpan.className = "confirm-meta";
+    metaSpan.textContent = metaText;
+    wrap.appendChild(metaSpan);
+
+    return wrap;
+  }
+
+  // Builds one standalone flat row (a selected item with no 2+-member
+  // family) as a <li class="confirm-list-item" data-id="...">, with cover
+  // thumbnail + name/meta text block.
+  function renderConfirmRow(id, v) {
     const li = document.createElement("li");
-    li.className = className;
+    li.className = "confirm-list-item";
+    li.dataset.id = id;
+
+    const label = v.role ? CONFIRM_ROLE_LABELS[v.role] : null;
+    if (label) {
+      const tagSpan = document.createElement("span");
+      tagSpan.className = "confirm-tag confirm-tag-" + v.role;
+      tagSpan.textContent = "[" + label + "]";
+      li.appendChild(tagSpan);
+    }
+
+    li.appendChild(buildConfirmThumb(v.name, v.coverId));
+    li.appendChild(buildConfirmTextBlock(v.name, "confirm-name", formatBytes(v.size) + " · " + v.destination));
+
+    const removeBtn = document.createElement("button");
+    removeBtn.type = "button";
+    removeBtn.className = "confirm-item-remove";
+    removeBtn.dataset.id = id;
+    removeBtn.setAttribute("aria-label", "Remove " + v.name);
+    removeBtn.innerHTML = TRASH_SVG;
+    li.appendChild(removeBtn);
+
+    return li;
+  }
+
+  // Builds one nested <li class="confirm-child" data-id="..."> inside a
+  // group's <ul class="confirm-children"> -- no thumbnail (per the design,
+  // only top-level rows show cover art), just tag + name + remove button.
+  function renderConfirmChildRow(id, v) {
+    const li = document.createElement("li");
+    li.className = "confirm-child";
     li.dataset.id = id;
 
     const label = v.role ? CONFIRM_ROLE_LABELS[v.role] : null;
@@ -176,9 +280,9 @@
     }
 
     const nameSpan = document.createElement("span");
-    nameSpan.textContent = includeDestination
-      ? v.name + " (" + formatBytes(v.size) + ") — " + v.destination
-      : v.name + " (" + formatBytes(v.size) + ")";
+    nameSpan.className = "confirm-child-name";
+    nameSpan.textContent = v.name;
+    nameSpan.title = v.name;
     li.appendChild(nameSpan);
 
     const removeBtn = document.createElement("button");
@@ -186,38 +290,60 @@
     removeBtn.className = "confirm-item-remove";
     removeBtn.dataset.id = id;
     removeBtn.setAttribute("aria-label", "Remove " + v.name);
-    removeBtn.textContent = "✕";
+    removeBtn.innerHTML = TRASH_SVG;
     li.appendChild(removeBtn);
 
     return li;
   }
 
   // Builds the group header + nested children list for one family with 2+
-  // selected entries -- header carries the per-group remove button, the
-  // <ul> right after it carries one .confirm-child row per selected member
-  // of that family (in `selected`'s insertion order).
+  // selected entries -- header carries the cover thumbnail, name/meta text
+  // block and the per-group remove button; the <ul> right after it carries
+  // one .confirm-child row per selected member of that family (in
+  // `selected`'s insertion order). The grouping/dedup decision itself (which
+  // families qualify for a group at all) is made by the caller, unchanged.
   function renderConfirmGroup(family, familyName) {
     const li = document.createElement("li");
     li.className = "confirm-group";
 
-    const nameSpan = document.createElement("span");
-    nameSpan.className = "confirm-group-name";
-    nameSpan.textContent = familyName || "";
-    li.appendChild(nameSpan);
+    // The group's OWN totals -- not the whole selection's -- so the meta
+    // line always matches what's actually nested under this one group.
+    let groupSize = 0;
+    let itemCount = 0;
+    const groupDestinations = new Set();
+    selected.forEach((v) => {
+      if (v.family !== family) return;
+      groupSize += v.size;
+      itemCount += 1;
+      groupDestinations.add(v.destination);
+    });
+    const groupDestination = groupDestinations.size === 1
+      ? Array.from(groupDestinations)[0]
+      : groupDestinations.size + " different";
+
+    // `family` is itself the base game's TITLE_ID / cover id (same value the
+    // base row's own data-cover-id carries), so it doubles as the group
+    // thumbnail's cover id with no extra lookup needed.
+    li.appendChild(buildConfirmThumb(familyName || "", family));
+    li.appendChild(buildConfirmTextBlock(
+      familyName || "",
+      "confirm-group-name",
+      "Base game · " + itemCount + " item(s) · " + formatBytes(groupSize) + " · " + groupDestination
+    ));
 
     const removeBtn = document.createElement("button");
     removeBtn.type = "button";
     removeBtn.className = "confirm-item-remove confirm-group-remove";
     removeBtn.dataset.family = family;
-    removeBtn.setAttribute("aria-label", "Remove " + (familyName || "") + " and all its selected items");
-    removeBtn.textContent = "✕";
+    removeBtn.setAttribute("aria-label", "Remove " + (familyName || "") + " and all its content");
+    removeBtn.innerHTML = TRASH_SVG;
     li.appendChild(removeBtn);
 
     const ul = document.createElement("ul");
     ul.className = "confirm-children";
     selected.forEach((v, id) => {
       if (v.family !== family) return;
-      ul.appendChild(renderConfirmRow(id, v, "confirm-child", false));
+      ul.appendChild(renderConfirmChildRow(id, v));
     });
     li.appendChild(ul);
 
@@ -226,6 +352,7 @@
 
   function renderConfirmList() {
     confirmCount.textContent = String(selected.size);
+    document.getElementById("confirm-count-2").textContent = String(selected.size);
     let totalSize = 0;
     const destinations = new Set();
     const familyCounts = new Map();
@@ -247,7 +374,7 @@
         confirmList.appendChild(renderConfirmGroup(v.family, v.familyName));
         return;
       }
-      confirmList.appendChild(renderConfirmRow(id, v, "confirm-list-item", true));
+      confirmList.appendChild(renderConfirmRow(id, v));
     });
 
     confirmSize.textContent = formatBytes(totalSize);

@@ -212,61 +212,211 @@ a { color: var(--accent); text-decoration: none; }
 }
 .modal::backdrop { background: rgba(0,0,0,0.6); }
 .modal-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 14px; }
-.confirm-list { max-height: 220px; overflow-y: auto; font-size: 0.85rem; padding: 0; list-style: none; }
-.confirm-list li, .confirm-list-item {
-  display: flex; align-items: center; justify-content: space-between; gap: 10px;
-  padding: 6px 2px; border-bottom: 1px solid var(--border);
-}
-.confirm-list li span, .confirm-list-item span { word-break: break-word; }
 
-/* Detailed Installation Tree List: one <li class="confirm-group"> per game,
-   holding a name + its own remove button as the "header row" plus a nested
-   .confirm-children <ul> of Update/DLC/Mod/duplicate rows. flex-wrap + the
-   children list's flex-basis:100% (same trick as .history-row /
-   .history-verification above) keeps the header itself a normal
-   space-between row -- same right-aligned remove-button position any other
-   .confirm-list li/.confirm-item-remove pair gets -- while the group as a
-   whole still spans multiple visual rows instead of being squashed into one
-   tight line. */
-.confirm-list li.confirm-group {
-  display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 10px;
-  padding: 4px 0; border-bottom: 1px solid var(--border);
-}
-.confirm-group-name { font-weight: 600; word-break: break-word; }
-.confirm-children {
-  flex-basis: 100%; margin: 4px 0 4px 18px; padding-left: 10px;
-  border-left: 2px solid var(--border); list-style: none;
-}
-/* Nested Update/DLC/Mod/duplicate row -- same flex row as .confirm-list li
-   (inherited via the selector above, since it's still a <li> inside
-   .confirm-list), just more compact since it's already indented under a
-   group. */
-.confirm-list li.confirm-child { padding: 4px 2px; font-size: 0.8rem; }
+/* Root-cause fix for the "DLC"/"Update"/"Mod" tag letter-stacking bug:
+   this used to blanket-apply word-break: break-word to every <span> in a
+   confirm-list row, including .confirm-tag -- combined with a too-narrow
+   modal squeezing the tag's flex width, that made "DLC" wrap letter by
+   letter ("D" / "L" / "C" stacked vertically). Narrowed to exclude
+   .confirm-tag; .confirm-tag also gets its own explicit
+   nowrap/no-shrink/no-break rule below (#confirm-modal .confirm-tag) so it
+   can never break regardless of any other inherited rule either. */
+.confirm-list li span:not(.confirm-tag),
+.confirm-list-item span:not(.confirm-tag) { word-break: break-word; }
 
-.confirm-item-remove {
-  flex: none; background: none; border: none; color: var(--danger); font-size: 1rem;
-  cursor: pointer; min-width: 32px; min-height: 32px; border-radius: 6px;
+/* -- #confirm-modal: install-confirmation dialog -------------------------
+   Wider/taller than the generic .modal above (installs can involve many
+   items across several games, each with a nested Update/DLC/Mod/duplicate
+   tree), its own glow outline, and a fixed header / scrolling-list / fixed
+   footer layout. Every rule below is ID-scoped so it (a) can never be beaten
+   by a later class-only rule in showroom.css, which loads AFTER this file
+   and redefines several of the --token values referenced here (see
+   base.html) -- ID beats class regardless of source order -- and (b) never
+   leaks onto #detail-modal or any other .modal, which keeps its original
+   compact size untouched. Halo RGB triplet (30,224,242) reused verbatim
+   from showroom.css's `.library-tiles .motion-card { --halo: 30,224,242; }`
+   -- the same cyan/teal glow already used for the card hover effect, not a
+   new invented color. All classes referenced here (.confirm-group,
+   .confirm-list-item, .confirm-children, .confirm-child, .confirm-tag*,
+   .confirm-item-remove, ...) replace the old flat confirm-list styling
+   above wholesale -- these classes are only ever rendered inside
+   #confirm-modal, so there is deliberately no separate unscoped copy of
+   them left behind. */
+#confirm-modal {
+  width: min(1100px, calc(100vw - 48px));
+  max-width: none;
+  max-height: min(86vh, 860px);
+  padding: 0;
+  border-radius: 18px;
+  overflow: hidden;
+  box-shadow:
+    0 0 0 1px rgba(30,224,242,.28),
+    0 0 26px 2px rgba(30,224,242,.16),
+    0 28px 70px rgba(0,0,0,.55);
 }
-.confirm-item-remove:hover { background: rgba(229,72,77,0.15); }
-/* .confirm-group-remove reuses .confirm-item-remove wholesale (the JS emits
-   both classes on the same button) -- no separate rule needed. */
+/* <dialog> defaults to display:none when closed -- scope the flex layout
+   to [open] only, so it never fights that default. */
+#confirm-modal[open] { display: flex; flex-direction: column; }
+#confirm-modal::backdrop { background: rgba(4,7,12,.72); }
 
-/* Small inline tag shown before an item's name on nested Update/DLC/Mod/
-   duplicate rows (omitted for base-game rows). Solid fill using the
-   existing theme tokens (no new colors), same "readable on the dark modal"
-   approach as .status-on-device/.btn-primary/.btn-danger above rather than
-   the softer rgba-tint look the .status-* pills use. */
-.confirm-tag {
-  display: inline-block; flex: none; font-size: 0.7rem; font-weight: 700;
-  padding: 1px 6px; border-radius: 4px; margin-right: 6px;
-  text-transform: uppercase; letter-spacing: 0.02em;
+#confirm-modal .confirm-header {
+  flex: none; display: flex; align-items: center; justify-content: space-between;
+  padding: 18px 22px 14px; border-bottom: 1px solid var(--border);
 }
-.confirm-tag-update { background: var(--accent); color: #fff; }
-.confirm-tag-dlc { background: var(--ok); color: #fff; }
-.confirm-tag-mod { background: var(--warn); color: var(--bg); }
-.confirm-tag-duplicate { background: var(--danger); color: #fff; }
+#confirm-modal .confirm-header h3 { margin: 0; font-size: 1.15rem; }
 
-.confirm-result { margin-top: 10px; font-size: 0.85rem; }
+#confirm-modal .modal-body {
+  flex: 1 1 auto; min-height: 0; display: flex; flex-direction: column;
+  padding: 16px 22px 4px; overflow: hidden;
+}
+
+/* Row list -- scrolls independently of the fixed header/footer. */
+#confirm-modal .confirm-list {
+  max-height: none; flex: 1 1 auto; min-height: 0;
+  overflow-y: auto; overscroll-behavior: contain;
+  margin: 0; padding: 2px 6px 2px 0; list-style: none;
+  display: flex; flex-direction: column; gap: 12px;
+  font-size: 0.9rem;
+}
+#confirm-modal .confirm-list > li { display: flex; align-items: center; gap: 14px; padding: 0; border-bottom: 0; }
+/* flex-wrap lets .confirm-children (flex-basis: 100% below) drop onto its
+   own full-width line beneath the group header instead of being squeezed
+   into the header's flex row. */
+#confirm-modal .confirm-group { flex-wrap: wrap; }
+#confirm-modal .confirm-group,
+#confirm-modal .confirm-list-item {
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  padding: 16px 18px;
+  box-shadow: 0 2px 10px rgba(0,0,0,.22);
+}
+#confirm-modal .confirm-group:hover,
+#confirm-modal .confirm-list-item:hover { border-color: rgba(30,224,242,.34); }
+
+#confirm-modal .confirm-text { flex: 1 1 auto; min-width: 0; display: flex; flex-direction: column; gap: 4px; }
+#confirm-modal .confirm-group-name,
+#confirm-modal .confirm-name { font-weight: 700; font-size: 0.95rem; color: var(--text); }
+#confirm-modal .confirm-meta { font-size: 0.79rem; color: var(--text-dim); }
+
+/* Cover thumbnail. style.css already has a generic .game-cover rule (the
+   Library page's card art: position:absolute with pixel offsets sized for
+   a different container) and a generic .cover-placeholder rule (4rem font,
+   also sized for that other container) -- both single-class selectors
+   (specificity 0,1,0). The rules below are ID + 2 classes (1,2,0), which
+   outranks a plain class selector regardless of which stylesheet loads
+   last, so these correctly win for thumbnails inside the modal without
+   touching the Library-page rules at all. */
+#confirm-modal .confirm-thumb {
+  flex: none; position: relative; width: 64px; height: 64px;
+  border-radius: 10px; overflow: hidden;
+  background: linear-gradient(135deg, #303e56, #1b222d);
+}
+#confirm-modal .confirm-thumb .game-cover { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; border-radius: 0; }
+#confirm-modal .confirm-thumb .cover-placeholder {
+  position: absolute; inset: 0; display: grid; place-items: center;
+  font-size: 1.6rem; font-weight: 700; color: #8e9db2;
+}
+
+/* Trash icon buttons -- .confirm-group-remove reuses .confirm-item-remove
+   wholesale (the JS emits both classes on the same button) plus a slightly
+   larger size for the group-header row. */
+#confirm-modal .confirm-item-remove {
+  flex: none; display: inline-flex; align-items: center; justify-content: center;
+  width: 32px; height: 32px; padding: 0;
+  border: 1px solid transparent; border-radius: 9px;
+  background: none; color: var(--danger); cursor: pointer;
+  transition: background-color 150ms ease, border-color 150ms ease;
+}
+#confirm-modal .confirm-item-remove svg { width: 16px; height: 16px; display: block; }
+#confirm-modal .confirm-group-remove { width: 36px; height: 36px; }
+#confirm-modal .confirm-group-remove svg { width: 18px; height: 18px; }
+#confirm-modal .confirm-item-remove:hover { background: rgba(229,72,77,.15); border-color: rgba(229,72,77,.45); }
+#confirm-modal .confirm-item-remove:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+
+/* Update/DLC/Mod/duplicate tag pills. Dark text (var(--bg)) on all four
+   fills reads consistently better than the old white-on-danger mix. */
+#confirm-modal .confirm-tag {
+  flex: 0 0 auto; white-space: nowrap; word-break: normal; overflow-wrap: normal;
+  display: inline-flex; align-items: center;
+  padding: 3px 9px; border-radius: 999px;
+  font-size: 0.7rem; font-weight: 700; letter-spacing: .01em; line-height: 1.35;
+  color: var(--bg);
+}
+#confirm-modal .confirm-tag-update    { background: var(--accent); }
+#confirm-modal .confirm-tag-dlc       { background: var(--ok); }
+#confirm-modal .confirm-tag-mod       { background: var(--warn); }
+#confirm-modal .confirm-tag-duplicate { background: var(--danger); }
+
+/* Tree line for nested Update/DLC/Mod/duplicate rows: a continuous vertical
+   trunk down the left of .confirm-children with a horizontal tick into each
+   .confirm-child row (file-explorer-tree style), replacing the old plain
+   border-left. .confirm-children keeps the flex-basis: 100% trick (forces
+   it onto its own line inside the flex-wrap .confirm-group above) rather
+   than restructuring the DOM with an extra wrapper. */
+#confirm-modal .confirm-children {
+  flex-basis: 100%;
+  list-style: none; margin: 12px 0 0 0; padding: 0 0 0 28px;
+  display: flex; flex-direction: column; gap: 8px;
+  position: relative;
+}
+#confirm-modal .confirm-child {
+  position: relative; display: flex; align-items: center; gap: 10px;
+  min-height: 42px; padding: 6px 10px;
+  border: 1px solid var(--border); border-radius: 10px;
+  background: var(--surface);
+}
+#confirm-modal .confirm-child::before {
+  content: ""; position: absolute; left: -17px; top: 0;
+  width: 1px; height: calc(100% + 8px); background: var(--border);
+}
+#confirm-modal .confirm-child:first-child::before { top: -12px; height: calc(100% + 20px); }
+#confirm-modal .confirm-child:last-child::before { height: 21px; }
+#confirm-modal .confirm-child:first-child:last-child::before { top: -12px; height: 33px; }
+#confirm-modal .confirm-child::after {
+  content: ""; position: absolute; left: -17px; top: 21px;
+  width: 12px; height: 1px; background: var(--border);
+}
+
+/* Single-line ellipsis truncation instead of wrapping for names/meta text.
+   Only works because .confirm-text (above) and .confirm-child (flex row)
+   both allow their flex children to shrink below content width via
+   min-width: 0 -- required, don't drop it. */
+#confirm-modal .confirm-group-name,
+#confirm-modal .confirm-name,
+#confirm-modal .confirm-child-name,
+#confirm-modal .confirm-meta {
+  display: block; min-width: 0;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  word-break: normal; overflow-wrap: normal;
+}
+#confirm-modal .confirm-child-name { flex: 1 1 auto; }
+
+#confirm-modal .confirm-result { flex: none; margin-top: 10px; font-size: 0.85rem; }
+
+#confirm-modal .confirm-footer {
+  flex: none; padding: 14px 22px 18px; border-top: 1px solid var(--border);
+  display: flex; flex-direction: column; gap: 8px;
+}
+#confirm-modal .confirm-summary,
+#confirm-modal .confirm-guarantee { margin: 0; font-size: 0.82rem; color: var(--text-dim); }
+#confirm-modal .confirm-summary strong { color: var(--text); font-weight: 600; }
+#confirm-modal .confirm-guarantee strong { color: var(--ok); font-weight: 600; }
+#confirm-modal .modal-actions { margin-top: 4px; display: flex; justify-content: flex-end; gap: 10px; }
+#confirm-modal .modal-actions .btn { min-width: 132px; }
+
+@media (max-width: 640px) {
+  #confirm-modal { width: calc(100vw - 20px); max-height: 92vh; border-radius: 14px; }
+  #confirm-modal .confirm-header { padding: 14px 14px 10px; }
+  #confirm-modal .modal-body { padding: 12px 14px 4px; }
+  #confirm-modal .confirm-group, #confirm-modal .confirm-list-item { padding: 12px; border-radius: 12px; }
+  #confirm-modal .confirm-thumb { width: 48px; height: 48px; border-radius: 8px; }
+  #confirm-modal .confirm-thumb .cover-placeholder { font-size: 1.25rem; }
+  #confirm-modal .confirm-children { padding-left: 20px; }
+  #confirm-modal .confirm-child::before, #confirm-modal .confirm-child::after { left: -12px; }
+  #confirm-modal .confirm-footer { padding: 12px 14px 14px; }
+  #confirm-modal .modal-actions .btn { flex: 1 1 0; min-width: 0; }
+}
 
 .detail-table { width: 100%; border-collapse: collapse; font-size: 0.85rem; }
 .detail-table th { text-align: left; color: var(--text-dim); padding: 6px 10px 6px 0; vertical-align: top; white-space: nowrap; }
