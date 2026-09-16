@@ -4,7 +4,7 @@
 
 ![](https://capsule-render.vercel.app/api?type=waving&color=gradient&customColorList=12&height=90&section=header)
 
-### ☕ Нравится SwitchAgent? Угостите автора чашкой кофе!
+### ☕ Enjoying SwitchAgent? Consider buying the author a cup of coffee!
 
 [![Ko-fi](https://img.shields.io/badge/Ko--fi-Donate-FF5E5B?style=for-the-badge&logo=kofi&logoColor=white)](https://ko-fi.com/I3I0273OYI)
 [![Boosty](https://img.shields.io/badge/Boosty-Donate-F15F2C?style=for-the-badge&logo=boosty&logoColor=white)](https://boosty.to/steklorez)
