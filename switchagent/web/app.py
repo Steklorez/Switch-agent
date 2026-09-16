@@ -253,17 +253,14 @@ def create_app(ctx: WebContext) -> FastAPI:
     def page_library(
         request: Request, search: Optional[str] = None, kind: str = "games",
         format: Optional[str] = None, sort: str = "date_added",
-        filter: str = "all", device_activity: Optional[str] = None,
+        filter: str = "all",
         conn=Depends(get_conn), ctx: WebContext = Depends(get_ctx),
     ):
-        # W3-003: `filter` and `device_activity` are additive query params --
-        # omitting them reproduces the exact pre-W3-003 view. `device_activity`
-        # is just a presence flag now (see services.list_library_view's
-        # has_device_activity) -- only one console is ever expected to be
-        # connected at a time, so there's no longer a specific device to name.
+        # W3-003: `filter` is an additive query param -- omitting it
+        # reproduces the exact pre-W3-003 view.
         view = services.list_library_view(
             conn, kind=kind, search=search, format_filter=format, sort=sort,
-            group_filter=filter, has_device_activity=bool(device_activity),
+            group_filter=filter,
             installed_on_device_base_ids=ctx.get_known_installed_title_ids(),
         )
         devices = services.list_devices(conn, ctx)
@@ -277,7 +274,7 @@ def create_app(ctx: WebContext) -> FastAPI:
             "view": view, "devices": devices, "search": search or "",
             "show_installed_games_hint": show_installed_games_hint,
             "kind": kind, "format_filter": format or "", "sort": sort,
-            "group_filter": filter, "device_activity": device_activity or "",
+            "group_filter": filter,
             "active_page": "library",
             "library_onboarding": _library_onboarding_message(conn),
         })
