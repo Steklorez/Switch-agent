@@ -57,7 +57,14 @@ body {
 .btn, .search-box, .filter-select, .motion-controls select {
   border-color: #aecfff25;
   border-radius: 11px;
-  background: linear-gradient(145deg, #273245, #1b2432);
+  /* background-color explicit, not just the gradient image -- the
+     `background:` shorthand alone resets background-color to
+     transparent, and Firefox falls back to a plain white native popup
+     for a <select>'s dropdown list when it can't read a solid color off
+     the closed control, leaving light option text unreadable on that
+     white popup (Chrome doesn't have this quirk). */
+  background-color: #202938;
+  background-image: linear-gradient(145deg, #273245, #1b2432);
   box-shadow: inset 0 1px #ffffff07, 0 3px 10px #0002;
   transition: border-color 200ms ease, box-shadow 200ms ease, background-color 200ms ease;
 }
