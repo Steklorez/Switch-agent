@@ -468,7 +468,7 @@ def _search_haystack(entry: dict) -> str:
 def list_library_view(
     conn, *, kind: str = "games", search: Optional[str] = None,
     format_filter: Optional[str] = None, sort: str = "date_added", reverse: bool = True,
-    group_filter: str = "all", device_activity_fingerprint: Optional[str] = None,
+    group_filter: str = "all", has_device_activity: bool = False,
     installed_on_device_base_ids: Optional[set[str]] = None,
 ) -> dict:
     """The Library page's primary read: groups GAME_PACKAGE entries by
@@ -494,14 +494,15 @@ def list_library_view(
         Updates / DLC / Mods / Duplicates / Errors-Needs Review / Has
         unverified activity / Has failed activity.
 
-      device_activity_fingerprint -- mtp.windows.device_fingerprint() of
-        ONE known Switch (never the raw, serial-bearing device_id, which
-        must not appear in a page's query string). Its meaning is exactly
-        and only: "SwitchAgent has ever recorded a transfer ATTEMPT for
-        this family targeting that device". It is NOT, and must never be
-        presented as, "this game is installed on that console" -- this app
-        cannot know that (see the activity section's header above, and
-        library.html's own on-screen wording).
+      has_device_activity -- its meaning is exactly and only: "SwitchAgent
+        has ever recorded a transfer ATTEMPT for this family, on any
+        device it has seen". Only one console is ever expected to be
+        connected at a time, so this no longer distinguishes which one
+        (see the install-selection "multiple Switches connected" guard).
+        It is NOT, and must never be presented as, "this game is
+        installed on that console" -- this app cannot know that (see the
+        activity section's header above, and library.html's own
+        on-screen wording).
 
     Sorting for kind="games" is family-level (see _FAMILY_SORT_KEYS);
     the flat kinds keep the per-entry _SORT_KEYS they always used. `search`
@@ -509,7 +510,7 @@ def list_library_view(
     matching surfaces the whole card) and individual entries under the flat
     kinds -- see the comment at the filtering site for why.
 
-    installed_on_device_base_ids: unrelated to device_activity_fingerprint
+    installed_on_device_base_ids: unrelated to has_device_activity
     above -- that one is inferred from SwitchAgent's OWN job history and
     deliberately can never claim real installation; this is a set of BASE
     title ids parsed straight from DBI's own "InstalledApplications.csv"
@@ -617,24 +618,16 @@ def list_library_view(
 
     # W3-003: the family-level filters. The activity index is read ONCE for
     # the whole page here, never per family/per row (PERF-001's rule).
-    needs_activity = group_filter in ("unverified_activity", "failed_activity") or device_activity_fingerprint
+    needs_activity = group_filter in ("unverified_activity", "failed_activity") or has_device_activity
     activity_index = build_family_activity_index(conn) if needs_activity else {}
 
-    if device_activity_fingerprint:
-        from ..mtp.windows import device_fingerprint
-
-        # Device counts are always tiny (this is a personal USB-connected
-        # Switch, not a fleet) -- a linear scan is the right lookup, no new
-        # index or stored column needed. An unknown fingerprint matches
-        # nothing rather than silently disabling the filter.
-        matching_device_ids = {
-            row["device_id"] for row in db.list_devices(conn)
-            if device_fingerprint(row["device_id"]) == device_activity_fingerprint
-        }
-        games = [
-            g for g in games
-            if activity_index.get(g["base_title_id"], {}).get("device_ids", set()) & matching_device_ids
-        ]
+    if has_device_activity:
+        # Only one console is ever expected to be connected at a time (see
+        # the install-selection "multiple Switches connected" guard), so
+        # this no longer distinguishes WHICH device -- just whether
+        # SwitchAgent has ever recorded a transfer attempt for this family
+        # on any device it has seen.
+        games = [g for g in games if activity_index.get(g["base_title_id"], {}).get("device_ids")]
 
     predicate = _GROUP_FILTER_PREDICATES.get(group_filter, _GROUP_FILTER_PREDICATES["all"])
     games = [g for g in games if predicate(g, activity_index.get(g["base_title_id"]))]

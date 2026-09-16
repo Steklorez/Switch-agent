@@ -21,7 +21,6 @@ import pytest
 from fastapi.testclient import TestClient
 
 from switchagent import config, db, known_folders
-from switchagent.mtp.windows import device_fingerprint
 from switchagent.web import services
 from switchagent.web.app import create_app
 from switchagent.web.context import build_mock_context
@@ -329,34 +328,29 @@ def test_has_failed_activity_filter_includes_user_confirmed_failures(conn):
 
 def test_device_activity_filter_means_attempted_not_installed(conn):
     """Its semantics are exactly "SwitchAgent has ever recorded a transfer
-    ATTEMPT for this family targeting this device" -- so a FAILED attempt
-    counts (nothing was installed), and a success on a DIFFERENT device
-    does not."""
+    ATTEMPT for this family" -- so a FAILED attempt counts (nothing was
+    installed). It no longer distinguishes which device the attempt was
+    on: only one console is ever expected to be connected at a time (see
+    the install-selection "multiple Switches connected" guard)."""
     _package(conn, "TriedOnParent.nsp", GAME_A_BASE)
     _package(conn, "DoneOnChild.nsp", GAME_B_BASE)
     _package(conn, "NeverSent.nsp", GAME_C_BASE)
     _history(conn, title_id=GAME_A_BASE, device_id=PARENT, outcome="FAILED")
     _history(conn, title_id=GAME_B_BASE, device_id=CHILD, outcome="DONE", storage="SD_CARD")
 
-    parent_view = services.list_library_view(conn, device_activity_fingerprint=device_fingerprint(PARENT))
-    assert _family_ids(parent_view) == [GAME_A_BASE]
-
-    child_view = services.list_library_view(conn, device_activity_fingerprint=device_fingerprint(CHILD))
-    assert _family_ids(child_view) == [GAME_B_BASE]
-
-    # An unknown fingerprint matches nothing rather than quietly becoming a no-op.
-    assert services.list_library_view(conn, device_activity_fingerprint="deadbeefdeadbeef")["games"] == []
+    filtered = services.list_library_view(conn, has_device_activity=True)
+    assert set(_family_ids(filtered)) == {GAME_A_BASE, GAME_B_BASE}
 
 
 def test_device_activity_filter_combines_with_the_other_filters(conn):
-    _package(conn, "Both.nsp", GAME_A_BASE)
-    _package(conn, "OnlyUnverified.nsp", GAME_B_BASE)
+    """has_device_activity=True still combines as an AND with an
+    unrelated group_filter -- a base game with no recorded activity is
+    excluded even though it would otherwise pass group_filter="base"."""
+    _package(conn, "HasActivity.nsp", GAME_A_BASE)
+    _package(conn, "NoActivity.nsp", GAME_B_BASE)
     _history(conn, title_id=GAME_A_BASE, device_id=PARENT, outcome="DONE_UNVERIFIED")
-    _history(conn, title_id=GAME_B_BASE, device_id=CHILD, outcome="DONE_UNVERIFIED")
 
-    view = services.list_library_view(
-        conn, group_filter="unverified_activity", device_activity_fingerprint=device_fingerprint(PARENT),
-    )
+    view = services.list_library_view(conn, group_filter="base", has_device_activity=True)
     assert _family_ids(view) == [GAME_A_BASE]
 
 
@@ -457,13 +451,12 @@ def test_library_page_exposes_every_new_control(client, web_ctx):
     for value in ("unverified_activity", "failed_activity", "duplicates", "needs_review"):
         assert f'value="{value}"' in html, value
     assert 'id="device-activity-filter"' in html
-    assert f'value="{device_fingerprint(PARENT)}"' in html
+    assert 'value="yes"' in html
     for label in ("Recently added", "Last scanned", "Size", "Name"):
         assert f">{label}<" in html, label
-    # This is the first place a device identity reaches the Library page's
-    # HTML (the new device-activity <select>, whose values become a
-    # query-string parameter) -- the fingerprint being present above is
-    # not by itself proof the raw device_id is ever absent.
+    # Only one console is ever expected to be connected at a time, so the
+    # device-activity filter is just a presence flag now -- no per-device
+    # option, and no raw device_id, ever reaches this page's HTML.
     assert PARENT not in html
 
 
@@ -476,13 +469,13 @@ def test_device_activity_filter_ui_never_claims_the_game_is_installed(client, we
         _history(conn, title_id=GAME_A_BASE, device_id=PARENT, outcome="DONE_UNVERIFIED")
 
     html = client.get("/").text
-    assert "SwitchAgent activity on" in html
-    assert "not proof the game is present on that console" in html
+    assert "SwitchAgent activity" in html
+    assert "not proof the game is present on the console" in html
     assert "Installed on" not in html
 
-    filtered = client.get(f"/?device_activity={device_fingerprint(PARENT)}").text
+    filtered = client.get("/?device_activity=yes").text
     assert 'id="device-activity-note"' in filtered
-    assert "it is not proof that the game is present on that console" in filtered
+    assert "it is not proof that the game is present on the console" in filtered
 
 
 def test_library_page_filters_end_to_end_over_http(client, web_ctx):

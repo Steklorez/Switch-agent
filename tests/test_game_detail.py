@@ -340,12 +340,19 @@ def test_game_detail_page_never_renders_raw_device_id(client, web_ctx):
 # install from this page -- the SAME pipeline as the Library page
 # ---------------------------------------------------------------------------
 
-def test_install_selection_markup_matches_the_library_pages_contract(client, web_ctx):
+def test_install_selection_markup_matches_the_library_pages_contract(web_ctx):
     """The page reuses /static/library.js verbatim, which binds by these
     exact ids/attributes -- without them the selection + confirm flow
-    silently does nothing."""
+    silently does nothing. Needs exactly one connected device: with the
+    default two-mock-device fixture, the install-selection UI
+    deliberately renders its "disconnect one" warning instead of a
+    picker (see test_install_selection_warns_when_multiple_devices_connected)."""
     ids = _seed_full_family(web_ctx)
-    html = client.get(f"/games/{BASE_TITLE_ID}").text
+    single_device_ctx = build_mock_context(web_ctx.db_path, device_ids=["mock-switch-parent"])
+    with db.open_db(web_ctx.db_path) as conn:
+        single_device_ctx.refresh_devices(conn)
+    single_client = TestClient(create_app(single_device_ctx))
+    html = single_client.get(f"/games/{BASE_TITLE_ID}").text
 
     assert '<script src="/static/library.js"></script>' in html
     for element_id in ("selection-bar", "install-selected-btn", "confirm-modal",
@@ -356,6 +363,19 @@ def test_install_selection_markup_matches_the_library_pages_contract(client, web
     for item_id in ids.values():
         assert f'class="select-box" value="{item_id}"' in html
     assert f'data-family="{BASE_TITLE_ID}" data-role="base"' in html
+
+
+def test_install_selection_warns_when_multiple_devices_connected(client, web_ctx):
+    """Only one console is ever expected to be connected at a time. The
+    default fixture has two connected mock devices (a realistic "which
+    one do you mean" scenario) -- installing to "whichever one" can't be
+    guessed safely, so the picker is replaced by an explicit warning and
+    the Install button stays disabled rather than letting the user
+    silently pick between two real, physically-connected consoles."""
+    _seed_full_family(web_ctx)
+    html = client.get(f"/games/{BASE_TITLE_ID}").text
+    assert "Multiple Switches connected" in html
+    assert 'id="target-device"' not in html
 
 
 def test_install_from_game_detail_creates_a_real_job_batch(client, web_ctx):
