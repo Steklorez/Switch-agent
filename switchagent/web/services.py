@@ -283,34 +283,6 @@ def classify_activity(row) -> dict:
     }
 
 
-def build_family_activity_index(conn) -> dict[str, dict]:
-    """family base TITLE_ID -> aggregate activity facts, built in ONE pass
-    over install_history (PERF-001's rule: never a query per library row).
-    `device_ids` answers W3-003's device filter with its exact, narrow
-    meaning: "SwitchAgent has ever RECORDED A TRANSFER ATTEMPT for this
-    family targeting this device" -- every outcome counts, success or not.
-    It is emphatically NOT "the game is installed on that console"; this
-    app cannot know that in general (see this section's header)."""
-    index: dict[str, dict] = {}
-    for row in db.list_all_install_history(conn):
-        family = family_base_title_id(row["title_id"])
-        if family is None:
-            continue
-        agg = index.setdefault(family, {
-            "attempts": 0, "unconfirmed": 0, "failed": 0, "installed": 0, "device_ids": set(),
-        })
-        agg["attempts"] += 1
-        agg["device_ids"].add(row["target_device_id"])
-        activity = classify_activity(row)
-        if activity["is_unconfirmed"]:
-            agg["unconfirmed"] += 1
-        if activity["is_failed"]:
-            agg["failed"] += 1
-        if activity["implies_installed"]:
-            agg["installed"] += 1
-    return index
-
-
 _FILTER_PREDICATES = {
     "all": lambda e: True,
     "games": lambda e: e["content_type"] == ContentType.GAME_PACKAGE.value,
@@ -594,13 +566,9 @@ def list_library_view(
     if needle:
         games = [g for g in games if any(needle in _search_haystack(e) for e in _family_entries(g))]
 
-    # W3-003: the family-level filters. The activity index is read ONCE for
-    # the whole page here, never per family/per row (PERF-001's rule).
-    needs_activity = group_filter in ("unverified_activity", "failed_activity")
-    activity_index = build_family_activity_index(conn) if needs_activity else {}
-
+    # W3-003: the family-level filters.
     predicate = _GROUP_FILTER_PREDICATES.get(group_filter, _GROUP_FILTER_PREDICATES["all"])
-    games = [g for g in games if predicate(g, activity_index.get(g["base_title_id"]))]
+    games = [g for g in games if predicate(g)]
 
     family_key_fn = _FAMILY_SORT_KEYS.get(sort, _FAMILY_SORT_KEYS["date_added"])
     games.sort(key=family_key_fn, reverse=reverse)

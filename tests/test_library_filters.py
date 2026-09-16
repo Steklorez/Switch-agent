@@ -282,48 +282,10 @@ def test_filter_all_returns_every_family(conn):
     ("dlc", {GAME_A_BASE}),
     ("mods", {GAME_A_BASE}),
     ("duplicates", {GAME_A_BASE}),
-    ("needs_review", {GAME_C_BASE}),
 ])
 def test_structural_filters(conn, group_filter, expected):
     _seed_filter_corpus(conn)
     assert set(_family_ids(services.list_library_view(conn, group_filter=group_filter))) == expected
-
-
-def test_has_unverified_activity_filter(conn):
-    """"At least one DONE_UNVERIFIED history row with NO user confirmation"
-    -- exactly that, nothing looser: a confirmed one (either way) does not
-    count, and neither does a plain DONE."""
-    _package(conn, "Unconfirmed.nsp", GAME_A_BASE)
-    _package(conn, "ConfirmedOk.nsp", GAME_B_BASE)
-    _package(conn, "Verified.nsp", GAME_C_BASE)
-    _history(conn, title_id=GAME_A_BASE, device_id=PARENT, outcome="DONE_UNVERIFIED")
-    _history(conn, title_id=GAME_B_BASE, device_id=PARENT, outcome="DONE_UNVERIFIED", user_verified="SUCCESS")
-    _history(conn, title_id=GAME_C_BASE, device_id=PARENT, outcome="DONE", storage="SD_CARD")
-
-    assert _family_ids(services.list_library_view(conn, group_filter="unverified_activity")) == [GAME_A_BASE]
-
-
-def test_has_unverified_activity_matches_via_an_update_in_the_same_family(conn):
-    """History rows carry the JOB's own title_id -- an update's id, not the
-    family's. The filter must still attribute it to the family."""
-    _package(conn, "Fam.nsp", GAME_A_BASE)
-    _package(conn, "Fam Patch.nsp", GAME_A_UPDATE)
-    _history(conn, title_id=GAME_A_UPDATE, device_id=PARENT, outcome="DONE_UNVERIFIED")
-
-    assert _family_ids(services.list_library_view(conn, group_filter="unverified_activity")) == [GAME_A_BASE]
-
-
-def test_has_failed_activity_filter_includes_user_confirmed_failures(conn):
-    _package(conn, "HardFail.nsp", GAME_A_BASE)
-    _package(conn, "UserSaidFailed.nsp", GAME_B_BASE)
-    _package(conn, "Fine.nsp", GAME_C_BASE)
-    _history(conn, title_id=GAME_A_BASE, device_id=PARENT, outcome="FAILED")
-    _history(conn, title_id=GAME_B_BASE, device_id=PARENT, outcome="DONE_UNVERIFIED", user_verified="FAILED")
-    _history(conn, title_id=GAME_C_BASE, device_id=PARENT, outcome="DONE", storage="SD_CARD")
-
-    assert set(_family_ids(services.list_library_view(conn, group_filter="failed_activity"))) == {
-        GAME_A_BASE, GAME_B_BASE,
-    }
 
 
 # ---------------------------------------------------------------------------
@@ -420,7 +382,7 @@ def test_library_page_exposes_every_new_control(client, web_ctx):
         _seed_filter_corpus(conn)
 
     html = client.get("/").text
-    for value in ("unverified_activity", "failed_activity", "duplicates", "needs_review"):
+    for value in ("base", "updates", "dlc", "mods", "duplicates"):
         assert f'value="{value}"' in html, value
     for label in ("Recently added", "Last scanned", "Size", "Name"):
         assert f">{label}<" in html, label
@@ -431,10 +393,10 @@ def test_library_page_exposes_every_new_control(client, web_ctx):
 def test_library_page_filters_end_to_end_over_http(client, web_ctx):
     with db.open_db(web_ctx.db_path) as conn:
         _package(conn, "KeepMe.nsp", GAME_A_BASE)
+        _package(conn, "KeepMe Bonus.nsp", GAME_A_DLC)
         _package(conn, "DropMe.nsp", GAME_B_BASE)
-        _history(conn, title_id=GAME_A_BASE, device_id=PARENT, outcome="DONE_UNVERIFIED")
 
-    html = client.get("/?filter=unverified_activity").text
+    html = client.get("/?filter=dlc").text
     assert "KeepMe" in html
     assert "DropMe" not in html
 
