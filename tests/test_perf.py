@@ -246,13 +246,11 @@ def test_w3003_search_filter_and_sort_stay_within_budget_at_5000_plus_rows(perf_
             ("filter_needs_review", {"group_filter": "needs_review"}),
             ("filter_unverified_activity", {"group_filter": "unverified_activity"}),
             ("filter_failed_activity", {"group_filter": "failed_activity"}),
-            ("device_activity", {"has_device_activity": True}),
             ("sort_size", {"sort": "size"}),
             ("sort_last_scanned", {"sort": "last_scanned"}),
             ("sort_name", {"sort": "name"}),
             ("combined", {
                 "search": "Game", "group_filter": "unverified_activity", "sort": "size",
-                "has_device_activity": True,
             }),
         ):
             t0 = time.monotonic()

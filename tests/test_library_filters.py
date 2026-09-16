@@ -326,34 +326,6 @@ def test_has_failed_activity_filter_includes_user_confirmed_failures(conn):
     }
 
 
-def test_device_activity_filter_means_attempted_not_installed(conn):
-    """Its semantics are exactly "SwitchAgent has ever recorded a transfer
-    ATTEMPT for this family" -- so a FAILED attempt counts (nothing was
-    installed). It no longer distinguishes which device the attempt was
-    on: only one console is ever expected to be connected at a time (see
-    the install-selection "multiple Switches connected" guard)."""
-    _package(conn, "TriedOnParent.nsp", GAME_A_BASE)
-    _package(conn, "DoneOnChild.nsp", GAME_B_BASE)
-    _package(conn, "NeverSent.nsp", GAME_C_BASE)
-    _history(conn, title_id=GAME_A_BASE, device_id=PARENT, outcome="FAILED")
-    _history(conn, title_id=GAME_B_BASE, device_id=CHILD, outcome="DONE", storage="SD_CARD")
-
-    filtered = services.list_library_view(conn, has_device_activity=True)
-    assert set(_family_ids(filtered)) == {GAME_A_BASE, GAME_B_BASE}
-
-
-def test_device_activity_filter_combines_with_the_other_filters(conn):
-    """has_device_activity=True still combines as an AND with an
-    unrelated group_filter -- a base game with no recorded activity is
-    excluded even though it would otherwise pass group_filter="base"."""
-    _package(conn, "HasActivity.nsp", GAME_A_BASE)
-    _package(conn, "NoActivity.nsp", GAME_B_BASE)
-    _history(conn, title_id=GAME_A_BASE, device_id=PARENT, outcome="DONE_UNVERIFIED")
-
-    view = services.list_library_view(conn, group_filter="base", has_device_activity=True)
-    assert _family_ids(view) == [GAME_A_BASE]
-
-
 # ---------------------------------------------------------------------------
 # sorting -- family-level semantics, locked in
 # ---------------------------------------------------------------------------
@@ -450,32 +422,10 @@ def test_library_page_exposes_every_new_control(client, web_ctx):
     html = client.get("/").text
     for value in ("unverified_activity", "failed_activity", "duplicates", "needs_review"):
         assert f'value="{value}"' in html, value
-    assert 'id="device-activity-filter"' in html
-    assert 'value="yes"' in html
     for label in ("Recently added", "Last scanned", "Size", "Name"):
         assert f">{label}<" in html, label
-    # Only one console is ever expected to be connected at a time, so the
-    # device-activity filter is just a presence flag now -- no per-device
-    # option, and no raw device_id, ever reaches this page's HTML.
+    # No raw device_id ever reaches this page's HTML.
     assert PARENT not in html
-
-
-def test_device_activity_filter_ui_never_claims_the_game_is_installed(client, web_ctx):
-    """The mandate's explicit wording requirement: the control must say
-    what it really means (SwitchAgent's own record of an attempt), not
-    "Installed on"."""
-    with db.open_db(web_ctx.db_path) as conn:
-        _package(conn, "Any.nsp", GAME_A_BASE)
-        _history(conn, title_id=GAME_A_BASE, device_id=PARENT, outcome="DONE_UNVERIFIED")
-
-    html = client.get("/").text
-    assert "SwitchAgent activity" in html
-    assert "not proof the game is present on the console" in html
-    assert "Installed on" not in html
-
-    filtered = client.get("/?device_activity=yes").text
-    assert 'id="device-activity-note"' in filtered
-    assert "it is not proof that the game is present on the console" in filtered
 
 
 def test_library_page_filters_end_to_end_over_http(client, web_ctx):
