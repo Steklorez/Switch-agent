@@ -1,5 +1,7 @@
 # SwitchAgent
 
+[![ko-fi](https://ko-fi.com/img/githubbutton_sm.svg)](https://ko-fi.com/I3I0273OYI)
+
 A local, single-user Windows tool that turns a downloads folder full of
 Nintendo Switch content (NSP/NSZ/XCI/XCZ install packages and Atmosphère
 mod folders/archives) into a browsable library, lets you pick what to
