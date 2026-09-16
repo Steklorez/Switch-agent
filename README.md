@@ -1,7 +1,17 @@
 # SwitchAgent
 
-[![ko-fi](https://ko-fi.com/img/githubbutton_sm.svg)](https://ko-fi.com/I3I0273OYI)
-[![Boosty](https://img.shields.io/badge/Boosty-Donate-f15f2c)](https://boosty.to/steklorez)
+<div align="center">
+
+![](https://capsule-render.vercel.app/api?type=waving&color=gradient&customColorList=12&height=90&section=header)
+
+### ☕ Нравится SwitchAgent? Угостите автора чашкой кофе!
+
+[![Ko-fi](https://img.shields.io/badge/Ko--fi-Donate-FF5E5B?style=for-the-badge&logo=kofi&logoColor=white)](https://ko-fi.com/I3I0273OYI)
+[![Boosty](https://img.shields.io/badge/Boosty-Donate-F15F2C?style=for-the-badge&logo=boosty&logoColor=white)](https://boosty.to/steklorez)
+
+![](https://capsule-render.vercel.app/api?type=waving&color=gradient&customColorList=12&height=60&section=footer)
+
+</div>
 
 A local, single-user Windows tool that turns a downloads folder full of
 Nintendo Switch content (NSP/NSZ/XCI/XCZ install packages and Atmosphère
