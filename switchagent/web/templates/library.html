@@ -10,7 +10,7 @@
 
 {% macro destination_label(e) %}{% if e.content_type == "ATMOSPHERE_MOD" %}SD Card (merge){% else %}SD Card install{% endif %}{% endmacro %}
 
-{% macro game_card(e, family=None) %}
+{% macro game_card(e, family=None, family_name=None) %}
 <div class="card {{ 'recent-transfer' if e.recent_transfer_until }}" data-id="{{ e.id }}" data-recent-until="{{ e.recent_transfer_until or '' }}">
   {% if family %}<a class="tile-art" href="/games/{{ family }}" aria-label="{{ e.name }} — details">
   {% else %}<button type="button" class="tile-art card-body" data-detail-url="/api/library/{{ e.id }}" aria-label="{{ e.name }} — details">{% endif %}
@@ -20,7 +20,7 @@
   <label class="card-checkbox">
     <input type="checkbox" class="select-box" value="{{ e.id }}" data-name="{{ e.name }}"
            data-size="{{ e.size }}" data-destination="{{ destination_label(e) }}"
-           {% if family %}data-family="{{ family }}" data-role="base"{% endif %}
+           {% if family %}data-family="{{ family }}" data-role="base" data-family-name="{{ family_name }}"{% endif %}
            {{ "disabled" if not e.can_install }}>
   </label>
   <div class="card-body" data-detail-url="/api/library/{{ e.id }}">
@@ -32,11 +32,11 @@
 </div>
 {% endmacro %}
 
-{% macro variant_row(e, label, family=None) %}
+{% macro variant_row(e, label, family=None, role=None, family_name=None) %}
 <div class="variant-row {{ 'recent-transfer' if e.recent_transfer_until }}" data-recent-until="{{ e.recent_transfer_until or '' }}">
   <input type="checkbox" class="select-box" value="{{ e.id }}" data-name="{{ e.name }}"
          data-size="{{ e.size }}" data-destination="{{ destination_label(e) }}"
-         {% if family %}data-family="{{ family }}"{% endif %}
+         {% if family %}data-family="{{ family }}" data-role="{{ role }}" data-family-name="{{ family_name }}"{% endif %}
          {{ "disabled" if not e.can_install }}>
   <div class="variant-body card-body" data-detail-url="/api/library/{{ e.id }}">
     <span class="variant-label">{{ label }} — {{ e.name }}</span>
@@ -124,7 +124,7 @@
     {% for g in view.games %}
     <div class="game-group">
       {% if g.base %}
-        {{ game_card(g.base, family=g.base_title_id) }}
+        {{ game_card(g.base, family=g.base_title_id, family_name=g.name) }}
       {% else %}
       <div class="card card-no-base">
         <div class="card-name" title="{{ g.name }}">{{ g.name }}</div>
@@ -144,10 +144,10 @@
         </summary>
         <div class="variants-overlay">
         <div class="variants-scroll">
-        {% for u in g.updates %}{{ variant_row(u, "Update", family=g.base_title_id) }}{% endfor %}
-        {% for d in g.dlc %}{{ variant_row(d, "DLC", family=g.base_title_id) }}{% endfor %}
-        {% for m in g.mods %}{{ variant_row(m, "Mod", family=g.base_title_id) }}{% endfor %}
-        {% for dup in g.duplicates %}{{ variant_row(dup, "Other copy", family=g.base_title_id) }}{% endfor %}
+        {% for u in g.updates %}{{ variant_row(u, "Update", family=g.base_title_id, role="update", family_name=g.name) }}{% endfor %}
+        {% for d in g.dlc %}{{ variant_row(d, "DLC", family=g.base_title_id, role="dlc", family_name=g.name) }}{% endfor %}
+        {% for m in g.mods %}{{ variant_row(m, "Mod", family=g.base_title_id, role="mod", family_name=g.name) }}{% endfor %}
+        {% for dup in g.duplicates %}{{ variant_row(dup, "Other copy", family=g.base_title_id, role="duplicate", family_name=g.name) }}{% endfor %}
         </div>
         {% if g.has_detail_page %}<a class="game-details-link" href="/games/{{ g.base_title_id }}">Game details →</a>{% endif %}
         </div>

@@ -213,16 +213,59 @@ a { color: var(--accent); text-decoration: none; }
 .modal::backdrop { background: rgba(0,0,0,0.6); }
 .modal-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 14px; }
 .confirm-list { max-height: 220px; overflow-y: auto; font-size: 0.85rem; padding: 0; list-style: none; }
-.confirm-list li {
+.confirm-list li, .confirm-list-item {
   display: flex; align-items: center; justify-content: space-between; gap: 10px;
   padding: 6px 2px; border-bottom: 1px solid var(--border);
 }
-.confirm-list li span { word-break: break-word; }
+.confirm-list li span, .confirm-list-item span { word-break: break-word; }
+
+/* Detailed Installation Tree List: one <li class="confirm-group"> per game,
+   holding a name + its own remove button as the "header row" plus a nested
+   .confirm-children <ul> of Update/DLC/Mod/duplicate rows. flex-wrap + the
+   children list's flex-basis:100% (same trick as .history-row /
+   .history-verification above) keeps the header itself a normal
+   space-between row -- same right-aligned remove-button position any other
+   .confirm-list li/.confirm-item-remove pair gets -- while the group as a
+   whole still spans multiple visual rows instead of being squashed into one
+   tight line. */
+.confirm-list li.confirm-group {
+  display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 10px;
+  padding: 4px 0; border-bottom: 1px solid var(--border);
+}
+.confirm-group-name { font-weight: 600; word-break: break-word; }
+.confirm-children {
+  flex-basis: 100%; margin: 4px 0 4px 18px; padding-left: 10px;
+  border-left: 2px solid var(--border); list-style: none;
+}
+/* Nested Update/DLC/Mod/duplicate row -- same flex row as .confirm-list li
+   (inherited via the selector above, since it's still a <li> inside
+   .confirm-list), just more compact since it's already indented under a
+   group. */
+.confirm-list li.confirm-child { padding: 4px 2px; font-size: 0.8rem; }
+
 .confirm-item-remove {
   flex: none; background: none; border: none; color: var(--danger); font-size: 1rem;
   cursor: pointer; min-width: 32px; min-height: 32px; border-radius: 6px;
 }
 .confirm-item-remove:hover { background: rgba(229,72,77,0.15); }
+/* .confirm-group-remove reuses .confirm-item-remove wholesale (the JS emits
+   both classes on the same button) -- no separate rule needed. */
+
+/* Small inline tag shown before an item's name on nested Update/DLC/Mod/
+   duplicate rows (omitted for base-game rows). Solid fill using the
+   existing theme tokens (no new colors), same "readable on the dark modal"
+   approach as .status-on-device/.btn-primary/.btn-danger above rather than
+   the softer rgba-tint look the .status-* pills use. */
+.confirm-tag {
+  display: inline-block; flex: none; font-size: 0.7rem; font-weight: 700;
+  padding: 1px 6px; border-radius: 4px; margin-right: 6px;
+  text-transform: uppercase; letter-spacing: 0.02em;
+}
+.confirm-tag-update { background: var(--accent); color: #fff; }
+.confirm-tag-dlc { background: var(--ok); color: #fff; }
+.confirm-tag-mod { background: var(--warn); color: var(--bg); }
+.confirm-tag-duplicate { background: var(--danger); color: #fff; }
+
 .confirm-result { margin-top: 10px; font-size: 0.85rem; }
 
 .detail-table { width: 100%; border-collapse: collapse; font-size: 0.85rem; }
