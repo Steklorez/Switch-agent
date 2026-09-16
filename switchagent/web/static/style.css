@@ -341,9 +341,32 @@ a { color: var(--accent); text-decoration: none; }
 }
 .device-meta { color: var(--text-dim); font-size: 0.8rem; }
 
+/* -- Devices page: the connected device is the page's visual focus (bright
+   neon-blue outline + soft glow + a faint accent-tinted background), while
+   disconnected/historical devices read as muted, flat and de-emphasized.
+   Both are additive modifiers layered on top of the shared
+   .job-row/.history-row/.device-row block above -- deliberately not editing
+   that shared rule directly. --accent (#4f8ef7) = rgb(79,142,247), the same
+   rgba() already used for .status-queued / .library-tiles accent glows. */
+.device-row-active {
+  border-color: var(--accent);
+  border-radius: 14px;
+  padding: 16px;
+  background: linear-gradient(135deg, rgba(79,142,247,0.16), var(--surface) 70%);
+  box-shadow: 0 0 0 2px var(--accent), 0 0 28px rgba(79,142,247,0.35);
+}
+.device-row-collapsed {
+  /* Darker-than-default background (not opacity) so the row itself reads
+     as muted/flat while text, the rename input and the Save button inside
+     keep full contrast -- opacity would have dimmed those too. */
+  padding: 10px 12px;
+  background: var(--bg);
+}
+
 .storage-table { width: 100%; border-collapse: collapse; margin-top: 10px; font-size: 0.85rem; }
 .storage-table th, .storage-table td { text-align: left; padding: 6px 8px; border-bottom: 1px solid var(--border); }
 .storage-table th { color: var(--text-dim); font-weight: 500; font-size: 0.75rem; }
+.th-ru { font-size: 0.9em; color: var(--text-dim); margin-left: 4px; }
 .storage-mapping-select {
   padding: 4px 6px; border-radius: 6px; border: 1px solid var(--border);
   background: var(--surface-2); color: var(--text); margin-right: 6px;
