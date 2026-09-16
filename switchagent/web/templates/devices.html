@@ -18,7 +18,7 @@
 {% endif %}
 <ul class="device-list">
   {% for d in devices %}
-  <li class="device-row">
+  <li class="device-row {{ 'device-row-active' if d.connected else 'device-row-collapsed' }}">
     <span class="device-dot {{ 'connected' if d.connected else 'disconnected' }}"></span>
     <div class="device-info">
       <form class="device-rename-form" data-device-id="{{ d.device_id }}">
@@ -39,7 +39,7 @@
       {% if storages %}
       <table class="storage-table">
         <thead>
-          <tr><th>Storage</th><th>Mapping</th><th>Space</th><th></th></tr>
+          <tr><th>Storage <span class="th-ru">(Хранилище)</span></th><th>Mapping <span class="th-ru">(Сопоставление)</span></th><th>Space <span class="th-ru">(Пространство)</span></th><th>Auto Map <span class="th-ru">(Автокарта)</span></th></tr>
         </thead>
         <tbody>
           {% for s in storages %}
