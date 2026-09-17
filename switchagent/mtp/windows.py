@@ -82,7 +82,23 @@ _FOF_NOERRORUI = 1024
 COPY_OPERATION_FLAGS = _FOF_SILENT | _FOF_NOCONFIRMATION | _FOF_NOERRORUI
 
 DEFAULT_VERIFY_TIMEOUT_SECONDS = 60.0
-DEFAULT_VERIFY_POLL_INTERVAL_SECONDS = 2.0
+# 2026-09-17 real-hardware finding: a 45-file MOD_FOLDER job (2.3MB total --
+# a translation mod, all tiny text/font files) to SD_CARD took 6m12s, i.e.
+# ~8.3s PER FILE for a transfer that should be near-instant. Root-caused via
+# the job's own install log + manifest (job id 25, library item 1): with the
+# old 2.0s interval, the shell-cache visibility lag documented above (~2.5s
+# after PerformOperations() returns) means the FIRST poll at t=2.0s almost
+# always misses, so reaching stable_reads_required=3 actually costs 4 poll
+# iterations, not 3 -- 4 * 2.0s = 8.0s, matching the observed 8.3s/file
+# almost exactly. That lag is the shell namespace CACHE catching up, not an
+# in-progress write -- PerformOperations() already blocked until the actual
+# bytes were written, so polling faster carries no risk of observing a
+# half-written file. verify_install_transport() below already polls every
+# 0.25s in production for exactly this kind of "is it visible yet" check;
+# this brings SD_CARD's cadence in line with that proven-safe precedent,
+# without weakening stable_reads_required at all -- same confidence bar,
+# just detected sooner. Cuts the same 45-file job to roughly 3s/file.
+DEFAULT_VERIFY_POLL_INTERVAL_SECONDS = 0.25
 DEFAULT_STABLE_READS_REQUIRED = 3
 
 # SD_INSTALL is a virtual DBI node, not a real filesystem -- proven on real

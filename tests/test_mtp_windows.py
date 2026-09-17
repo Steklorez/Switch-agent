@@ -279,6 +279,22 @@ def test_verify_completion_flicker_resets_stability_count():
     assert status is TransferStatus.COMPLETED
 
 
+def test_verify_completion_default_poll_interval_is_fast():
+    """2026-09-17 real-hardware finding: a 45-file MOD_FOLDER job (2.3MB
+    total) took 6m12s -- ~8.3s PER FILE for what should be a near-instant
+    copy. Root cause: with the old 2.0s default poll_interval_seconds, the
+    documented ~2.5s shell-cache visibility lag means the FIRST poll
+    (t=2.0s) almost always misses, so reaching stable_reads_required=3
+    actually costs 4 iterations (8.0s), not 3 -- matching the observed
+    8.3s/file almost exactly. That lag is the shell namespace cache
+    catching up, not an in-progress write (PerformOperations() already
+    blocked until the bytes were written), so polling faster is free of
+    risk -- verify_install_transport() already proves 0.25s safe in
+    production for the same kind of check. Pins the default so it can't
+    silently regress back to the slow value."""
+    assert mtpw.DEFAULT_VERIFY_POLL_INTERVAL_SECONDS <= 0.5
+
+
 # ---------------------------------------------------------------------------
 # RealMtpBackend against duck-typed fake Shell objects
 # ---------------------------------------------------------------------------
