@@ -74,11 +74,6 @@
 <div class="library-toolbar">
   <form method="get" action="/" class="toolbar-form">
     <input type="search" name="search" placeholder="Search games..." value="{{ search }}" class="search-box">
-    <select name="kind" class="filter-select" onchange="this.form.submit()">
-      {% for key, label in [("games","Games"), ("updates","Updates"), ("dlc","DLC"), ("mods","Mods")] %}
-      <option value="{{ key }}" {{ "selected" if kind == key }}>{{ label }}</option>
-      {% endfor %}
-    </select>
     <select name="format" class="filter-select" onchange="this.form.submit()">
       <option value="">All formats</option>
       {% for fmt in ["NSP","NSZ","XCI","XCZ"] %}
