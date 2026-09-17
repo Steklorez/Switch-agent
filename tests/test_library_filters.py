@@ -443,15 +443,18 @@ def test_on_switch_badge_goes_dark_on_disconnect_and_relights_on_reconnect(conn,
     assert "On Switch" in client.get("/").text
 
 
-def test_installed_unverified_badge_hides_on_disconnect_and_returns_on_reconnect(conn, client, web_ctx):
-    """By explicit request: INSTALLED_UNVERIFIED ("transport accepted,
-    DBI hasn't confirmed") is only honestly showable while its own target
-    device is live -- shown right after a fresh install (device
-    connected, DBI hasn't found it yet), gone entirely the instant that
-    device disconnects (never falls back to the raw status pill -- see
-    _library_entry_view's hide_unverified_badge), and back once the SAME
-    device reconnects (still unconfirmed) -- distinct from confirmation
-    itself flipping it to "On Switch" (covered by the test above)."""
+def test_installed_unverified_badge_hides_whenever_not_confirmed(conn, client, web_ctx):
+    """Corrected from an earlier, weaker rule: INSTALLED_UNVERIFIED
+    ("transport accepted, DBI hasn't confirmed") is a HOLDING state, not a
+    claim that survives an actual check. By explicit request -- "didn't
+    find the game on the Switch after connecting, we consider the game
+    not to be on the Switch" -- the badge hides whenever a live DBI read
+    exists (installed_on_device_base_ids is not None, i.e. SOME device
+    has been checked this session) and doesn't confirm THIS title,
+    regardless of whether that title's own target device happens to be
+    the one currently connected. Disconnecting entirely is just a
+    specific case of "not confirmed" (the connected-only cache goes
+    empty), not a separately-tracked one anymore."""
     import time as _time
     from switchagent.mtp.errors import DeviceNotFoundError
 
@@ -466,15 +469,27 @@ def test_installed_unverified_badge_hides_on_disconnect_and_returns_on_reconnect
     web_ctx._device_cache = []
     web_ctx._last_storage_refresh_monotonic = _time.monotonic()
 
-    # Right after install, PARENT connected, DBI hasn't confirmed it yet.
+    # PARENT connected, DBI checked, does NOT confirm this title -- no
+    # badge at all, never "unverified" (that would imply "still pending").
     with pytest.MonkeyPatch.context() as mp:
         mp.setattr(backend, "list_installed_title_ids", lambda: set())
         web_ctx.refresh_devices(conn)
     html = client.get("/").text
-    assert "INSTALLED UNVERIFIED" in html
+    assert "INSTALLED UNVERIFIED" not in html
     assert "On Switch" not in html
 
-    # PARENT disconnects -- the badge must disappear entirely, not linger.
+    # DBI confirms it on a later check (the storage/DBI refresh interval
+    # has to actually elapse for a STILL-connected device to be re-read --
+    # see refresh_devices' own should_refresh_storage gate) -- upgrades to
+    # "On Switch".
+    web_ctx._last_storage_refresh_monotonic = _time.monotonic() - web_ctx.storage_refresh_interval_seconds
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setattr(backend, "list_installed_title_ids", lambda: {GAME_A_BASE})
+        web_ctx.refresh_devices(conn)
+    assert "On Switch" in client.get("/").text
+
+    # PARENT disconnects -- back to no badge (still "not confirmed", now
+    # because nothing is connected to ask at all).
     with pytest.MonkeyPatch.context() as mp:
         def absent():
             raise DeviceNotFoundError("unplugged")
@@ -484,13 +499,14 @@ def test_installed_unverified_badge_hides_on_disconnect_and_returns_on_reconnect
     assert "INSTALLED UNVERIFIED" not in html
     assert "On Switch" not in html
 
-    # PARENT reconnects, still unconfirmed -- the badge comes back.
+    # PARENT reconnects but DBI still doesn't confirm it -- stays hidden,
+    # never falls back to "INSTALLED UNVERIFIED".
     with pytest.MonkeyPatch.context() as mp:
         mp.setattr(backend, "connect", connect)
         mp.setattr(backend, "list_installed_title_ids", lambda: set())
         web_ctx.refresh_devices(conn)
     html = client.get("/").text
-    assert "INSTALLED UNVERIFIED" in html
+    assert "INSTALLED UNVERIFIED" not in html
     assert "On Switch" not in html
 
 
