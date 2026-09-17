@@ -56,12 +56,13 @@ body {
 .device-pill.has-connected { background: #35c46f12; border-color: #35c46f30; }
 .storage-bar-track { background: #ffffff08; box-shadow: inset 0 1px #0004; }
 .storage-bar-used { background: linear-gradient(90deg, #6fa1ff, #4f8ef7); box-shadow: 0 0 10px 1px #4f8ef750; }
-/* The "about to be installed" segment: a bright yellow highlighter glow,
-   distinct from --warn's amber (already means "warning" elsewhere, e.g.
-   status-installing) -- this is an estimate, not a caution. */
+/* The "about to be installed" segment: a bright, saturated orange glow,
+   distinct from --warn's duller amber (already means "warning"
+   elsewhere, e.g. status-installing) -- this is an estimate, not a
+   caution. */
 .storage-bar-pending {
-  background: linear-gradient(90deg, #ffe066, #ffd60a);
-  box-shadow: 0 0 0 1px #ffd60a55, 0 0 12px 2px #ffd60a80, 0 0 26px 6px #ffd60a40;
+  background: linear-gradient(90deg, #ffb238, #ff8a00);
+  box-shadow: 0 0 0 1px #ff8a0055, 0 0 12px 2px #ff8a0080, 0 0 26px 6px #ff8a0040;
 }
 .storage-bar.storage-bar-overflow .storage-bar-pending {
   background: linear-gradient(90deg, #ff8f8f, #e5484d);
