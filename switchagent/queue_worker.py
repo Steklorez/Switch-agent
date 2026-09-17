@@ -102,6 +102,8 @@ def create_job_from_report(
     inbox_item_id: Optional[int] = None,
     library_item_id: Optional[int] = None,
     batch_id: Optional[int] = None,
+    force_overwrite: bool = False,
+    retry_of_job_id: Optional[int] = None,
 ) -> int:
     """The one correct way to create a job that can actually be confirmed
     and run. Builds and freezes a content manifest from `report` -- the
@@ -112,6 +114,15 @@ def create_job_from_report(
     Exactly one of inbox_item_id (Stage 2's inbox/ pipeline) or
     library_item_id (Web UI's library_items) must be given -- see
     db.create_job() for the enforced invariant.
+
+    force_overwrite (W3-006 Override): threaded straight to db.create_job()
+    -- see that function's own comment on the column. Only
+    services.override_job() ever passes True.
+
+    retry_of_job_id: threaded straight to db.create_job() -- see that
+    column's own comment. Only services.retry_job()'s direct-source path
+    passes this (the staged/frozen-payload path sets it separately, after
+    this returns, alongside manifest_path/payload_batch_id).
 
     Raises manifest.ManifestError if `report` has nothing locally
     stageable yet (MIXED/UNKNOWN content, or an archive that was never
@@ -124,6 +135,7 @@ def create_job_from_report(
     job_id = db.create_job(
         conn, inbox_item_id=inbox_item_id, library_item_id=library_item_id, action=action,
         target_storage=target_storage, target_device_id=target_device_id, batch_id=batch_id,
+        force_overwrite=force_overwrite, retry_of_job_id=retry_of_job_id,
     )
     try:
         manifest = manifest_mod.build_manifest_and_stage(
@@ -607,12 +619,24 @@ def _run_job_transfer(conn: sqlite3.Connection, backend: MtpBackend, job_row: sq
         db.log_job_event(conn, job_id, error + " -- create a new job from a fresh preview/confirmation")
         return JobRunOutcome(job_id=job_id, status="SOURCE_CHANGED", error=error)
 
-    now = db.now_iso()
-    db.update_job_status(conn, job_id, "RUNNING", started_at=now, last_progress_at=now, increment_attempt=True)
-    db.log_job_event(conn, job_id, f"running on device '{job_row['target_device_id']}'")
-
     delivered = manifest_mod.load_progress(job_id)
     bytes_done = sum(f.size for f in manifest.files if f.dest_relative_path in delivered)
+    # UI-006 follow-up: bytes_total/bytes_done were previously only ever
+    # written at a TERMINAL status (see the DESTINATION_CONFLICT/FAILED/
+    # DONE writes below and in _process_job's history recording) -- during
+    # the whole RUNNING phase the jobs row kept showing bytes_total=NULL,
+    # bytes_done=0 no matter how much had actually transferred. queue.js's
+    # own progress-bar fraction already reads these two columns for
+    # SD_CARD jobs; the frontend was ready, the backend just never fed it
+    # real numbers, so a real, multi-minute, multi-file transfer looked
+    # like a bare spinner with nothing else changing on screen.
+    now = db.now_iso()
+    db.update_job_status(
+        conn, job_id, "RUNNING", started_at=now, last_progress_at=now, increment_attempt=True,
+        bytes_done=bytes_done, bytes_total=sum(f.size for f in manifest.files),
+    )
+    db.log_job_event(conn, job_id, f"running on device '{job_row['target_device_id']}'")
+
     # Set if ANY file in THIS run completes with TransferStatus.UNVERIFIED
     # (see switchagent/mtp/windows.py -- reached for install-like storages
     # such as SD_INSTALL, where the backend can prove transport was
@@ -646,22 +670,31 @@ def _run_job_transfer(conn: sqlite3.Connection, backend: MtpBackend, job_row: sq
         try:
             backend.ensure_directory(storage, parent)
 
-            if backend.exists(storage, file.dest_relative_path):
-                # Exists on the device, but WE have no record (progress.json)
-                # of having put it there ourselves during this job -- cannot
-                # prove it's the same content, so refuse rather than guess.
-                # This is idempotent-but-not-blind: a file THIS job already
-                # delivered was already skipped above via `delivered`;
-                # anything else present is genuinely unresolved.
-                error = (
-                    f"'{file.dest_relative_path}' already exists on '{storage}' "
-                    "and was not sent by this job -- refusing to overwrite"
-                )
-                db.update_job_status(conn, job_id, "DESTINATION_CONFLICT", bytes_done=bytes_done, error=error)
-                db.log_job_event(conn, job_id, error)
-                return JobRunOutcome(job_id=job_id, status="DESTINATION_CONFLICT", error=error)
+            # W3-006 Override: force_overwrite is only ever true on a job
+            # created by services.override_job(), the user's explicit
+            # "Override" click on a DESTINATION_CONFLICT card -- for that
+            # one job, and that job only, skip the existence check below
+            # entirely and let send_file's own overwrite=True replace
+            # whatever is there. Every other job still refuses blindly.
+            if job_row["force_overwrite"]:
+                result = backend.send_file(storage, file.dest_relative_path, source_path, overwrite=True)
+            else:
+                if backend.exists(storage, file.dest_relative_path):
+                    # Exists on the device, but WE have no record (progress.json)
+                    # of having put it there ourselves during this job -- cannot
+                    # prove it's the same content, so refuse rather than guess.
+                    # This is idempotent-but-not-blind: a file THIS job already
+                    # delivered was already skipped above via `delivered`;
+                    # anything else present is genuinely unresolved.
+                    error = (
+                        f"'{file.dest_relative_path}' already exists on '{storage}' "
+                        "and was not sent by this job -- refusing to overwrite"
+                    )
+                    db.update_job_status(conn, job_id, "DESTINATION_CONFLICT", bytes_done=bytes_done, error=error)
+                    db.log_job_event(conn, job_id, error)
+                    return JobRunOutcome(job_id=job_id, status="DESTINATION_CONFLICT", error=error)
 
-            result = backend.send_file(storage, file.dest_relative_path, source_path, overwrite=False)
+                result = backend.send_file(storage, file.dest_relative_path, source_path, overwrite=False)
         except MtpError as exc:
             db.update_job_status(
                 conn, job_id, "FAILED", bytes_done=bytes_done, error=str(exc), finished_at=db.now_iso(),
@@ -672,7 +705,7 @@ def _run_job_transfer(conn: sqlite3.Connection, backend: MtpBackend, job_row: sq
         if result.status is TransferStatus.COMPLETED:
             manifest_mod.mark_delivered(job_id, file.dest_relative_path)
             bytes_done += result.bytes_sent
-            db.update_job_status(conn, job_id, "RUNNING", last_progress_at=db.now_iso())
+            db.update_job_status(conn, job_id, "RUNNING", last_progress_at=db.now_iso(), bytes_done=bytes_done)
             continue
 
         if result.status is TransferStatus.UNVERIFIED:
@@ -690,7 +723,7 @@ def _run_job_transfer(conn: sqlite3.Connection, backend: MtpBackend, job_row: sq
             manifest_mod.mark_delivered(job_id, file.dest_relative_path)
             bytes_done += file.size
             any_unverified = True
-            db.update_job_status(conn, job_id, "RUNNING", last_progress_at=db.now_iso())
+            db.update_job_status(conn, job_id, "RUNNING", last_progress_at=db.now_iso(), bytes_done=bytes_done)
             db.log_job_event(conn, job_id, f"'{file.dest_relative_path}': {result.error or 'unverified'}")
             continue
 

@@ -135,6 +135,7 @@ a { color: var(--accent); text-decoration: none; }
 }
 .btn-primary { background: var(--accent); color: var(--accent-text); border-color: var(--accent); }
 .btn-danger { background: var(--danger); color: #fff; border-color: var(--danger); }
+.btn-warning { background: #ff8a00; color: #fff; border-color: #ff8a00; }
 .btn-secondary { background: var(--surface-2); }
 .btn-small { padding: 6px 10px; font-size: 0.82rem; min-height: 32px; }
 .btn:disabled { opacity: 0.5; cursor: not-allowed; }
@@ -189,17 +190,25 @@ a { color: var(--accent); text-decoration: none; }
 .status-queued { color: var(--accent); background: rgba(79,142,247,0.15); }
 .status-installing { color: var(--warn); background: rgba(245,166,35,0.15); }
 .status-installed { color: var(--ok); background: rgba(53,196,111,0.15); }
-.status-installed_unverified { color: var(--warn); background: rgba(245,166,35,0.15); }
+/* Transport-accepted-but-DBI-unprovable (queue_worker.py's `any_unverified`)
+   reads, in practice, as a success -- SwitchAgent just can't prove it over
+   MTP. Styled identically to a confirmed install (--ok) rather than --warn's
+   amber, which would wrongly suggest something needs the user's attention. */
+.status-installed_unverified { color: var(--ok); background: rgba(53,196,111,0.15); }
 .status-failed, .status-error { color: var(--danger); background: rgba(229,72,77,0.15); }
 .status-interrupted { color: var(--warn); background: rgba(245,166,35,0.15); }
-.status-destination_conflict, .status-source_changed { color: var(--danger); background: rgba(229,72,77,0.15); }
+.status-source_changed { color: var(--danger); background: rgba(229,72,77,0.15); }
+/* Distinct vivid orange (matches .storage-bar-pending in showroom.css) --
+   a conflict is a decision for the user (Skip / Override), not a failure;
+   --danger's red is reserved for outcomes that can't be resolved from here. */
+.status-destination_conflict { color: #ff8a00; background: rgba(255,138,0,0.15); }
 .status-blocked_by_dependency { color: var(--danger); background: rgba(229,72,77,0.15); }
 .status-waiting_for_base { color: var(--accent); background: rgba(79,142,247,0.15); }
 .status-waiting_for_device { color: var(--accent); background: rgba(79,142,247,0.15); }
 .status-needs_review { color: #c792ea; background: rgba(199,146,234,0.15); }
 .status-skip_duplicate { color: var(--text-dim); }
 .status-done { color: var(--ok); }
-.status-done_unverified { color: var(--warn); }
+.status-done_unverified { color: var(--ok); }
 
 .game-group { display: flex; flex-direction: column; }
 .card-no-base { display: flex; flex-direction: column; justify-content: center; min-height: 64px; }
@@ -477,6 +486,7 @@ a { color: var(--accent); text-decoration: none; }
 .job-main, .history-row > div:first-child { flex: 1; min-width: 180px; }
 .job-name, .history-name { font-weight: 600; }
 .job-meta, .history-meta { color: var(--text-dim); font-size: 0.8rem; margin-top: 2px; }
+.job-progress-text { color: var(--accent); font-size: 0.8rem; font-weight: 600; margin-top: 2px; }
 .job-error, .history-error {
   color: var(--danger); font-size: 0.8rem; margin-top: 4px;
   /* UX-001: some error text is genuinely long/technical (e.g. a full
@@ -509,10 +519,15 @@ a { color: var(--accent); text-decoration: none; }
 .batch-attention { color: var(--danger); font-weight: 600; font-size: 0.8rem; }
 .batch-jobs { list-style: none; padding: 0; margin: 0; display: flex; flex-direction: column; gap: 8px; }
 
-/* W3-006: Destination Conflict UX -- no overwrite/remote-delete/"assume
-   same file" affordance is ever rendered here, on purpose. */
+/* W3-006: Destination Conflict UX. Originally shipped with no overwrite
+   affordance at all, by design -- revisited: Skip (same as Cancel, just
+   worded for this context) and Override (force the transfer through,
+   bypassing the "never overwrite" guard for this one job) are now both
+   offered from here; see the conflict-actions buttons below and
+   queue_worker.py's `force_overwrite` job field. Still no remote-delete or
+   "assume same file" affordance -- those stay out. */
 .conflict-card {
-  margin-top: 6px; padding: 10px; border: 1px solid var(--danger); border-radius: 8px;
+  margin-top: 6px; padding: 10px; border: 1px solid #ff8a00; border-radius: 8px;
   background: var(--surface-2); flex-basis: 100%;
 }
 .conflict-explanation { margin: 0 0 8px; font-weight: 600; }
@@ -756,9 +771,10 @@ a { color: var(--accent); text-decoration: none; }
 .job-row[data-status="RUNNING"] { --stage-color: #4f8ef7; }
 .job-row[data-status="Extracting"], .job-row[data-status="Analyzing"] { --stage-color: #ad7bff; }
 .job-row[data-status="DONE"], .job-row[data-status="Ready"] { --stage-color: #35c46f; }
-.job-row[data-status="DONE_UNVERIFIED"] { --stage-color: #e6aa42; }
+.job-row[data-status="DONE_UNVERIFIED"] { --stage-color: #35c46f; }
 .job-row[data-status="DONE"], .job-row[data-status="DONE_UNVERIFIED"] { --progress: 100%; }
-.job-row[data-status="Failed"], .job-row[data-status="FAILED"], .job-row[data-status="SOURCE_CHANGED"], .job-row[data-status="DESTINATION_CONFLICT"] { --stage-color: #e5484d; }
+.job-row[data-status="Failed"], .job-row[data-status="FAILED"], .job-row[data-status="SOURCE_CHANGED"] { --stage-color: #e5484d; }
+.job-row[data-status="DESTINATION_CONFLICT"] { --stage-color: #ff8a00; }
 .job-row.progress-active::after { content: ""; position: absolute; bottom: 0; left: 0; width: 35%; height: 3px; background: var(--stage-color); animation: queue-activity 1.8s ease-in-out infinite alternate; }
 @keyframes queue-activity { to { transform: translateX(185%); } }
 @media (prefers-reduced-motion: reduce) { .job-row.progress-active::after { animation: none; width: 100%; } }

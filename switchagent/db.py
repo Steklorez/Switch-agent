@@ -531,6 +531,13 @@ def _init_db_serial(conn: sqlite3.Connection) -> None:
         "retry_of_job_id": "INTEGER REFERENCES jobs(id)",
         "payload_batch_id": "INTEGER REFERENCES installation_batches(id)",
         "abandoned": "INTEGER NOT NULL DEFAULT 0",
+        # W3-006 Override: set only by services.override_job() when the user
+        # explicitly chooses "Override" on a DESTINATION_CONFLICT card -- the
+        # worker (_run_job_transfer) skips its pre-send existence check and
+        # passes overwrite=True to backend.send_file() for every file in
+        # THIS job only. Every other job creation path leaves this at the
+        # default 0/false; the "never overwrite" guard stays the default.
+        "force_overwrite": "INTEGER NOT NULL DEFAULT 0",
     }.items():
         if column not in existing:
             conn.execute(f"ALTER TABLE jobs ADD COLUMN {column} {declaration}")
@@ -711,6 +718,8 @@ def create_job(
     inbox_item_id: Optional[int] = None,
     library_item_id: Optional[int] = None,
     batch_id: Optional[int] = None,
+    force_overwrite: bool = False,
+    retry_of_job_id: Optional[int] = None,
 ) -> int:
     """Creates a job in PENDING_CONFIRM. target_device_id is mandatory and
     fixed for the job's entire lifetime -- this is the single enforcement
@@ -726,7 +735,17 @@ def create_job(
     batch_id (UI-002) is optional and purely informational -- a job is
     fully valid and processable with batch_id=NULL (every job created
     before this feature existed, and any caller that doesn't group its
-    jobs into a batch)."""
+    jobs into a batch).
+
+    retry_of_job_id: set when this job was created BY a Retry/Override
+    click on an older job (see services.retry_job/override_job). Besides
+    its original use in the staged/frozen-payload retry path (preventing
+    two concurrent retries of the same attempt), list_queue()/
+    list_queue_grouped() now also use it to stop showing the OLD job the
+    instant a retry exists for it -- the old row is still a permanent,
+    untouched record (still in History), just no longer active work, and
+    no longer sitting there with live Override/Skip/Retry buttons a user
+    could click again after already having retried it once."""
     if not target_device_id:
         raise ValueError(
             "target_device_id is required -- a job must always target one "
@@ -740,10 +759,10 @@ def create_job(
     ts = now_iso()
     cur = conn.execute(
         """
-        INSERT INTO jobs (inbox_item_id, library_item_id, action, target_storage, target_device_id, status, created_at, batch_id)
-        VALUES (?, ?, ?, ?, ?, 'PENDING_CONFIRM', ?, ?)
+        INSERT INTO jobs (inbox_item_id, library_item_id, action, target_storage, target_device_id, status, created_at, batch_id, force_overwrite, retry_of_job_id)
+        VALUES (?, ?, ?, ?, ?, 'PENDING_CONFIRM', ?, ?, ?, ?)
         """,
-        (inbox_item_id, library_item_id, action, target_storage, target_device_id, ts, batch_id),
+        (inbox_item_id, library_item_id, action, target_storage, target_device_id, ts, batch_id, int(force_overwrite), retry_of_job_id),
     )
     conn.commit()
     log_job_event(conn, cur.lastrowid, f"created, target_device_id={target_device_id!r}")
@@ -841,6 +860,7 @@ def update_job_status(
     *,
     error: Optional[str] = None,
     bytes_done: Optional[int] = None,
+    bytes_total: Optional[int] = None,
     started_at: Optional[str] = None,
     finished_at: Optional[str] = None,
     increment_attempt: bool = False,
@@ -854,6 +874,9 @@ def update_job_status(
     if bytes_done is not None:
         sets.append("bytes_done = ?")
         params.append(bytes_done)
+    if bytes_total is not None:
+        sets.append("bytes_total = ?")
+        params.append(bytes_total)
     if started_at is not None:
         sets.append("started_at = ?")
         params.append(started_at)

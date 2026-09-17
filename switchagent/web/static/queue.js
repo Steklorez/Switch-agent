@@ -35,6 +35,36 @@
     Array.from(jobList.querySelectorAll(".job-row")).map((el) => el.dataset.jobId)
   );
 
+  // In-theme replacement for window.confirm() -- the browser's own native
+  // dialog looks like an unrelated system/security prompt (unstyled white
+  // box, generic OS chrome) sitting on top of this app's dark UI, jarring
+  // enough to read as suspicious rather than as part of the app. Resolves
+  // true/false exactly like a confirm() call would, so the two call sites
+  // below only needed `await` added in front of them.
+  const actionConfirmModal = document.getElementById("confirm-action-modal");
+  const actionConfirmMessage = document.getElementById("confirm-action-message");
+  const actionConfirmOkBtn = document.getElementById("confirm-action-ok-btn");
+  const actionConfirmCancelBtn = document.getElementById("confirm-action-cancel-btn");
+  function confirmAction(message) {
+    if (!actionConfirmModal) return Promise.resolve(window.confirm(message)); // pages without the dialog markup
+    return new Promise((resolve) => {
+      actionConfirmMessage.textContent = message;
+      const finish = (result) => {
+        actionConfirmOkBtn.removeEventListener("click", onOk);
+        actionConfirmCancelBtn.removeEventListener("click", onCancel);
+        actionConfirmModal.removeEventListener("cancel", onCancel);
+        actionConfirmModal.close();
+        resolve(result);
+      };
+      const onOk = () => finish(true);
+      const onCancel = () => finish(false);
+      actionConfirmOkBtn.addEventListener("click", onOk);
+      actionConfirmCancelBtn.addEventListener("click", onCancel);
+      actionConfirmModal.addEventListener("cancel", onCancel); // Esc key
+      actionConfirmModal.showModal();
+    });
+  }
+
   function statusClass(status) {
     return "status-" + status.toLowerCase();
   }
@@ -94,6 +124,17 @@
     li.dataset.jobId = j.id;
 
     const spinner = j.status === "RUNNING" ? '<span class="spinner" aria-label="in progress"></span>' : "";
+    // A plain spinner with no numbers reads as "frozen" for a real
+    // multi-minute, many-small-files mod transfer (each file has real
+    // fixed per-file MTP overhead -- see queue_worker.py's own timing
+    // notes) -- this makes the already-tracked bytes_done/bytes_total
+    // visible instead of just a 13%-opacity background tint. SD_INSTALL
+    // deliberately excluded: its bytes are diagnostic-only and can read 0
+    // even on a real, physically confirmed success (see
+    // _run_job_transfer's own UNVERIFIED-handling comment) -- showing a
+    // percentage there would be actively misleading, not just quiet.
+    const progressTextHtml = (j.target_storage === "SD_CARD" && j.status === "RUNNING" && j.bytes_total > 0)
+      ? `<div class="job-progress-text"></div>` : "";
     const waitingForDevice = j.status === "WAITING_FOR_DEVICE";
     const isConflict = j.status === "DESTINATION_CONFLICT";
     const errorHtml = (j.error && !waitingForDevice && !isConflict) ? `<div class="job-error"></div>` : "";
@@ -116,17 +157,25 @@
                fingerprint (never the raw, serial-bearing device_id). -->
           <a class="btn btn-small" href="/devices/${j.target_device_fingerprint}">Device Details</a>
         </div>
-        <p class="settings-hint">Resolve the conflict manually on the device, then Retry.</p>
+        <p class="settings-hint">Override replaces the existing file with this one; Skip leaves it alone and drops this install.</p>
       </div>` : "";
-    const retryBtn = !j.abandoned && RETRYABLE_STATUSES.includes(j.status)
+    // W3-006 Override: a conflict gets its own pair of actions (Override /
+    // Skip below) instead of the generic Retry/Cancel -- a plain retry
+    // would just hit the identical conflict again unless the user went and
+    // deleted the file by hand first, and "Cancel" doesn't say what happens
+    // to the existing destination file either way.
+    const retryBtn = !isConflict && !j.abandoned && RETRYABLE_STATUSES.includes(j.status)
       ? `<button class="btn btn-small" data-job-action="retry" data-job-id="${j.id}">Retry installation</button>` : "";
+    const overrideBtn = isConflict && !j.abandoned
+      ? `<button class="btn btn-small btn-warning" data-job-action="override" data-job-id="${j.id}">Override</button>` : "";
     const cancelBtn = !j.abandoned && ["PENDING_CONFIRM", "CONFIRMED", "DEVICE_UNAVAILABLE", "WAITING_FOR_BASE", "WAITING_FOR_DEVICE", ...RETRYABLE_STATUSES].includes(j.status)
-      ? `<button class="btn btn-small btn-danger" data-job-action="cancel" data-job-id="${j.id}">Cancel</button>` : "";
+      ? `<button class="btn btn-small btn-danger" data-job-action="cancel" data-job-id="${j.id}">${isConflict ? "Skip" : "Cancel"}</button>` : "";
 
     li.innerHTML = `
       <div class="job-main">
         <div class="job-name"></div>
         <div class="job-meta"></div>
+        ${progressTextHtml}
         ${errorHtml}
         ${conflictHtml}
         ${stallHtml}
@@ -135,13 +184,17 @@
         <span class="status-pill ${statusClass(j.status)}"></span>
         ${spinner}
       </div>
-      <div class="job-actions">${retryBtn}${cancelBtn}</div>
+      <div class="job-actions">${retryBtn}${overrideBtn}${cancelBtn}</div>
     `;
     li.querySelector(".job-name").textContent = j.display_name;
     li.querySelector(".job-meta").textContent = waitingForDevice
       ? `Waiting for ${j.target_device_label} to reconnect — resumes automatically`
       : `${j.target_device_label} · ${j.target_storage} · attempt ${j.attempt_count} · created ${j.created_at}`;
     li.querySelector(".status-pill").textContent = statusLabel(j);
+    if (progressTextHtml) {
+      li.querySelector(".job-progress-text").textContent =
+        `${formatBytes(j.bytes_done)} / ${formatBytes(j.bytes_total)} (${Math.round(fraction)}%)`;
+    }
     if (j.possibly_stalled) {
       const minutes = Math.floor(j.stall_seconds / 60);
       li.querySelector(".job-stall-warning").textContent =
@@ -247,10 +300,18 @@
           }
           const line = document.createElement("div");
           line.className = "job-row preparation-row";
-          line.dataset.status = item.phase;
+          // Once the whole sequential run has already stopped (state.phase
+          // "Failed"), an item still sitting at "Waiting" never got its own
+          // job created at all and never will -- this run is over, not
+          // paused. Relabelled so that reads as "abandoned", not "about to
+          // start any second" (see preparation.py's own stop condition --
+          // the run genuinely never resumes on its own past this point).
+          const neverStarted = state.phase === "Failed" && item.phase === "Waiting";
+          const displayPhase = neverStarted ? "Not started (installation stopped)" : item.phase;
+          line.dataset.status = neverStarted ? "Failed" : item.phase;
           line.classList.toggle("progress-active", ["Extracting", "Analyzing", "Installing", "Cleaning"].includes(item.phase));
           line.style.setProperty("--progress", item.phase === "Ready" ? "100%" : "0%");
-          line.textContent = `${item.name} — ${item.phase}` + (item.error ? `: ${item.error}` : "");
+          line.textContent = `${item.name} — ${displayPhase}` + (item.error ? `: ${item.error}` : "");
           box.appendChild(line);
         }
         const errors = state.result ? state.result.errors.map((error) => error.error) : [];
@@ -296,7 +357,8 @@
     if (btn) {
       const action = btn.dataset.jobAction;
       const jobId = btn.dataset.jobId;
-      if (action === "cancel" && !confirm("Abandon this attempt and release its temporary files when no other job needs them?")) return;
+      if (action === "cancel" && !(await confirmAction("Abandon this attempt and release its temporary files when no other job needs them?"))) return;
+      if (action === "override" && !(await confirmAction("Overwrite the existing file(s) at the destination with this install? This cannot be undone."))) return;
       btn.disabled = true;
       try {
         const res = await fetch(`/api/jobs/${jobId}/${action}`, { method: "POST" });

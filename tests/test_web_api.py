@@ -1255,7 +1255,11 @@ def test_retry_button_appears_in_queue_html_for_all_retryable_statuses(client, w
     """Structural guard mirroring test_queue_page_has_live_polling_hook_elements
     -- proves queue.html's Retry button condition actually covers all 6
     statuses services.py accepts, not just the original 3 (FAILED/
-    INTERRUPTED/DEVICE_UNAVAILABLE) from before this was widened."""
+    INTERRUPTED/DEVICE_UNAVAILABLE) from before this was widened.
+
+    DESTINATION_CONFLICT is the one exception: W3-006 Override replaced its
+    plain Retry/Cancel pair with Override/Skip (a bare retry would just hit
+    the identical conflict again) -- checked separately below."""
     item_id = _seed_library_item(web_ctx)
     res = client.post("/api/jobs", json={"library_item_ids": [item_id], "target_device_id": "mock-switch-parent"})
     job_id = res.json()["created"][0]["job_id"]
@@ -1264,9 +1268,55 @@ def test_retry_button_appears_in_queue_html_for_all_retryable_statuses(client, w
         with db.open_db(web_ctx.db_path) as conn:
             db.update_job_status(conn, job_id, status)
         html = client.get("/queue").text
+        if status == "DESTINATION_CONFLICT":
+            assert f'data-job-action="override" data-job-id="{job_id}"' in html, (
+                "Override button missing for DESTINATION_CONFLICT"
+            )
+            assert f'data-job-action="cancel" data-job-id="{job_id}"' in html, (
+                "Skip (cancel action) button missing for DESTINATION_CONFLICT"
+            )
+            assert f'data-job-action="retry" data-job-id="{job_id}"' not in html, (
+                "plain Retry button should not appear for DESTINATION_CONFLICT -- Override/Skip replace it"
+            )
+            continue
         assert f'data-job-action="retry" data-job-id="{job_id}"' in html, (
             f"Retry installation button missing for status {status}"
         )
+
+
+def test_override_only_accepts_destination_conflict_status(client, web_ctx):
+    """services.override_job() is deliberately narrower than retry_job()'s
+    own _RETRYABLE_JOB_STATUSES -- there's nothing to override about a
+    FAILED network blip, only an actual, currently-unresolved conflict."""
+    item_id = _seed_library_item(web_ctx)
+    res = client.post("/api/jobs", json={"library_item_ids": [item_id], "target_device_id": "mock-switch-parent"})
+    job_id = res.json()["created"][0]["job_id"]
+
+    with db.open_db(web_ctx.db_path) as conn:
+        db.update_job_status(conn, job_id, "FAILED", error="network blip")
+    res = client.post(f"/api/jobs/{job_id}/override")
+    assert res.status_code == 409
+
+    with db.open_db(web_ctx.db_path) as conn:
+        db.update_job_status(
+            conn, job_id, "DESTINATION_CONFLICT",
+            error="'x.nsp' already exists on 'SD_INSTALL' and was not sent by this job -- refusing to overwrite",
+        )
+    res = client.post(f"/api/jobs/{job_id}/override")
+    assert res.status_code == 200
+    body = res.json()
+    assert body["ok"] is True
+    new_job_id = body["new_job_id"]
+    assert new_job_id != job_id
+
+    with db.open_db(web_ctx.db_path) as conn:
+        new_row = db.get_job(conn, new_job_id)
+        old_row = db.get_job(conn, job_id)
+    # The new attempt is flagged to bypass the "never overwrite" guard;
+    # the old, conflicted job is left completely untouched -- same rule
+    # every other retry_job() path already follows.
+    assert new_row["force_overwrite"] == 1
+    assert old_row["status"] == "DESTINATION_CONFLICT"
 
 
 # ---------------------------------------------------------------------------
@@ -1432,6 +1482,73 @@ def test_queue_grouped_drops_a_batch_once_every_job_is_terminally_successful(cli
             db.update_job_status(conn, job_id, "DONE_UNVERIFIED", finished_at=db.now_iso())
 
     assert client.get("/api/queue/grouped").json() == []
+
+
+def test_queue_drops_a_single_abandoned_job(client, web_ctx):
+    """A skipped/cancelled job (abandoned=1) is permanent History, but is
+    never active work again -- retry_job()/override_job() both explicitly
+    refuse to touch an abandoned job. Before this fix it sat in Queue
+    forever (list_queue only ever excluded DONE/DONE_UNVERIFIED), showing
+    Override/Skip buttons that led nowhere."""
+    item_id = _seed_library_item(web_ctx)
+    res = client.post("/api/jobs", json={"library_item_ids": [item_id], "target_device_id": "mock-switch-parent"})
+    job_id = res.json()["created"][0]["job_id"]
+
+    assert client.post(f"/api/jobs/{job_id}/cancel").status_code == 200
+
+    assert client.get("/api/queue/grouped").json() == []
+    assert client.get("/api/queue").json() == []
+    # Still a real, permanent record -- just not in the active Queue view.
+    job = client.get(f"/api/jobs/{job_id}").json()
+    assert job["abandoned"] is True
+
+
+def test_queue_grouped_drops_a_batch_once_every_job_is_done_or_abandoned(client, web_ctx):
+    """A mixed batch -- one job succeeded, its sibling was skipped -- must
+    also disappear from Queue entirely, not linger because one member
+    technically never reached DONE/DONE_UNVERIFIED."""
+    item_ids = _seed_four_items(web_ctx)
+    res = client.post("/api/jobs", json={"library_item_ids": item_ids, "target_device_id": "mock-switch-parent"})
+    job_ids = [c["job_id"] for c in res.json()["created"]]
+
+    with db.open_db(web_ctx.db_path) as conn:
+        db.update_job_status(conn, job_ids[0], "DONE_UNVERIFIED", finished_at=db.now_iso())
+        db.update_job_status(conn, job_ids[1], "DONE", finished_at=db.now_iso())
+    assert client.post(f"/api/jobs/{job_ids[2]}/cancel").status_code == 200
+    assert client.post(f"/api/jobs/{job_ids[3]}/cancel").status_code == 200
+
+    assert client.get("/api/queue/grouped").json() == []
+
+
+def test_queue_drops_a_job_once_it_has_been_retried(client, web_ctx):
+    """Retry/Override used to leave the OLD conflicted/failed job sitting
+    in Queue completely unchanged -- same live Override/Skip/Retry
+    buttons as before, inviting a second, third, Nth click on the same
+    card that piled up parallel duplicate attempts at the same file. The
+    instant a retry exists (jobs.retry_of_job_id), the old row must
+    disappear from Queue -- superseded, not "settled" by its own status,
+    which never itself changes when it's retried."""
+    item_id = _seed_library_item(web_ctx)
+    res = client.post("/api/jobs", json={"library_item_ids": [item_id], "target_device_id": "mock-switch-parent"})
+    old_job_id = res.json()["created"][0]["job_id"]
+    with db.open_db(web_ctx.db_path) as conn:
+        db.update_job_status(conn, old_job_id, "FAILED", error="network blip")
+
+    retry_res = client.post(f"/api/jobs/{old_job_id}/retry")
+    assert retry_res.status_code == 200
+    new_job_id = retry_res.json()["new_job_id"]
+
+    queue_ids = {j["id"] for j in client.get("/api/queue").json()}
+    assert old_job_id not in queue_ids
+    assert new_job_id in queue_ids
+    grouped_ids = {j["id"] for g in client.get("/api/queue/grouped").json() for j in g["jobs"]}
+    assert old_job_id not in grouped_ids
+    assert new_job_id in grouped_ids
+
+    # Still a real, permanent record -- just not in the active Queue view.
+    old_job = client.get(f"/api/jobs/{old_job_id}").json()
+    assert old_job["status"] == "FAILED"
+    assert old_job["abandoned"] is False
 
 
 def test_queue_html_renders_batch_header_only_for_multi_job_batches(client, web_ctx):

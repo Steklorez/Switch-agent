@@ -448,6 +448,14 @@ def create_app(ctx: WebContext) -> FastAPI:
             raise HTTPException(status_code=409, detail=str(exc)) from exc
         return {"ok": True, **result}
 
+    @app.post("/api/jobs/{job_id}/override")
+    def api_override_job(job_id: int, conn=Depends(get_conn)):
+        try:
+            result = services.override_job(conn, job_id)
+        except ValueError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        return {"ok": True, **result}
+
     @app.post("/api/jobs/{job_id}/cancel")
     def api_cancel_job(job_id: int, conn=Depends(get_conn)):
         try:

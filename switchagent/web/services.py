@@ -922,8 +922,31 @@ _CANCELABLE_JOB_STATUSES = (
 )
 
 
+def _not_settled(rows: list, row) -> bool:
+    """True if `row` still belongs in the active Queue view. Excludes:
+    - DONE/DONE_UNVERIFIED (History's job, see list_history_grouped()).
+    - abandoned (Cancel/Skip -- see cancel_job()): the user already gave
+      up on this exact attempt; retry_job()/override_job() both explicitly
+      refuse to touch an abandoned job ("select the source again in
+      Library"), so there is never anything left to DO with one here.
+    - superseded (some OTHER job's retry_of_job_id points at this one --
+      see db.create_job()'s own comment on the column): clicking Retry or
+      Override on a DESTINATION_CONFLICT/FAILED card used to leave the OLD
+      card sitting there completely unchanged, showing the exact same
+      live Override/Skip/Retry buttons as before -- nothing stopped a
+      second, third, Nth click creating a pile of parallel duplicate
+      attempts at the SAME file. The instant a retry exists, the old row
+      is superseded and drops out of Queue -- still a permanent, untouched
+      record (still in History), just not active work, and no longer
+      clickable."""
+    if row["status"] in ("DONE", "DONE_UNVERIFIED") or row["abandoned"]:
+        return False
+    return not any(r["retry_of_job_id"] == row["id"] for r in rows)
+
+
 def list_queue(conn) -> list[dict]:
-    rows = [r for r in db.list_jobs(conn) if r["status"] not in ("DONE", "DONE_UNVERIFIED")]
+    all_rows = db.list_jobs(conn)
+    rows = [r for r in all_rows if _not_settled(all_rows, r)]
     return [_job_view(conn, r) for r in rows]
 
 
@@ -1012,24 +1035,27 @@ def list_queue_grouped(conn) -> list[dict]:
     unfinished job shows ALL of its jobs, including any already-
     DONE_UNVERIFIED members -- e.g. a base game that finished while its
     DLC is still WAITING_FOR_BASE stays visible as part of that batch's
-    progress. A batch is dropped from Queue entirely only once EVERY one
-    of its jobs has reached DONE/DONE_UNVERIFIED (fully represented in
-    grouped History instead, see list_history_grouped()). Legacy
-    batch_id=NULL jobs (created before this feature existed, or anything
-    that predates it in an upgraded DB) each render as their own
-    single-job group, exactly matching list_queue()'s own filtering."""
+    progress. A batch is dropped from Queue entirely once EVERY one of its
+    jobs is settled -- see _not_settled()'s own docstring for the full
+    definition (DONE/DONE_UNVERIFIED, abandoned via Cancel/Skip, or
+    superseded by a later Retry/Override). Fully represented in grouped
+    History instead, see list_history_grouped(). Legacy batch_id=NULL jobs
+    (created before this feature existed, or anything that predates it in
+    an upgraded DB) each render as their own single-job group, exactly
+    matching list_queue()'s own filtering."""
+    all_rows = db.list_jobs(conn)
     by_batch: dict[Optional[int], list] = {}
-    for row in db.list_jobs(conn):
+    for row in all_rows:
         by_batch.setdefault(row["batch_id"], []).append(row)
 
     groups = []
     for row in by_batch.pop(None, []):
-        if row["status"] in ("DONE", "DONE_UNVERIFIED"):
+        if not _not_settled(all_rows, row):
             continue
         groups.append(_batch_group_view(conn, None, [row]))
 
     for batch_id, rows in by_batch.items():
-        if all(r["status"] in ("DONE", "DONE_UNVERIFIED") for r in rows):
+        if not any(_not_settled(all_rows, r) for r in rows):
             continue
         groups.append(_batch_group_view(conn, batch_id, rows))
 
@@ -1273,7 +1299,7 @@ _RETRYABLE_JOB_STATUSES = (
 )
 
 
-def retry_job(conn, job_id: int) -> dict:
+def retry_job(conn, job_id: int, *, force_overwrite: bool = False) -> dict:
     """The Web UI's "Retry installation" action. Batch-staged archives
     create a new attempt referencing the exact retained manifest/payload,
     verified against its frozen hash, without extracting again. Legacy
@@ -1305,6 +1331,11 @@ def retry_job(conn, job_id: int) -> dict:
     conflict detection happens the normal way once the worker actually
     picks the new job up.
 
+    force_overwrite (W3-006 Override): internal-only, set by override_job()
+    below -- callers reachable from the plain "Retry installation" button
+    never pass this. Threaded straight to the new job's own
+    db.create_job(force_overwrite=...); see that column's own comment.
+
     Returns {"old_job_id", "new_job_id"}. Raises ValueError (surfaced by
     the API as 409) if the job isn't in a retryable status, its source no
     longer exists/isn't installable, or it has no recognizable source at
@@ -1325,7 +1356,7 @@ def retry_job(conn, job_id: int) -> dict:
     if old["manifest_path"]:
         frozen = manifest_mod.load_manifest(job_id)
         if frozen.batch_id is not None and any(f.source_kind == "frozen" for f in frozen.files):
-            return _retry_staged_job(conn, old, frozen)
+            return _retry_staged_job(conn, old, frozen, force_overwrite=force_overwrite)
 
     if old["library_item_id"] is not None:
         source_row = db.get_library_item_by_id(conn, old["library_item_id"])
@@ -1356,6 +1387,7 @@ def retry_job(conn, job_id: int) -> dict:
             conn, report,
             library_item_id=old["library_item_id"], inbox_item_id=old["inbox_item_id"],
             action=old["action"], target_device_id=old["target_device_id"], batch_id=batch_id,
+            force_overwrite=force_overwrite, retry_of_job_id=job_id,
         )
     except (FileNotFoundError, manifest_mod.ManifestError) as exc:
         # Same "only delete if truly nothing references it" rule as
@@ -1371,7 +1403,7 @@ def retry_job(conn, job_id: int) -> dict:
     return {"old_job_id": job_id, "new_job_id": new_job_id, "batch_id": batch_id}
 
 
-def _retry_staged_job(conn, old, frozen) -> dict:
+def _retry_staged_job(conn, old, frozen, *, force_overwrite: bool = False) -> dict:
     import json
     mismatch = manifest_mod.verify_manifest_against_source(frozen, old["id"])
     if mismatch:
@@ -1381,7 +1413,8 @@ def _retry_staged_job(conn, old, frozen) -> dict:
     batch_id = db.create_installation_batch(conn, target_device_id=old["target_device_id"])
     new_id = db.create_job(conn, action=old["action"], target_storage=old["target_storage"],
                            target_device_id=old["target_device_id"], library_item_id=old["library_item_id"],
-                           inbox_item_id=old["inbox_item_id"], batch_id=batch_id)
+                           inbox_item_id=old["inbox_item_id"], batch_id=batch_id,
+                           force_overwrite=force_overwrite)
     try:
         manifest_mod.job_work_dir(new_id).mkdir(parents=True, exist_ok=True)
         path = manifest_mod.manifest_path_for(new_id)
@@ -1395,6 +1428,24 @@ def _retry_staged_job(conn, old, frozen) -> dict:
         raise
     db.log_job_event(conn, new_id, f"retry of job {old['id']} using retained payload")
     return {"old_job_id": old["id"], "new_job_id": new_id, "batch_id": batch_id}
+
+
+def override_job(conn, job_id: int) -> dict:
+    """The Web UI's "Override" action -- only ever offered on a
+    DESTINATION_CONFLICT card (see queue.html/queue.js). Runs the exact
+    same retry_job() path (fresh preview or retained payload, brand-new
+    job, old job/History untouched) but with force_overwrite=True: the new
+    job's _run_job_transfer skips its existence check and overwrites
+    whatever is already at the destination. Deliberately narrower than
+    retry_job's own _RETRYABLE_JOB_STATUSES -- there is nothing to
+    override about a FAILED network blip or an INTERRUPTED disconnect, so
+    this only accepts a job that is CURRENTLY, actually conflicted."""
+    old = db.get_job(conn, job_id)
+    if old is None:
+        raise ValueError(f"no such job: {job_id}")
+    if old["status"] != "DESTINATION_CONFLICT":
+        raise ValueError(f"job {job_id} is '{old['status']}' -- override only applies to a DESTINATION_CONFLICT")
+    return retry_job(conn, job_id, force_overwrite=True)
 
 
 def cancel_job(conn, job_id: int) -> None:
