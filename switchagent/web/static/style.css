@@ -61,9 +61,16 @@ a { color: var(--accent); text-decoration: none; }
 }
 .storage-bar-track {
   position: relative; flex: 1 1 auto; min-width: 48px; max-width: 220px;
-  height: 8px; border-radius: 999px; background: var(--surface-2); overflow: hidden;
+  height: 8px; border-radius: 999px; background: var(--surface-2);
 }
-.storage-bar-fill { position: absolute; top: 0; bottom: 0; left: 0; width: 0; transition: width .25s ease, left .25s ease; }
+/* No overflow:hidden on the track above -- .storage-bar-pending's glow
+   (showroom.css) is meant to spill past its own edge, and a clipping
+   ancestor would cut that glow off. Each fill rounds its own ends
+   instead (border-radius: inherit -- same 999px as the track). */
+.storage-bar-fill {
+  position: absolute; top: 0; bottom: 0; left: 0; width: 0; border-radius: inherit;
+  transition: width .25s ease, left .25s ease;
+}
 .storage-bar-used { background: var(--accent); }
 .storage-bar-pending { background: var(--warn); }
 .storage-bar.storage-bar-overflow .storage-bar-pending { background: var(--danger); }
