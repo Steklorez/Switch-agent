@@ -373,6 +373,33 @@ def test_not_installed_excludes_a_family_dbi_confirms_even_with_no_switchagent_j
     assert _family_ids(view) == [GAME_B_BASE]
 
 
+def test_confirmed_on_device_badge_suppresses_the_job_status_pill(conn, client, web_ctx):
+    """Real-library finding: a job-status pill (INSTALLED_UNVERIFIED) and
+    the "On Switch" badge (confirmed_on_device) can both be true for the
+    exact same entry at once -- showing both stacked reads as an open
+    contradiction ("INSTALLED UNVERIFIED" right next to "On Switch") even
+    though it isn't one. Once DBI has confirmed it, that's the strictly
+    stronger claim (list_library_view's own "installed" is an OR of both,
+    same reasoning) -- the job-status pill is redundant at best, so
+    card_status() suppresses it whenever "On Switch" is already shown."""
+    item_id = _package(conn, "BreadAndFred.nsp", GAME_A_BASE)
+    job_id = db.create_job(
+        conn, action="INSTALL_VIA_DBI", target_storage="SD_INSTALL",
+        target_device_id=PARENT, library_item_id=item_id,
+    )
+    db.update_job_status(conn, job_id, "DONE_UNVERIFIED")
+    # Simulates what WebContext.refresh_devices() would have populated from
+    # a real DBI CSV read -- see its own class-level threading note for why
+    # tests poke this cache directly rather than going through a real MTP
+    # call.
+    web_ctx._installed_games_cache = {PARENT: {GAME_A_BASE}}
+
+    html = client.get("/").text
+    assert "On Switch" in html
+    assert "INSTALLED_UNVERIFIED" not in html
+    assert "INSTALLED UNVERIFIED" not in html
+
+
 def test_not_installed_checkbox_appears_and_is_wired_on_the_library_page(client, web_ctx):
     html = client.get("/").text
     assert 'name="not_installed"' in html

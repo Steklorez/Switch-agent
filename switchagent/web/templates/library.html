@@ -2,9 +2,25 @@
 {% block title %}Library — SwitchAgent{% endblock %}
 {% block styles %}<link rel="stylesheet" href="/static/card_motion.css?v=7">{% endblock %}
 
+{# confirmed_on_device (DBI's own report) and the job-status pill
+   (SwitchAgent's own copy record) can both be true at once for the exact
+   same entry -- and did, on a real library (Bread and Fred, Bayonetta 3:
+   job status INSTALLED_UNVERIFIED, confirmed_on_device true). Showing
+   both stacked read as an open contradiction ("INSTALLED UNVERIFIED"
+   right next to "On Switch"), even though they're not actually
+   contradictory -- one just says "this app's own copy attempt finished
+   without incident", the other "DBI independently confirms this is on
+   the console right now". Once DBI HAS confirmed it, that's strictly the
+   stronger, more complete claim (see list_library_view's own docstring
+   on why "installed" is an OR of both) -- so the job-status pill is
+   redundant at best and actively misleading at worst, and is suppressed
+   whenever "On Switch" is already shown. #}
 {% macro card_status(e) %}
+{% if e.confirmed_on_device %}
+<div class="card-status status-on-device">On Switch</div>
+{% else %}
 <div class="card-status status-{{ e.status|lower }}">{{ e.status.replace("_", " ") }}</div>
-{% if e.confirmed_on_device %}<div class="card-status status-on-device">On Switch</div>{% endif %}
+{% endif %}
 {% if e.job %}<div class="card-meta">→ {{ e.job.target_device_label }}</div>{% endif %}
 {% endmacro %}
 
