@@ -118,13 +118,12 @@ def build_game_detail_view(conn, ctx: WebContext, raw_base_title_id: str) -> Opt
     if base_title_id is None:
         return None
 
-    # installed_on_device_base_ids: same persisted confirmation table the
-    # Library page reads (db.get_all_confirmed_installed_base_title_ids)
-    # -- omitting it here left every Game Details page's "On Switch" badge
-    # permanently false, regardless of what the Library page showed for
-    # the exact same family.
+    # installed_on_device_base_ids: same connected-only cache the Library
+    # page reads (ctx.get_known_installed_title_ids()) -- omitting it here
+    # left every Game Details page's "On Switch" badge permanently false,
+    # regardless of what the Library page showed for the exact same family.
     view = services.list_library_view(
-        conn, kind="games", installed_on_device_base_ids=db.get_all_confirmed_installed_base_title_ids(conn),
+        conn, kind="games", installed_on_device_base_ids=ctx.get_known_installed_title_ids(),
     )
     family = next((g for g in view["games"] if g["base_title_id"] == base_title_id), None)
     if family is None:
