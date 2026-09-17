@@ -253,14 +253,17 @@ def create_app(ctx: WebContext) -> FastAPI:
     def page_library(
         request: Request, search: Optional[str] = None, kind: str = "games",
         format: Optional[str] = None, sort: str = "date_added",
-        filter: str = "all",
+        filter: str = "all", not_installed: bool = False,
         conn=Depends(get_conn), ctx: WebContext = Depends(get_ctx),
     ):
         # W3-003: `filter` is an additive query param -- omitting it
-        # reproduces the exact pre-W3-003 view.
+        # reproduces the exact pre-W3-003 view. `not_installed` is a
+        # second, independent additive param (a checkbox, not one more
+        # mutually-exclusive `filter` option) -- see list_library_view's
+        # own docstring for why it's never confirmed_on_device-based.
         view = services.list_library_view(
             conn, kind=kind, search=search, format_filter=format, sort=sort,
-            group_filter=filter,
+            group_filter=filter, not_installed=not_installed,
             installed_on_device_base_ids=ctx.get_known_installed_title_ids(),
         )
         devices = services.list_devices(conn, ctx)
@@ -274,7 +277,7 @@ def create_app(ctx: WebContext) -> FastAPI:
             "view": view, "devices": devices, "search": search or "",
             "show_installed_games_hint": show_installed_games_hint,
             "kind": kind, "format_filter": format or "", "sort": sort,
-            "group_filter": filter,
+            "group_filter": filter, "not_installed": not_installed,
             "active_page": "library",
             "library_onboarding": _library_onboarding_message(conn),
         })

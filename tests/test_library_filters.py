@@ -289,6 +289,83 @@ def test_structural_filters(conn, group_filter, expected):
 
 
 # ---------------------------------------------------------------------------
+# not_installed -- an independent, additive checkbox (never confirmed_on_
+# device, see list_library_view's own docstring on why)
+# ---------------------------------------------------------------------------
+
+def _install(conn, item_id, *, status="DONE", device_id=PARENT):
+    """Gives a library item its own job (unlike _history above, which ties
+    a job to a throwaway inbox row -- this one is what _finish_family's
+    "installed" field actually keys off, via the item's OWN latest job)."""
+    job_id = db.create_job(
+        conn, action="INSTALL_VIA_DBI", target_storage="SD_INSTALL",
+        target_device_id=device_id, library_item_id=item_id,
+    )
+    db.update_job_status(conn, job_id, status)
+    return job_id
+
+
+@pytest.mark.parametrize("status", ["DONE", "DONE_UNVERIFIED"])
+def test_not_installed_excludes_a_family_whose_base_was_successfully_copied(conn, status):
+    installed_id = _package(conn, "Installed.nsp", GAME_A_BASE)
+    _package(conn, "NeverTried.nsp", GAME_B_BASE)
+    _install(conn, installed_id, status=status)
+
+    view = services.list_library_view(conn, not_installed=True)
+    assert _family_ids(view) == [GAME_B_BASE]
+
+
+def test_not_installed_keeps_a_family_whose_base_is_only_queued_or_failed(conn):
+    """A job existing at all must never look like "installed" -- only its
+    OWN status in (DONE, DONE_UNVERIFIED) does (see _JOB_STATUS_TO_DISPLAY:
+    every other status maps to something other than INSTALLED/
+    INSTALLED_UNVERIFIED)."""
+    queued_id = _package(conn, "Queued.nsp", GAME_A_BASE)
+    failed_id = _package(conn, "Failed.nsp", GAME_B_BASE)
+    _install(conn, queued_id, status="CONFIRMED")
+    _install(conn, failed_id, status="FAILED")
+
+    view = services.list_library_view(conn, not_installed=True)
+    assert set(_family_ids(view)) == {GAME_A_BASE, GAME_B_BASE}
+
+
+def test_not_installed_includes_a_base_less_family(conn):
+    """A family with no base package (only an update/DLC present, see
+    test_filter_all_returns_every_family's GAME_D) has, by definition, no
+    base job to ever be DONE/DONE_UNVERIFIED -- correctly reads as "not
+    installed" rather than silently dropped for lacking a base at all."""
+    _package(conn, "OrphanUpdate.nsp", GAME_D_UPDATE)
+    view = services.list_library_view(conn, not_installed=True)
+    assert GAME_D_BASE in _family_ids(view)
+
+
+def test_not_installed_combines_with_group_filter_as_an_and(conn):
+    """The checkbox is additive, not one more mutually-exclusive `filter`
+    option -- "With DLC" + "Not installed" narrows to the intersection,
+    never overrides the other."""
+    installed_with_dlc = _package(conn, "InstalledWithDLC.nsp", GAME_A_BASE)
+    _package(conn, "InstalledWithDLC Bonus.nsp", GAME_A_DLC)
+    _install(conn, installed_with_dlc, status="DONE")
+
+    _package(conn, "PendingWithDLC.nsp", GAME_B_BASE)
+    _package(conn, "PendingWithDLC Bonus.nsp", "0100000000021001")  # GAME_B's own DLC-range id
+
+    _package(conn, "PendingNoDLC.nsp", GAME_C_BASE)
+
+    view = services.list_library_view(conn, group_filter="dlc", not_installed=True)
+    assert _family_ids(view) == [GAME_B_BASE]
+
+
+def test_not_installed_checkbox_appears_and_is_wired_on_the_library_page(client, web_ctx):
+    html = client.get("/").text
+    assert 'name="not_installed"' in html
+    assert 'value="1"' in html
+
+    checked_html = client.get("/?not_installed=1").text
+    assert "checked" in checked_html.split('name="not_installed"', 1)[1].split(">", 1)[0]
+
+
+# ---------------------------------------------------------------------------
 # sorting -- family-level semantics, locked in
 # ---------------------------------------------------------------------------
 
