@@ -852,6 +852,28 @@ def test_cancel_queued_job(client, web_ctx):
     assert job["status"] == "FAILED"
 
 
+def test_cancelled_job_lets_library_item_be_reselected(client, web_ctx):
+    """A cancelled/skipped job (status='FAILED', abandoned=1 -- see
+    cancel_job()) must not permanently disable its library item's
+    checkbox. Before this fix, can_install only ever cleared for a
+    'CANCELLED' status string cancel_job() never actually sets, so a
+    cancelled item's checkbox stayed disabled forever -- with retry_job()
+    itself refusing an abandoned job and pointing the user right back at
+    Library ("select the source again"), that was a real dead end."""
+    item_id = _seed_library_item(web_ctx)
+    res = client.post("/api/jobs", json={"library_item_ids": [item_id], "target_device_id": "mock-switch-parent"})
+    job_id = res.json()["created"][0]["job_id"]
+
+    entries = client.get("/api/library").json()
+    assert next(e for e in entries if e["id"] == item_id)["can_install"] is False
+
+    cancel_res = client.post(f"/api/jobs/{job_id}/cancel")
+    assert cancel_res.status_code == 200
+
+    entries = client.get("/api/library").json()
+    assert next(e for e in entries if e["id"] == item_id)["can_install"] is True
+
+
 def test_cancel_running_job_rejected(client, web_ctx):
     item_id = _seed_library_item(web_ctx)
     res = client.post("/api/jobs", json={"library_item_ids": [item_id], "target_device_id": "mock-switch-parent"})
