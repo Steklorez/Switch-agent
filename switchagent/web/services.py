@@ -181,7 +181,21 @@ def _library_entry_view(conn, row, latest_job, *, library_items=None, installed_
         "title_id_confident": bool(row["title_id_confident"]),
         "status": display_status,
         "library_status": row["status"],
-        "can_install": row["status"] == "AVAILABLE" and (latest_job is None or latest_job["status"] in ("DONE", "DONE_UNVERIFIED", "CANCELLED")),
+        # Found alongside W3-006 Override: cancel_job() (the "Skip"/"Cancel"
+        # button) actually sets status='FAILED', abandoned=1 -- 'CANCELLED'
+        # is never a real status anywhere in this codebase (dead string,
+        # left over from an earlier naming). Without the `abandoned` check
+        # below, a skipped/cancelled item's checkbox stayed disabled here
+        # FOREVER (latest_job stays that same FAILED row, `status` never
+        # becomes DONE/DONE_UNVERIFIED on its own) -- with no way back
+        # except retry_job(), which itself explicitly refuses an abandoned
+        # job and tells the user to "select the source again in Library"
+        # (see that function's own error message above) -- a real dead end.
+        "can_install": row["status"] == "AVAILABLE" and (
+            latest_job is None
+            or latest_job["status"] in ("DONE", "DONE_UNVERIFIED", "CANCELLED")
+            or bool(latest_job["abandoned"])
+        ),
         "recent_transfer_until": recent_until,
         "suggested_action": row["suggested_action"],
         "suggested_target": row["suggested_target"],
