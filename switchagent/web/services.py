@@ -146,6 +146,20 @@ def _library_entry_view(conn, row, latest_job, *, library_items=None, installed_
         and row["content_type"] != ContentType.ATMOSPHERE_MOD.value
         and base_title_id in installed_on_device_base_ids
     )
+    if confirmed_on_device and display_status == "INSTALLED_UNVERIFIED":
+        # DBI's own "Installed games" CSV (the same live console read that
+        # drives confirmed_on_device/"On Switch" below) is independent,
+        # machine-read proof -- at least as strong as UI-003's manual
+        # "user looked at the console" confirmation, which already
+        # upgrades this same status. Showing "unverified" right next to a
+        # green "On Switch" badge reads as this app contradicting itself
+        # over something it can already prove. The underlying transport
+        # fact (job_view["status"], still built from latest_job below)
+        # stays DONE_UNVERIFIED, completely untouched -- only this
+        # top-level summary status is promoted, same "layer a stronger
+        # signal on top, never overwrite the raw one" rule the rest of
+        # this module already follows for UI-003.
+        display_status = "INSTALLED"
     return {
         "id": row["id"],
         "name": name,

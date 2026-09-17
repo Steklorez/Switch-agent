@@ -231,6 +231,15 @@ class WebContext:
                     ids = backend.list_installed_title_ids()
                     if ids is not None:
                         installed_games_snapshot[device_id] = ids
+                        # Persisted too (db.device_installed_titles), not just
+                        # cached in memory -- so this device's confirmed set
+                        # survives it disconnecting or SwitchAgent restarting
+                        # (see db.set_device_installed_base_title_ids's own
+                        # docstring). Only on an actual successful read: a
+                        # failed/None read below must never wipe an
+                        # already-persisted confirmation just because this
+                        # tick couldn't reach the console.
+                        db.set_device_installed_base_title_ids(conn, device_id, ids)
                 except Exception:  # noqa: BLE001 -- one bad device must not skip the rest
                     log.exception("failed to refresh installed-games snapshot for a device")
         with self._device_cache_lock:

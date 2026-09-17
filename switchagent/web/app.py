@@ -261,17 +261,29 @@ def create_app(ctx: WebContext) -> FastAPI:
         # second, independent additive param (a checkbox, not one more
         # mutually-exclusive `filter` option) -- see list_library_view's
         # own docstring for why it's never confirmed_on_device-based.
+        #
+        # installed_on_device_base_ids: the PERSISTED confirmation table
+        # (db.get_all_confirmed_installed_base_title_ids), not
+        # ctx.get_known_installed_title_ids()'s in-memory, connected-only
+        # cache -- "confirmed on Switch" must survive that Switch
+        # disconnecting or the app restarting, see db.py's
+        # device_installed_titles schema comment.
         view = services.list_library_view(
             conn, kind=kind, search=search, format_filter=format, sort=sort,
             group_filter=filter, not_installed=not_installed,
-            installed_on_device_base_ids=ctx.get_known_installed_title_ids(),
+            installed_on_device_base_ids=db.get_all_confirmed_installed_base_title_ids(conn),
         )
         devices = services.list_devices(conn, ctx)
         # Corner hint (Settings' #dbi-installed-games-hint explains the
-        # actual steps): a Switch is connected, but no device is currently
-        # reporting DBI's "Installed games" MTP node -- most likely means
-        # the DBI setting is off, worth a nudge rather than a silently
-        # absent "On Switch" badge the user has no way to explain.
+        # actual steps): a Switch is connected RIGHT NOW, but no currently
+        # live device is reporting DBI's "Installed games" MTP node --
+        # most likely means the DBI setting is off, worth a nudge rather
+        # than a silently absent "On Switch" badge the user has no way to
+        # explain. Deliberately still the live, connected-only cache here
+        # (not the persisted table above): once ANY device has ever had a
+        # successful CSV read, the persisted set would never be empty
+        # again, and this hint would stop firing even for a brand new
+        # device that genuinely has the DBI setting off right now.
         show_installed_games_hint = bool(ctx.get_known_devices()) and not ctx.get_known_installed_title_ids()
         return _TEMPLATES.TemplateResponse(request, "library.html", {
             "view": view, "devices": devices, "search": search or "",
@@ -367,7 +379,7 @@ def create_app(ctx: WebContext) -> FastAPI:
     ):
         return services.list_library(
             conn, search=search, status_filter=status, format_filter=format, sort=sort,
-            installed_on_device_base_ids=ctx.get_known_installed_title_ids(),
+            installed_on_device_base_ids=db.get_all_confirmed_installed_base_title_ids(conn),
         )
 
     @app.get("/api/library/{item_id}")
