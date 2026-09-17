@@ -9,6 +9,13 @@
   --accent-text: #ffffff;
   --danger: #e5484d;
   --ok: #35c46f;
+  /* A distinct, still-positive teal for "transport accepted, unverified"
+     (DONE_UNVERIFIED/INSTALLED_UNVERIFIED) -- reads as success (matches
+     the earlier request that it never look like a --warn caution), but a
+     different HUE from --ok so it's never confused at a glance with "On
+     Switch" (a live DBI confirmation) or a fully DONE/verified transfer,
+     which both keep pure --ok. Same green family, genuinely distinguishable. */
+  --ok-soft: #2dd4bf;
   --warn: #f5a623;
   --topbar-h: 52px;
   --nav-h: 60px;
@@ -192,9 +199,13 @@ a { color: var(--accent); text-decoration: none; }
 .status-installed { color: var(--ok); background: rgba(53,196,111,0.15); }
 /* Transport-accepted-but-DBI-unprovable (queue_worker.py's `any_unverified`)
    reads, in practice, as a success -- SwitchAgent just can't prove it over
-   MTP. Styled identically to a confirmed install (--ok) rather than --warn's
-   amber, which would wrongly suggest something needs the user's attention. */
-.status-installed_unverified { color: var(--ok); background: rgba(53,196,111,0.15); }
+   MTP. --ok-soft rather than --warn's amber (would wrongly suggest
+   something needs the user's attention) -- but also NOT plain --ok: that's
+   reserved for "On Switch" (a live DBI confirmation) and a fully verified
+   DONE, so the two claims of different strength stay visually distinct
+   even while both are showing (e.g. right after a fresh install, before
+   DBI has had a chance to confirm it). */
+.status-installed_unverified { color: var(--ok-soft); background: rgba(45,212,191,0.15); }
 .status-failed, .status-error { color: var(--danger); background: rgba(229,72,77,0.15); }
 .status-interrupted { color: var(--warn); background: rgba(245,166,35,0.15); }
 .status-source_changed { color: var(--danger); background: rgba(229,72,77,0.15); }
@@ -208,7 +219,7 @@ a { color: var(--accent); text-decoration: none; }
 .status-needs_review { color: #c792ea; background: rgba(199,146,234,0.15); }
 .status-skip_duplicate { color: var(--text-dim); }
 .status-done { color: var(--ok); }
-.status-done_unverified { color: var(--ok); }
+.status-done_unverified { color: var(--ok-soft); }
 
 .game-group { display: flex; flex-direction: column; }
 .card-no-base { display: flex; flex-direction: column; justify-content: center; min-height: 64px; }
@@ -771,7 +782,7 @@ a { color: var(--accent); text-decoration: none; }
 .job-row[data-status="RUNNING"] { --stage-color: #4f8ef7; }
 .job-row[data-status="Extracting"], .job-row[data-status="Analyzing"] { --stage-color: #ad7bff; }
 .job-row[data-status="DONE"], .job-row[data-status="Ready"] { --stage-color: #35c46f; }
-.job-row[data-status="DONE_UNVERIFIED"] { --stage-color: #35c46f; }
+.job-row[data-status="DONE_UNVERIFIED"] { --stage-color: #2dd4bf; }
 .job-row[data-status="DONE"], .job-row[data-status="DONE_UNVERIFIED"] { --progress: 100%; }
 .job-row[data-status="Failed"], .job-row[data-status="FAILED"], .job-row[data-status="SOURCE_CHANGED"] { --stage-color: #e5484d; }
 .job-row[data-status="DESTINATION_CONFLICT"] { --stage-color: #ff8a00; }

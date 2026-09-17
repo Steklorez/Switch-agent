@@ -443,6 +443,57 @@ def test_on_switch_badge_goes_dark_on_disconnect_and_relights_on_reconnect(conn,
     assert "On Switch" in client.get("/").text
 
 
+def test_installed_unverified_badge_hides_on_disconnect_and_returns_on_reconnect(conn, client, web_ctx):
+    """By explicit request: INSTALLED_UNVERIFIED ("transport accepted,
+    DBI hasn't confirmed") is only honestly showable while its own target
+    device is live -- shown right after a fresh install (device
+    connected, DBI hasn't found it yet), gone entirely the instant that
+    device disconnects (never falls back to the raw status pill -- see
+    _library_entry_view's hide_unverified_badge), and back once the SAME
+    device reconnects (still unconfirmed) -- distinct from confirmation
+    itself flipping it to "On Switch" (covered by the test above)."""
+    import time as _time
+    from switchagent.mtp.errors import DeviceNotFoundError
+
+    item_id = _package(conn, "BreadAndFred.nsp", GAME_A_BASE)
+    job_id = db.create_job(
+        conn, action="INSTALL_VIA_DBI", target_storage="SD_INSTALL",
+        target_device_id=PARENT, library_item_id=item_id,
+    )
+    db.update_job_status(conn, job_id, "DONE_UNVERIFIED")
+    backend = web_ctx.registry.get(PARENT)
+    connect = backend.connect
+    web_ctx._device_cache = []
+    web_ctx._last_storage_refresh_monotonic = _time.monotonic()
+
+    # Right after install, PARENT connected, DBI hasn't confirmed it yet.
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setattr(backend, "list_installed_title_ids", lambda: set())
+        web_ctx.refresh_devices(conn)
+    html = client.get("/").text
+    assert "INSTALLED UNVERIFIED" in html
+    assert "On Switch" not in html
+
+    # PARENT disconnects -- the badge must disappear entirely, not linger.
+    with pytest.MonkeyPatch.context() as mp:
+        def absent():
+            raise DeviceNotFoundError("unplugged")
+        mp.setattr(backend, "connect", absent)
+        web_ctx.refresh_devices(conn)
+    html = client.get("/").text
+    assert "INSTALLED UNVERIFIED" not in html
+    assert "On Switch" not in html
+
+    # PARENT reconnects, still unconfirmed -- the badge comes back.
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setattr(backend, "connect", connect)
+        mp.setattr(backend, "list_installed_title_ids", lambda: set())
+        web_ctx.refresh_devices(conn)
+    html = client.get("/").text
+    assert "INSTALLED UNVERIFIED" in html
+    assert "On Switch" not in html
+
+
 def test_not_installed_checkbox_appears_and_is_wired_on_the_library_page(client, web_ctx):
     html = client.get("/").text
     assert 'name="not_installed"' in html
