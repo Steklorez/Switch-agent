@@ -45,6 +45,29 @@ def test_failure_retains_payload_and_does_not_extract_next(tmp_path, monkeypatch
     assert (tmp_path / '1').exists()
 
 
+def test_submit_prunes_previously_finished_states_immediately(tmp_path):
+    """Before this fix, a completed ("Ready") or "Failed" preparation only
+    got pruned from the panel once 50+ states had piled up -- in normal
+    use ("install a batch, wait, install another") that never happened,
+    so a fully finished batch just sat in the Queue panel forever, right
+    alongside the next one the user started, looking like it never
+    actually cleared. submit() now prunes every existing settled
+    (Ready/Failed) state unconditionally before adding the new one --
+    still-running work is left completely alone."""
+    queue = PreparationQueue(tmp_path / 'test.db')
+    with db.open_db(queue.db_path):
+        pass  # just ensure the schema exists
+    queue.states['old-ready'] = {'id': 'old-ready', 'phase': 'Ready', 'started': 0, 'items': {}}
+    queue.states['old-failed'] = {'id': 'old-failed', 'phase': 'Failed', 'started': 0, 'items': {}}
+    queue.states['still-running'] = {'id': 'still-running', 'phase': 'Preparing', 'started': 0, 'items': {}}
+
+    queue.submit([999999], 'mock-switch')
+
+    assert 'old-ready' not in queue.states
+    assert 'old-failed' not in queue.states
+    assert 'still-running' in queue.states  # never touched -- not settled
+
+
 @pytest.mark.parametrize("status", [
     "DESTINATION_CONFLICT", "SOURCE_CHANGED", "DEVICE_UNAVAILABLE", "BLOCKED_BY_DEPENDENCY",
 ])
