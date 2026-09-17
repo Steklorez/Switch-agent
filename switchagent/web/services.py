@@ -457,11 +457,11 @@ def list_library_view(
 
       not_installed -- an independent, additive checkbox (combines with
         group_filter rather than being one more mutually-exclusive option
-        in it): keeps only families whose base has never been
-        successfully copied by SwitchAgent (see _finish_family's
-        "installed" field -- job-status-based, deliberately NOT
-        confirmed_on_device, which is too stale to answer "what do I
-        still need to install").
+        in it): keeps only families with NEITHER a successful SwitchAgent
+        copy NOR a DBI confirmed_on_device match (see _finish_family's
+        "installed" field, an OR of both -- either signal alone is wrong
+        in one direction, see that field's own comment for the real-
+        hardware finding that proved it).
 
     Sorting for kind="games" is family-level (see _FAMILY_SORT_KEYS);
     the flat kinds keep the per-entry _SORT_KEYS they always used. `search`
@@ -606,16 +606,28 @@ def _finish_family(game: dict) -> dict:
     # every variant costs nothing and never depends on which one happens to
     # be present in this family.
     game["confirmed_on_device"] = any(e["confirmed_on_device"] for e in entries)
-    # "Not installed" filter's signal: SwitchAgent's OWN record of a
-    # successful copy (base status INSTALLED/INSTALLED_UNVERIFIED -- see
-    # _JOB_STATUS_TO_DISPLAY), never confirmed_on_device above. DBI's own
-    # installed-games report only refreshes when the user manually reopens
-    # DBI on-console (confirmed directly against real hardware -- a title
-    # installed 20+ minutes earlier, console connected the whole time,
-    # still wasn't in DBI's list), so it's useless for "what do I still
-    # need to install" -- it would keep claiming everything not-yet-
-    # installed long after this app successfully copied it.
-    game["installed"] = game["base"] is not None and game["base"]["status"] in ("INSTALLED", "INSTALLED_UNVERIFIED")
+    # "Not installed" filter's signal: EITHER SwitchAgent's own record of a
+    # successful copy (base status INSTALLED/INSTALLED_UNVERIFIED) OR DBI's
+    # confirmed_on_device above -- deliberately an OR of both, not either
+    # one alone:
+    #   - SwitchAgent-only would be wrong the other direction: real-hardware
+    #     confirmed (2026-09-17) that plenty of games already on the
+    #     console -- installed by any means other than this app, including
+    #     before the user ever started using it -- show status AVAILABLE
+    #     (SwitchAgent has no job for them) while confirmed_on_device is
+    #     True. SwitchAgent-only would flag every one of those as "not
+    #     installed" despite them demonstrably being on the console right
+    #     now -- the exact bug a live check against a real library caught.
+    #   - confirmed_on_device-only would be wrong the other direction: it
+    #     only refreshes when the user manually reopens DBI on-console
+    #     (confirmed directly against real hardware -- a title installed
+    #     20+ minutes earlier, console connected the whole time, still
+    #     wasn't in DBI's list), so it would keep claiming something
+    #     not-yet-installed long after SwitchAgent itself successfully
+    #     copied it.
+    game["installed"] = game["confirmed_on_device"] or (
+        game["base"] is not None and game["base"]["status"] in ("INSTALLED", "INSTALLED_UNVERIFIED")
+    )
     return game
 
 

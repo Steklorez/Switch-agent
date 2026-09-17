@@ -356,6 +356,23 @@ def test_not_installed_combines_with_group_filter_as_an_and(conn):
     assert _family_ids(view) == [GAME_B_BASE]
 
 
+def test_not_installed_excludes_a_family_dbi_confirms_even_with_no_switchagent_job(conn):
+    """The bug a live check against a real library caught: plenty of real
+    games are on the console via means other than SwitchAgent (installed
+    before the user started using this app, or through DBI directly) --
+    library_items.status stays AVAILABLE (no SwitchAgent job ever touched
+    them) even though DBI's own report confirms they're right there.
+    SwitchAgent-job-status alone would wrongly call these "not installed";
+    "installed" must be an OR of both signals, not job-status alone."""
+    _package(conn, "AlreadyOnConsole.nsp", GAME_A_BASE, status="AVAILABLE")
+    _package(conn, "TrulyNeverInstalled.nsp", GAME_B_BASE, status="AVAILABLE")
+
+    view = services.list_library_view(
+        conn, not_installed=True, installed_on_device_base_ids={GAME_A_BASE},
+    )
+    assert _family_ids(view) == [GAME_B_BASE]
+
+
 def test_not_installed_checkbox_appears_and_is_wired_on_the_library_page(client, web_ctx):
     html = client.get("/").text
     assert 'name="not_installed"' in html
