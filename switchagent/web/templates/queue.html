@@ -35,6 +35,12 @@
             {{ j.target_device_label }} · {{ j.target_storage }} · attempt {{ j.attempt_count }}
             · created {{ j.created_at }}
           </div>
+          {% if j.target_storage == "SD_CARD" and j.status == "RUNNING" and j.bytes_total %}
+          <div class="job-progress-text">
+            {{ j.bytes_done|filesize }} / {{ j.bytes_total|filesize }}
+            ({{ ((100 * j.bytes_done / j.bytes_total) if j.bytes_total else 0)|round|int }}%)
+          </div>
+          {% endif %}
           {% if j.status == "WAITING_FOR_DEVICE" %}
           <div class="job-meta">Waiting for {{ j.target_device_label }} to reconnect — resumes automatically</div>
           {% elif j.status == "DESTINATION_CONFLICT" %}
@@ -61,7 +67,7 @@
                  device (by its safe fingerprint, never the raw device_id). #}
               <a class="btn btn-small" href="/devices/{{ j.target_device_fingerprint }}">Device Details</a>
             </div>
-            <p class="settings-hint">Resolve the conflict manually on the device, then Retry.</p>
+            <p class="settings-hint">Override replaces the existing file with this one; Skip leaves it alone and drops this install.</p>
           </div>
           {% elif j.error %}<div class="job-error" title="{{ j.error }}">{{ j.error }}</div>{% endif %}
           {% if j.possibly_stalled %}
@@ -76,11 +82,16 @@
           {% if j.status == "RUNNING" %}<span class="spinner" aria-label="in progress"></span>{% endif %}
         </div>
         <div class="job-actions">
-          {% if not j.abandoned and j.status in ("FAILED", "INTERRUPTED", "DEVICE_UNAVAILABLE", "SOURCE_CHANGED", "DESTINATION_CONFLICT", "BLOCKED_BY_DEPENDENCY") %}
+          {% if j.status == "DESTINATION_CONFLICT" and not j.abandoned %}
+          <button class="btn btn-small btn-warning" data-job-action="override" data-job-id="{{ j.id }}">Override</button>
+          <button class="btn btn-small btn-danger" data-job-action="cancel" data-job-id="{{ j.id }}">Skip</button>
+          {% else %}
+          {% if not j.abandoned and j.status in ("FAILED", "INTERRUPTED", "DEVICE_UNAVAILABLE", "SOURCE_CHANGED", "BLOCKED_BY_DEPENDENCY") %}
           <button class="btn btn-small" data-job-action="retry" data-job-id="{{ j.id }}">Retry installation</button>
           {% endif %}
-          {% if not j.abandoned and j.status in ("PENDING_CONFIRM", "CONFIRMED", "DEVICE_UNAVAILABLE", "WAITING_FOR_BASE", "WAITING_FOR_DEVICE", "FAILED", "INTERRUPTED", "SOURCE_CHANGED", "DESTINATION_CONFLICT", "BLOCKED_BY_DEPENDENCY") %}
+          {% if not j.abandoned and j.status in ("PENDING_CONFIRM", "CONFIRMED", "DEVICE_UNAVAILABLE", "WAITING_FOR_BASE", "WAITING_FOR_DEVICE", "FAILED", "INTERRUPTED", "SOURCE_CHANGED", "BLOCKED_BY_DEPENDENCY") %}
           <button class="btn btn-small btn-danger" data-job-action="cancel" data-job-id="{{ j.id }}">Cancel</button>
+          {% endif %}
           {% endif %}
         </div>
       </li>
@@ -91,6 +102,15 @@
 </ol>
 
 <div id="toast-container" class="toast-container" aria-live="polite"></div>
+
+<dialog id="confirm-action-modal" class="modal" aria-labelledby="confirm-action-title">
+  <h3 id="confirm-action-title">Are you sure?</h3>
+  <p id="confirm-action-message"></p>
+  <div class="modal-actions">
+    <button type="button" class="btn btn-secondary" id="confirm-action-cancel-btn">Never mind</button>
+    <button type="button" class="btn btn-danger" id="confirm-action-ok-btn">Confirm</button>
+  </div>
+</dialog>
 {% endblock %}
 {% block scripts %}
 <script src="/static/queue.js?v=2"></script>

@@ -372,6 +372,31 @@ def test_unverified_job_counts_as_spoken_for_content(isolated_db):
     assert existing["id"] == job_id
 
 
+def test_successful_job_persists_bytes_total_and_done_on_the_job_row(isolated_db):
+    """Before this fix, jobs.bytes_total/bytes_done were only ever written
+    at a TERMINAL status (via install_history's own separate bytes_total,
+    or the DESTINATION_CONFLICT/FAILED/INTERRUPTED writes) -- during the
+    whole RUNNING phase the jobs row itself kept bytes_total=NULL,
+    bytes_done=0 no matter how much had actually transferred, so
+    queue.js's own SD_CARD progress-bar fraction (which reads exactly
+    these two columns) never had real numbers to show. This checks the
+    terminal DONE row directly on `jobs`, not install_history, which
+    already had the right number before this fix."""
+    conn, inbox_dir = isolated_db
+    parent, _child, registry = _two_backends()
+    content = b"content A" * 50
+    name = "GameB [0100000000020000][v0].nsp"
+    item_id = _make_item(conn, inbox_dir, name, content, "0100000000020000")
+    job_id = _make_confirmed_job(conn, inbox_dir, name, item_id, "mock-switch-parent")
+
+    queue_worker.run_worker_once(conn, registry)
+
+    row = db.get_job(conn, job_id)
+    assert row["status"] in ("DONE", "DONE_UNVERIFIED")
+    assert row["bytes_total"] == len(content)
+    assert row["bytes_done"] == len(content)
+
+
 # -- install_history: one row per terminal outcome (Web UI History page) --
 
 def test_done_job_records_install_history(isolated_db):
@@ -422,6 +447,34 @@ def test_destination_conflict_records_install_history(isolated_db):
     history = db.list_install_history(conn)
     assert len(history) == 1
     assert history[0]["outcome"] == "DESTINATION_CONFLICT"
+
+
+def test_destination_conflict_override_replaces_existing_file(isolated_db):
+    """W3-006 Override: a job created with force_overwrite=1 (only ever set
+    by services.override_job(), the user's explicit "Override" click on a
+    DESTINATION_CONFLICT card) must skip the existence check entirely and
+    replace whatever's already at the destination -- the opposite of
+    test_destination_conflict_records_install_history above, which proves
+    the DEFAULT (force_overwrite=0) job still refuses."""
+    conn, inbox_dir = isolated_db
+    parent, _child, registry = _two_backends()
+    parent.connect()
+    parent.storage_tree("SD_INSTALL").write_file("GameA [0100000000010000][v0].nsp", b"someone else's file")
+
+    name = "GameA [0100000000010000][v0].nsp"
+    item_id = _make_item(conn, inbox_dir, name, b"content A", "0100000000010000")
+    job_id = _make_confirmed_job(conn, inbox_dir, name, item_id, "mock-switch-parent")
+    conn.execute("UPDATE jobs SET force_overwrite=1 WHERE id=?", (job_id,))
+    conn.commit()
+
+    outcome = queue_worker.run_worker_once(conn, registry)
+
+    assert outcome.status in ("DONE", "DONE_UNVERIFIED")
+    assert parent.storage_tree("SD_INSTALL").read_file(name) == b"content A"
+
+    history = db.list_install_history(conn)
+    assert len(history) == 1
+    assert history[0]["outcome"] in ("DONE", "DONE_UNVERIFIED")
 
 
 def test_unverified_job_records_install_history(isolated_db):
