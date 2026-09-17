@@ -95,6 +95,19 @@
       <option value="{{ key }}" {{ "selected" if group_filter == key }}>{{ label }}</option>
       {% endfor %}
     </select>
+    {# Independent of `filter` above -- an additive checkbox, not one more
+       mutually-exclusive option, so "not yet installed" can combine with
+       e.g. "With DLC" instead of forcing a choice between them. Keyed off
+       SwitchAgent's own copy record (services.list_library_view's
+       `not_installed`), never DBI's confirmed-on-device signal -- see
+       that function's own docstring for why (DBI's report only refreshes
+       when the user manually reopens it on-console, so it can't answer
+       "what do I still need to install"). #}
+    <label class="filter-checkbox">
+      <input type="checkbox" name="not_installed" value="1" onchange="this.form.submit()"
+             {{ "checked" if not_installed }}>
+      Not installed
+    </label>
     <button type="submit" class="btn btn-secondary">Filter</button>
   </form>
   <button id="rescan-btn" class="btn btn-secondary rescan-trigger" data-scan-url="/api/scan" data-status-url="/api/scan/status">

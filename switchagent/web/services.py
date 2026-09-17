@@ -430,7 +430,7 @@ def _search_haystack(entry: dict) -> str:
 def list_library_view(
     conn, *, kind: str = "games", search: Optional[str] = None,
     format_filter: Optional[str] = None, sort: str = "date_added", reverse: bool = True,
-    group_filter: str = "all",
+    group_filter: str = "all", not_installed: bool = False,
     installed_on_device_base_ids: Optional[set[str]] = None,
 ) -> dict:
     """The Library page's primary read: groups GAME_PACKAGE entries by
@@ -453,8 +453,15 @@ def list_library_view(
     which is what the Library page's grouped card view actually renders):
 
       group_filter -- one of _GROUP_FILTER_PREDICATES: All / Base Games /
-        Updates / DLC / Mods / Duplicates / Errors-Needs Review / Has
-        unverified activity / Has failed activity.
+        Updates / DLC / Mods / Duplicates.
+
+      not_installed -- an independent, additive checkbox (combines with
+        group_filter rather than being one more mutually-exclusive option
+        in it): keeps only families whose base has never been
+        successfully copied by SwitchAgent (see _finish_family's
+        "installed" field -- job-status-based, deliberately NOT
+        confirmed_on_device, which is too stale to answer "what do I
+        still need to install").
 
     Sorting for kind="games" is family-level (see _FAMILY_SORT_KEYS);
     the flat kinds keep the per-entry _SORT_KEYS they always used. `search`
@@ -569,6 +576,8 @@ def list_library_view(
     # W3-003: the family-level filters.
     predicate = _GROUP_FILTER_PREDICATES.get(group_filter, _GROUP_FILTER_PREDICATES["all"])
     games = [g for g in games if predicate(g)]
+    if not_installed:
+        games = [g for g in games if not g["installed"]]
 
     family_key_fn = _FAMILY_SORT_KEYS.get(sort, _FAMILY_SORT_KEYS["date_added"])
     games.sort(key=family_key_fn, reverse=reverse)
@@ -597,6 +606,16 @@ def _finish_family(game: dict) -> dict:
     # every variant costs nothing and never depends on which one happens to
     # be present in this family.
     game["confirmed_on_device"] = any(e["confirmed_on_device"] for e in entries)
+    # "Not installed" filter's signal: SwitchAgent's OWN record of a
+    # successful copy (base status INSTALLED/INSTALLED_UNVERIFIED -- see
+    # _JOB_STATUS_TO_DISPLAY), never confirmed_on_device above. DBI's own
+    # installed-games report only refreshes when the user manually reopens
+    # DBI on-console (confirmed directly against real hardware -- a title
+    # installed 20+ minutes earlier, console connected the whole time,
+    # still wasn't in DBI's list), so it's useless for "what do I still
+    # need to install" -- it would keep claiming everything not-yet-
+    # installed long after this app successfully copied it.
+    game["installed"] = game["base"] is not None and game["base"]["status"] in ("INSTALLED", "INSTALLED_UNVERIFIED")
     return game
 
 
