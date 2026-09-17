@@ -270,10 +270,15 @@ def create_app(ctx: WebContext) -> FastAPI:
         # persisted table) is still written on every successful read, just
         # no longer what the Library page displays -- see that function's
         # own docstring for the opposite tradeoff it was built for.
+        # connected_device_ids: powers hide_unverified_badge (see
+        # _library_entry_view's own comment) -- INSTALLED_UNVERIFIED is
+        # only shown while ITS OWN target device is live, mirroring
+        # confirmed_on_device's own connected-only scoping above.
         view = services.list_library_view(
             conn, kind=kind, search=search, format_filter=format, sort=sort,
             group_filter=filter, not_installed=not_installed,
             installed_on_device_base_ids=ctx.get_known_installed_title_ids(),
+            connected_device_ids={d.device_id for d in ctx.get_known_devices()},
         )
         devices = services.list_devices(conn, ctx)
         # Corner hint (Settings' #dbi-installed-games-hint explains the
@@ -382,6 +387,7 @@ def create_app(ctx: WebContext) -> FastAPI:
         return services.list_library(
             conn, search=search, status_filter=status, format_filter=format, sort=sort,
             installed_on_device_base_ids=ctx.get_known_installed_title_ids(),
+            connected_device_ids={d.device_id for d in ctx.get_known_devices()},
         )
 
     @app.get("/api/library/{item_id}")

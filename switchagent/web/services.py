@@ -113,7 +113,10 @@ def _latest_job_by_library_item(conn) -> dict[int, "object"]:
     return result
 
 
-def _library_entry_view(conn, row, latest_job, *, library_items=None, installed_on_device_base_ids=None) -> dict:
+def _library_entry_view(
+    conn, row, latest_job, *, library_items=None, installed_on_device_base_ids=None,
+    connected_device_ids=None,
+) -> dict:
     display_status = row["status"]
     job_view = None
     recent_until = None
@@ -160,6 +163,21 @@ def _library_entry_view(conn, row, latest_job, *, library_items=None, installed_
         # signal on top, never overwrite the raw one" rule the rest of
         # this module already follows for UI-003.
         display_status = "INSTALLED"
+    # By explicit request: INSTALLED_UNVERIFIED specifically -- "transport
+    # accepted, DBI hasn't confirmed" -- is only ever honestly showable
+    # while there's a live chance of that confirmation actually happening,
+    # i.e. while the job's OWN target device is currently connected (not
+    # just "some device" -- a different connected Switch says nothing
+    # about this one). Once that device disconnects, the badge disappears
+    # entirely rather than sitting there claiming an unverified positive
+    # with zero chance of it resolving right now. Every OTHER status
+    # (FAILED, QUEUED, INSTALLED, ...) is a historical/current-job fact
+    # that doesn't depend on any live connection, and keeps showing.
+    hide_unverified_badge = (
+        display_status == "INSTALLED_UNVERIFIED"
+        and connected_device_ids is not None
+        and (job_view is None or job_view["target_device_id"] not in connected_device_ids)
+    )
     return {
         "id": row["id"],
         "name": name,
@@ -205,6 +223,7 @@ def _library_entry_view(conn, row, latest_job, *, library_items=None, installed_
         "last_scanned_at": row["last_scanned_at"],
         "job": job_view,
         "confirmed_on_device": confirmed_on_device,
+        "hide_unverified_badge": hide_unverified_badge,
     }
 
 
@@ -342,6 +361,7 @@ def list_library(
     conn, *, search: Optional[str] = None, status_filter: str = "all",
     format_filter: Optional[str] = None, sort: str = "date_added", reverse: bool = True,
     installed_on_device_base_ids: Optional[set[str]] = None,
+    connected_device_ids: Optional[set[str]] = None,
 ) -> list[dict]:
     """Reads already-indexed library_items -- never rescans (point 16: a
     full rescan is a separate, explicit POST /api/scan). Filtering/sorting
@@ -360,6 +380,7 @@ def list_library(
         _library_entry_view(
             conn, row, latest_jobs.get(row["id"]), library_items=all_items,
             installed_on_device_base_ids=installed_on_device_base_ids,
+            connected_device_ids=connected_device_ids,
         )
         for row in all_items
     ]
@@ -460,6 +481,7 @@ def list_library_view(
     format_filter: Optional[str] = None, sort: str = "date_added", reverse: bool = True,
     group_filter: str = "all", not_installed: bool = False,
     installed_on_device_base_ids: Optional[set[str]] = None,
+    connected_device_ids: Optional[set[str]] = None,
 ) -> dict:
     """The Library page's primary read: groups GAME_PACKAGE entries by
     (derived) base TITLE_ID -- base game + nested updates/DLC/matching
@@ -510,6 +532,7 @@ def list_library_view(
         _library_entry_view(
             conn, row, latest_jobs.get(row["id"]), library_items=all_items,
             installed_on_device_base_ids=installed_on_device_base_ids,
+            connected_device_ids=connected_device_ids,
         )
         for row in all_items
     ]

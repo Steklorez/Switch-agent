@@ -46,6 +46,13 @@
             onDevice.textContent = 'On Switch';
             body.appendChild(onDevice);
           }
+        } else if (entry.hide_unverified_badge) {
+          // INSTALLED_UNVERIFIED specifically, with its own target device
+          // now disconnected (see services._library_entry_view's own
+          // comment) -- no badge beats an unverified positive claim with
+          // zero live chance of confirming it right now.
+          if (onDevice) onDevice.remove();
+          if (rawStatus) rawStatus.remove();
         } else {
           if (onDevice) onDevice.remove();
           if (rawStatus) {

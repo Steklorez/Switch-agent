@@ -14,11 +14,18 @@
    stronger, more complete claim (see list_library_view's own docstring
    on why "installed" is an OR of both) -- so the job-status pill is
    redundant at best and actively misleading at worst, and is suppressed
-   whenever "On Switch" is already shown. #}
+   whenever "On Switch" is already shown.
+
+   Separately, by explicit request: INSTALLED_UNVERIFIED specifically is
+   only honestly showable while there's a live chance DBI could actually
+   confirm it -- i.e. while its OWN target device is currently connected
+   (see services._library_entry_view's hide_unverified_badge comment).
+   Once that device disconnects, no badge at all beats an unverified
+   "probably fine" claim with zero chance of resolving right now. #}
 {% macro card_status(e) %}
 {% if e.confirmed_on_device %}
 <div class="card-status status-on-device">On Switch</div>
-{% else %}
+{% elif not e.hide_unverified_badge %}
 <div class="card-status status-{{ e.status|lower }}">{{ e.status.replace("_", " ") }}</div>
 {% endif %}
 {% endmacro %}
@@ -60,7 +67,9 @@
   <div class="variant-body card-body" data-detail-url="/api/library/{{ e.id }}">
     <span class="variant-label">{{ label }} — {{ e.name }}</span>
     <span class="card-meta">{{ e.size|filesize }}</span>
+    {% if not e.hide_unverified_badge %}
     <span class="card-status status-{{ e.status|lower }}">{{ e.status.replace("_", " ") }}</span>
+    {% endif %}
   </div>
 </div>
 {% endmacro %}
