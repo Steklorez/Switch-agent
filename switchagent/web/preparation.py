@@ -187,7 +187,22 @@ class PreparationQueue:
                         if statuses != previous:
                             record(event='Jobs', jobs=statuses)
                             previous = statuses
-                        if any(j['status'] in ('FAILED', 'INTERRUPTED', 'CANCELLED', 'WAITING_FOR_BASE') for j in jobs):
+                        # Every status a job can get stuck in without ever
+                        # reaching DONE/DONE_UNVERIFIED on its own -- kept in
+                        # sync with services._RETRYABLE_JOB_STATUSES (the
+                        # canonical "needs a user action" set) plus CANCELLED
+                        # (dead status string, never actually set, kept here
+                        # defensively) and WAITING_FOR_BASE (this run's own
+                        # item racing a DIFFERENT outstanding base job).
+                        # DESTINATION_CONFLICT was the original gap: missing
+                        # from this set meant a real conflict mid-batch just
+                        # spun this poll loop every .5s forever -- reachable,
+                        # reproduced with a real device (the exact WAITING
+                        # state after it never resolved on its own).
+                        if any(j['status'] in (
+                            'FAILED', 'INTERRUPTED', 'CANCELLED', 'WAITING_FOR_BASE',
+                            'DESTINATION_CONFLICT', 'SOURCE_CHANGED', 'DEVICE_UNAVAILABLE', 'BLOCKED_BY_DEPENDENCY',
+                        ) for j in jobs):
                             raise RuntimeError('Installation stopped; resolve the current jobs before starting remaining items')
                         if jobs and all(j['status'] in ('DONE', 'DONE_UNVERIFIED') for j in jobs):
                             break
