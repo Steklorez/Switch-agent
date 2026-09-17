@@ -55,11 +55,12 @@ class MockStorage:
 
     def __init__(
         self, name: str, *, writable: bool = True, free_bytes: Optional[int] = None,
-        raw_name: Optional[str] = None,
+        total_bytes: Optional[int] = None, raw_name: Optional[str] = None,
     ):
         self.name = name
         self.writable = writable
         self.free_bytes = free_bytes
+        self.total_bytes = total_bytes
         self.nodes: dict[str, _MockNode] = {}
         # UI-007: what a real DBI would have reported this storage as,
         # purely for list_storages()' StorageInfo.raw_name -- defaults to
@@ -166,9 +167,11 @@ class MockMtpBackend(MtpBackend):
 
     def add_storage(
         self, name: str, *, writable: bool = True, free_bytes: Optional[int] = None,
-        raw_name: Optional[str] = None,
+        total_bytes: Optional[int] = None, raw_name: Optional[str] = None,
     ) -> MockStorage:
-        storage = MockStorage(name, writable=writable, free_bytes=free_bytes, raw_name=raw_name)
+        storage = MockStorage(
+            name, writable=writable, free_bytes=free_bytes, total_bytes=total_bytes, raw_name=raw_name,
+        )
         self._storages[name] = storage
         return storage
 
@@ -263,7 +266,10 @@ class MockMtpBackend(MtpBackend):
         self._require_connected()
         self._log_op("LIST_STORAGE", {"count": len(self._storages)})
         return [
-            StorageInfo(name=s.name, writable=s.writable, free_bytes=s.free_bytes, raw_name=s.raw_name)
+            StorageInfo(
+                name=s.name, writable=s.writable, free_bytes=s.free_bytes,
+                total_bytes=s.total_bytes, raw_name=s.raw_name,
+            )
             for s in self._storages.values()
         ]
 
@@ -273,7 +279,10 @@ class MockMtpBackend(MtpBackend):
         self._log_op("GET_STORAGE", {"storage": storage, "found": s is not None})
         if s is None:
             raise StorageNotFoundError(f"storage not found: {storage!r}")
-        return StorageInfo(name=s.name, writable=s.writable, free_bytes=s.free_bytes, raw_name=s.raw_name)
+        return StorageInfo(
+            name=s.name, writable=s.writable, free_bytes=s.free_bytes,
+            total_bytes=s.total_bytes, raw_name=s.raw_name,
+        )
 
     def exists(self, storage: str, path: str) -> bool:
         self._require_connected()

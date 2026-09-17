@@ -84,6 +84,21 @@ def test_list_storages_reports_an_explicit_raw_name():
     assert info.raw_name == "5: SD Card install"
 
 
+def test_list_storages_and_get_storage_report_total_bytes():
+    """total_bytes defaults to None (unset, like free_bytes) but is
+    threaded through both read paths when a test/dev fixture supplies it
+    -- the Library page's header space bar needs both free_bytes and
+    total_bytes to compute a used/total fraction."""
+    backend = MockMtpBackend()
+    backend.add_storage("SD_CARD", free_bytes=100, total_bytes=1000)
+    backend.add_storage("SD_INSTALL")
+    backend.connect()
+    by_name = {s.name: s for s in backend.list_storages()}
+    assert by_name["SD_CARD"].total_bytes == 1000
+    assert by_name["SD_INSTALL"].total_bytes is None
+    assert backend.get_storage("SD_CARD").total_bytes == 1000
+
+
 def test_set_storage_overrides_is_recorded_in_operation_log():
     """UI-007: proves the orchestration layer's call (WebContext.
     refresh_devices) is actually observable/inspectable via this mock --

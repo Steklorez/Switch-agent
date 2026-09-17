@@ -748,6 +748,19 @@ def create_app(ctx: WebContext) -> FastAPI:
             raise HTTPException(status_code=404, detail=str(exc)) from exc
         return {"ok": True}
 
+    @app.get("/api/devices/by-fingerprint/{fingerprint}/storages")
+    def api_list_device_storages_by_fingerprint(
+        fingerprint: str, conn=Depends(get_conn), ctx: WebContext = Depends(get_ctx),
+    ):
+        """Fingerprint-addressed twin of GET /api/devices/{device_id}/storages
+        (same W3-004 reasoning as the routes around it: the raw device_id
+        never belongs in a request path, which lands in uvicorn's own
+        access log). Used by the Library page's header space bar to read
+        the connected Switch's SD_CARD free/total bytes without the page's
+        own JS ever handling a raw device_id."""
+        device_id = _resolve_fingerprint_or_404(conn, fingerprint)
+        return services.list_device_storages(conn, ctx, device_id)
+
     @app.post("/api/devices/by-fingerprint/{fingerprint}/storages/mapping")
     def api_set_device_storage_mapping_by_fingerprint(
         fingerprint: str, body: DeviceStorageMappingRequest, conn=Depends(get_conn), ctx: WebContext = Depends(get_ctx),
