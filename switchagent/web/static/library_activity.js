@@ -23,27 +23,39 @@
         const row = box.closest('.card, .variant-row');
         if (!row) return;
         row.dataset.recentUntil = entry.recent_transfer_until || '';
-        const status = row.querySelector('.card-status');
-        if (status) {
-          status.className = 'card-status status-' + entry.status.toLowerCase();
-          status.textContent = entry.status.replaceAll('_', ' ');
-        }
         // "On Switch" -- DBI's own live Installed Games report (see
-        // services._library_entry_view's confirmed_on_device), a second,
-        // independent badge next to the job-history status above, never
-        // merged into it.
+        // services._library_entry_view's confirmed_on_device) -- is
+        // strictly the stronger signal once true, exactly like
+        // library.html's own card_status() macro: the raw job-status pill
+        // is redundant at that point and is removed, never left stacked
+        // next to "On Switch" (a plain generic `.card-status` lookup here
+        // used to grab whichever of the two happened to already be in the
+        // DOM -- including "On Switch" itself -- and overwrite it with the
+        // raw status text, then add a second "On Switch" since the first
+        // one no longer matched; that's the stacking bug this replaces).
         const body = row.querySelector('.card-body, .variant-body');
-        if (body) {
-          let onDevice = body.querySelector('.status-on-device');
-          if (entry.confirmed_on_device) {
-            if (!onDevice) {
-              onDevice = document.createElement(status && status.tagName === 'SPAN' ? 'span' : 'div');
-              onDevice.className = 'card-status status-on-device';
-              onDevice.textContent = 'On Switch';
-              body.appendChild(onDevice);
-            }
-          } else if (onDevice) {
-            onDevice.remove();
+        if (!body) return;
+        const rawStatus = body.querySelector('.card-status:not(.status-on-device)');
+        let onDevice = body.querySelector('.status-on-device');
+        const tag = (rawStatus || onDevice)?.tagName === 'SPAN' ? 'span' : 'div';
+        if (entry.confirmed_on_device) {
+          if (rawStatus) rawStatus.remove();
+          if (!onDevice) {
+            onDevice = document.createElement(tag);
+            onDevice.className = 'card-status status-on-device';
+            onDevice.textContent = 'On Switch';
+            body.appendChild(onDevice);
+          }
+        } else {
+          if (onDevice) onDevice.remove();
+          if (rawStatus) {
+            rawStatus.className = 'card-status status-' + entry.status.toLowerCase();
+            rawStatus.textContent = entry.status.replaceAll('_', ' ');
+          } else {
+            const newStatus = document.createElement(tag);
+            newStatus.className = 'card-status status-' + entry.status.toLowerCase();
+            newStatus.textContent = entry.status.replaceAll('_', ' ');
+            body.appendChild(newStatus);
           }
         }
       });

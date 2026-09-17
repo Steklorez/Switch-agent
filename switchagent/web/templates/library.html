@@ -21,7 +21,6 @@
 {% else %}
 <div class="card-status status-{{ e.status|lower }}">{{ e.status.replace("_", " ") }}</div>
 {% endif %}
-{% if e.job %}<div class="card-meta">→ {{ e.job.target_device_label }}</div>{% endif %}
 {% endmacro %}
 
 {% macro destination_label(e) %}{% if e.content_type == "ATMOSPHERE_MOD" %}SD Card (merge){% else %}SD Card install{% endif %}{% endmacro %}
