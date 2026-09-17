@@ -262,16 +262,18 @@ def create_app(ctx: WebContext) -> FastAPI:
         # mutually-exclusive `filter` option) -- see list_library_view's
         # own docstring for why it's never confirmed_on_device-based.
         #
-        # installed_on_device_base_ids: the PERSISTED confirmation table
-        # (db.get_all_confirmed_installed_base_title_ids), not
-        # ctx.get_known_installed_title_ids()'s in-memory, connected-only
-        # cache -- "confirmed on Switch" must survive that Switch
-        # disconnecting or the app restarting, see db.py's
-        # device_installed_titles schema comment.
+        # installed_on_device_base_ids: ctx.get_known_installed_title_ids()'s
+        # in-memory, CONNECTED-ONLY cache -- by explicit request, "On
+        # Switch" must go dark the instant that Switch disconnects (nothing
+        # can vouch for it anymore) and only relight once it's reconnected
+        # and re-read. db.get_all_confirmed_installed_base_title_ids() (the
+        # persisted table) is still written on every successful read, just
+        # no longer what the Library page displays -- see that function's
+        # own docstring for the opposite tradeoff it was built for.
         view = services.list_library_view(
             conn, kind=kind, search=search, format_filter=format, sort=sort,
             group_filter=filter, not_installed=not_installed,
-            installed_on_device_base_ids=db.get_all_confirmed_installed_base_title_ids(conn),
+            installed_on_device_base_ids=ctx.get_known_installed_title_ids(),
         )
         devices = services.list_devices(conn, ctx)
         # Corner hint (Settings' #dbi-installed-games-hint explains the
@@ -379,7 +381,7 @@ def create_app(ctx: WebContext) -> FastAPI:
     ):
         return services.list_library(
             conn, search=search, status_filter=status, format_filter=format, sort=sort,
-            installed_on_device_base_ids=db.get_all_confirmed_installed_base_title_ids(conn),
+            installed_on_device_base_ids=ctx.get_known_installed_title_ids(),
         )
 
     @app.get("/api/library/{item_id}")

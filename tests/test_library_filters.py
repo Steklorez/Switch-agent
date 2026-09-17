@@ -388,18 +388,59 @@ def test_confirmed_on_device_badge_suppresses_the_job_status_pill(conn, client, 
         target_device_id=PARENT, library_item_id=item_id,
     )
     db.update_job_status(conn, job_id, "DONE_UNVERIFIED")
-    # Simulates what WebContext.refresh_devices() would have persisted from
-    # a real DBI CSV read (db.set_device_installed_base_title_ids) -- the
-    # Library page reads the persisted table directly (db.
-    # get_all_confirmed_installed_base_title_ids), not WebContext's
-    # in-memory cache, so this survives PARENT disconnecting or the app
-    # restarting (see device_installed_titles' own schema comment).
-    db.set_device_installed_base_title_ids(conn, PARENT, {GAME_A_BASE})
+    # Simulates a real DBI CSV read while PARENT is actually connected --
+    # the Library page reads WebContext's own connected-only cache (see
+    # ctx.get_known_installed_title_ids()'s docstring: "On Switch" must go
+    # dark again the instant this device disconnects, by explicit request).
+    backend = web_ctx.registry.get(PARENT)
+    import time as _time
+    web_ctx._device_cache = []
+    web_ctx._last_storage_refresh_monotonic = _time.monotonic()
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setattr(backend, "list_installed_title_ids", lambda: {GAME_A_BASE})
+        web_ctx.refresh_devices(conn)
 
     html = client.get("/").text
     assert "On Switch" in html
     assert "INSTALLED_UNVERIFIED" not in html
     assert "INSTALLED UNVERIFIED" not in html
+
+
+def test_on_switch_badge_goes_dark_on_disconnect_and_relights_on_reconnect(conn, client, web_ctx):
+    """By explicit request: "On Switch" must reset the moment its console
+    disconnects (nothing can vouch for it anymore while it's unplugged),
+    and only relight once the SAME device is reconnected and re-read --
+    reverting an earlier "persist across disconnect" design. See
+    ctx.get_known_installed_title_ids()'s own docstring for the tradeoff;
+    db.get_all_confirmed_installed_base_title_ids() (the persisted table)
+    still gets written on every read, it's just no longer what the Library
+    page shows."""
+    import time as _time
+    from switchagent.mtp.errors import DeviceNotFoundError
+
+    item_id = _package(conn, "BreadAndFred.nsp", GAME_A_BASE)
+    backend = web_ctx.registry.get(PARENT)
+    connect = backend.connect
+    web_ctx._device_cache = []
+    web_ctx._last_storage_refresh_monotonic = _time.monotonic()
+
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setattr(backend, "list_installed_title_ids", lambda: {GAME_A_BASE})
+        web_ctx.refresh_devices(conn)
+    assert "On Switch" in client.get("/").text
+
+    with pytest.MonkeyPatch.context() as mp:
+        def absent():
+            raise DeviceNotFoundError("unplugged")
+        mp.setattr(backend, "connect", absent)
+        web_ctx.refresh_devices(conn)
+    assert "On Switch" not in client.get("/").text
+
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setattr(backend, "connect", connect)
+        mp.setattr(backend, "list_installed_title_ids", lambda: {GAME_A_BASE})
+        web_ctx.refresh_devices(conn)
+    assert "On Switch" in client.get("/").text
 
 
 def test_not_installed_checkbox_appears_and_is_wired_on_the_library_page(client, web_ctx):
