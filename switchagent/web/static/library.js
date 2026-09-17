@@ -32,13 +32,23 @@
     const n = selected.size;
     selectionCount.textContent = String(n);
     let totalSize = 0;
-    selected.forEach((v) => { totalSize += v.size; });
+    let newSpaceSize = 0;
+    selected.forEach((v) => {
+      totalSize += v.size;
+      // A confirmed-on-device item already exists at its destination path,
+      // and installs never overwrite an existing file (see the confirm
+      // modal's own "existing files are never replaced" notice) -- (re)
+      // installing it is a no-op transfer-wise, so it shouldn't count
+      // toward "space this selection is about to add" even though it
+      // still counts toward the plain total shown just below.
+      if (!v.confirmedOnDevice) newSpaceSize += v.size;
+    });
     selectionSize.textContent = formatBytes(totalSize);
     selectionBar.hidden = n === 0;
     // Lets app.js's header SD card space bar show the estimated space the
     // current selection would take up, without this file needing to know
     // anything about that bar's markup or rendering.
-    document.dispatchEvent(new CustomEvent("storage:selection-changed", { detail: { bytes: totalSize } }));
+    document.dispatchEvent(new CustomEvent("storage:selection-changed", { detail: { bytes: newSpaceSize } }));
   }
   updateSelectionBar();
 
@@ -70,6 +80,7 @@
           familyName: box.dataset.familyName || null,
           family: box.dataset.family || null,
           coverId: box.dataset.coverId || box.dataset.family || "",
+          confirmedOnDevice: box.dataset.confirmedOnDevice === "1",
         });
       } else {
         selected.delete(id);
