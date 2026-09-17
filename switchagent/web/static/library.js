@@ -35,6 +35,10 @@
     selected.forEach((v) => { totalSize += v.size; });
     selectionSize.textContent = formatBytes(totalSize);
     selectionBar.hidden = n === 0;
+    // Lets app.js's header SD card space bar show the estimated space the
+    // current selection would take up, without this file needing to know
+    // anything about that bar's markup or rendering.
+    document.dispatchEvent(new CustomEvent("storage:selection-changed", { detail: { bytes: totalSize } }));
   }
   updateSelectionBar();
 

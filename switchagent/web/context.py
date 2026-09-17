@@ -566,9 +566,17 @@ def build_mock_context(db_path: Path, *, device_ids: Optional[list[str]] = None)
     registry = queue_worker.DeviceRegistry()
     ids = device_ids or ["mock-switch-parent", "mock-switch-child"]
     names = {"mock-switch-parent": "Parent's Switch (mock)", "mock-switch-child": "Child's Switch (mock)"}
+    # A plausible SD_CARD size/free-space pair -- only SD_CARD is a real
+    # filesystem (see mtp/windows.py's SIZE_VERIFIABLE_STORAGES), so it's
+    # the only storage worth giving believable numbers to here; SD_INSTALL
+    # stays byte-less, same as real hardware reports it. Lets the Library
+    # page's header space bar (used + about-to-be-selected) render
+    # something in `switch-agent web --mock` without real hardware.
+    sd_card_total_bytes = 256 * 1024**3
+    sd_card_free_bytes = sd_card_total_bytes - 45 * 1024**3
     for device_id in ids:
         backend = MockMtpBackend(device_id=device_id, device_name=names.get(device_id, device_id))
-        backend.add_storage("SD_CARD")
+        backend.add_storage("SD_CARD", free_bytes=sd_card_free_bytes, total_bytes=sd_card_total_bytes)
         backend.add_storage("SD_INSTALL")
         registry.register(device_id, backend)
 

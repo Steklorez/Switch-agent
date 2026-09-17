@@ -11,6 +11,13 @@
 <body>
 <header class="topbar">
   <div class="topbar-title">SwitchAgent <span class="build-version">v{{ app_version }}</span></div>
+  <div id="storage-bar" class="storage-bar" hidden>
+    <div class="storage-bar-track">
+      <div class="storage-bar-fill storage-bar-used" id="storage-bar-used"></div>
+      <div class="storage-bar-fill storage-bar-pending" id="storage-bar-pending"></div>
+    </div>
+    <span class="storage-bar-label" id="storage-bar-label"></span>
+  </div>
   <div id="device-pill" class="device-pill" data-poll="/api/devices">…</div>
 </header>
 

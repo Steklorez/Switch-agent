@@ -55,6 +55,28 @@ a { color: var(--accent); text-decoration: none; }
 .device-pill.has-connected { color: var(--ok); }
 .device-pill.none-connected { color: var(--text-dim); }
 
+.storage-bar {
+  display: flex; align-items: center; gap: 8px;
+  flex: 1 1 auto; min-width: 0; margin: 0 16px;
+}
+.storage-bar-track {
+  position: relative; flex: 1 1 auto; min-width: 48px; max-width: 220px;
+  height: 8px; border-radius: 999px; background: var(--surface-2); overflow: hidden;
+}
+.storage-bar-fill { position: absolute; top: 0; bottom: 0; left: 0; width: 0; transition: width .25s ease, left .25s ease; }
+.storage-bar-used { background: var(--accent); }
+.storage-bar-pending { background: var(--warn); }
+.storage-bar.storage-bar-overflow .storage-bar-pending { background: var(--danger); }
+.storage-bar-label { font-size: .75rem; color: var(--text-dim); white-space: nowrap; }
+
+@media (max-width: 560px) {
+  .storage-bar-label { display: none; }
+  .storage-bar { margin: 0 8px; }
+}
+@media (max-width: 420px) {
+  .storage-bar { display: none; }
+}
+
 /* -- nav: mobile bottom bar, desktop left sidebar --------------------- */
 
 .main-nav {

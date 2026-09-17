@@ -122,10 +122,11 @@ def test_connected_device_renders_every_field(client, web_ctx):
 
     # storage snapshot: DBI's own raw name (StorageInfo.raw_name -- safe,
     # non-serial-bearing text), the logical name it resolves to, the
-    # AUTO/MANUAL mapping source, and a free/total space column.
-    # MockMtpBackend reports no total_bytes, so the space cell honestly
-    # renders "—" here rather than an invented number -- the column itself
-    # is what this asserts.
+    # AUTO/MANUAL mapping source, and a free/total space column. SD_INSTALL
+    # is a virtual DBI node with no meaningful size (see mtp/windows.py's
+    # SIZE_VERIFIABLE_STORAGES), so build_mock_context() only ever gives
+    # SD_CARD a free/total pair -- this only asserts the column exists,
+    # not either storage's specific numbers.
     assert 'id="device-storages"' in html
     assert "<th>Storage (as reported)</th>" in html
     assert "<th>Space</th>" in html
@@ -327,6 +328,27 @@ def test_storage_mapping_by_fingerprint_404s_for_an_unknown_fingerprint(client):
         "/api/devices/by-fingerprint/deadbeefdeadbeef/storages/mapping",
         json={"raw_storage_name": "SD Card", "logical_name": "SD_CARD"},
     )
+    assert res.status_code == 404
+
+
+def test_list_storages_by_fingerprint_matches_the_raw_device_id_route(client, web_ctx):
+    """The Library page's header space bar reads this fingerprint-addressed
+    route (never /api/devices/{PARENT}/storages -- that would put the raw,
+    serial-bearing device_id in a request path/access log, the exact leak
+    W3-004 fixed for rename/mapping). Same body shape either way."""
+    by_fingerprint = client.get(f"/api/devices/by-fingerprint/{PARENT_FP}/storages").json()
+    by_device_id = client.get(f"/api/devices/{PARENT}/storages").json()
+    assert by_fingerprint == by_device_id
+    sd_card = next(s for s in by_fingerprint if s["effective_logical_name"] == "SD_CARD")
+    # build_mock_context() seeds SD_CARD (only) with a believable free/total
+    # pair so this bar has something real to render in `web --mock`.
+    assert sd_card["free_bytes"] is not None
+    assert sd_card["total_bytes"] is not None
+    assert sd_card["free_bytes"] < sd_card["total_bytes"]
+
+
+def test_list_storages_by_fingerprint_404s_for_an_unknown_fingerprint(client):
+    res = client.get("/api/devices/by-fingerprint/deadbeefdeadbeef/storages")
     assert res.status_code == 404
 
 
