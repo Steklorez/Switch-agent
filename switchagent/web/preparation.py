@@ -109,10 +109,17 @@ class PreparationQueue:
         with self.lock:
             if self.blocked:
                 raise ValueError("Backup restore is in progress; try again when it finishes")
-            # Bound completed display history, retaining all running work.
+            # A finished ("Ready") preparation is meant to clear itself the
+            # instant it completes (see the `run()` closure below) -- this
+            # is a backstop for any that didn't (e.g. the process was
+            # killed mid-run) plus every "Failed" one, which stays visible
+            # until the user starts something new rather than vanishing on
+            # its own (it's explaining why sibling items never started).
+            # Unconditional now: this used to only fire once 50+ states had
+            # piled up, so in normal use ("install a batch, wait, install
+            # another") it never ran at all -- completed batches just sat
+            # in the panel forever, looking like nothing ever finished.
             for key in list(self.states):
-                if len(self.states) < 50:
-                    break
                 if self.states[key]["phase"] in ("Ready", "Failed"):
                     del self.states[key]
             self.states[task_id] = {"id": task_id, "phase": "Waiting", "started": time.time(),
@@ -127,6 +134,19 @@ class PreparationQueue:
                 else:
                     state.update(fields)
 
+        def clear_if_still_ready():
+            # By explicit request: Queue must not keep showing a batch once
+            # it's fully installed -- a short grace period (not instant)
+            # so a poll landing right after completion still gets to render
+            # "N / N finished" at least once, rather than the row just
+            # disappearing out from under a mid-render page. Re-checks the
+            # phase is still "Ready" (not overwritten by a newer submit())
+            # before deleting, so this can never remove the wrong state.
+            with self.lock:
+                state = self.states.get(task_id)
+                if state is not None and state.get("phase") == "Ready":
+                    del self.states[task_id]
+
         def run():
             with self.serial:
                 update(phase="Preparing")
@@ -134,6 +154,10 @@ class PreparationQueue:
                     with db.open_db(self.db_path) as conn:
                         result = self._install_sequentially(conn, item_ids, target, update, task_id)
                     update(phase="Failed" if result["errors"] else "Ready", result=result, finished=time.time())
+                    if not result["errors"]:
+                        timer = threading.Timer(10.0, clear_if_still_ready)
+                        timer.daemon = True  # trivial in-memory cleanup -- never delay app shutdown
+                        timer.start()
                 except Exception as exc:
                     update(phase="Failed", error=str(exc), finished=time.time())
 
