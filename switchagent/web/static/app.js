@@ -15,6 +15,15 @@
   // as preparation.py's RESERVE_BYTES for the extraction workspace).
   const INSTALL_SIZE_MARGIN = 1.1;
 
+  // Real SD cards are large (256GB-1TB+) and a selection is typically a
+  // handful of GB -- proportionally that's often under 1% of the track's
+  // width, i.e. a sub-pixel sliver that reads as "nothing happened" even
+  // though the underlying percentage did grow. Floor the pending segment's
+  // width so any nonzero selection is always clearly visible; still capped
+  // by the actual remaining space below, so it never claims more free
+  // space than really exists.
+  const MIN_VISIBLE_PENDING_PCT = 1.5;
+
   const bar = document.getElementById("storage-bar");
   const barUsed = document.getElementById("storage-bar-used");
   const barPending = document.getElementById("storage-bar-pending");
@@ -44,7 +53,9 @@
     const usedBytes = sdCardTotalBytes - sdCardFreeBytes;
     const estimatedPendingBytes = pendingBytes * INSTALL_SIZE_MARGIN;
     const usedPct = Math.max(0, Math.min(100, (100 * usedBytes) / sdCardTotalBytes));
-    const pendingPct = Math.max(0, Math.min(100 - usedPct, (100 * estimatedPendingBytes) / sdCardTotalBytes));
+    const remainingPct = Math.max(0, 100 - usedPct);
+    let pendingPct = Math.max(0, Math.min(remainingPct, (100 * estimatedPendingBytes) / sdCardTotalBytes));
+    if (pendingPct > 0) pendingPct = Math.min(remainingPct, Math.max(pendingPct, MIN_VISIBLE_PENDING_PCT));
     barUsed.style.width = usedPct + "%";
     barPending.style.left = usedPct + "%";
     barPending.style.width = pendingPct + "%";
