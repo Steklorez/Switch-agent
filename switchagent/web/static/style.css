@@ -60,7 +60,12 @@ a { color: var(--accent); text-decoration: none; }
   flex: 1 1 auto; min-width: 0; margin: 0 16px;
 }
 .storage-bar-track {
-  position: relative; flex: 1 1 auto; min-width: 48px; max-width: 220px;
+  /* flex-shrink: 0 (the "0" in "1 0") is load-bearing: the label next to
+     this track grows longer as more is selected ("(+11.9 GB)" ->
+     "(+123.4 GB)"), and without this the flex layout stole that extra
+     width FROM the track -- visibly narrowing the bar itself on every
+     additional game selected, the opposite of what it's meant to show. */
+  position: relative; flex: 1 0 140px; max-width: 220px;
   height: 8px; border-radius: 999px; background: var(--surface-2);
 }
 /* No overflow:hidden on the track above -- .storage-bar-pending's glow
@@ -74,7 +79,10 @@ a { color: var(--accent); text-decoration: none; }
 .storage-bar-used { background: var(--accent); }
 .storage-bar-pending { background: var(--warn); }
 .storage-bar.storage-bar-overflow .storage-bar-pending { background: var(--danger); }
-.storage-bar-label { font-size: .75rem; color: var(--text-dim); white-space: nowrap; }
+.storage-bar-label {
+  flex: 0 1 auto; min-width: 0; max-width: 170px; overflow: hidden; text-overflow: ellipsis;
+  font-size: .75rem; color: var(--text-dim); white-space: nowrap;
+}
 
 @media (max-width: 560px) {
   .storage-bar-label { display: none; }
