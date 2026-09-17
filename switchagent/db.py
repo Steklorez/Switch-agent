@@ -168,6 +168,25 @@ CREATE TABLE IF NOT EXISTS device_storage_mappings (
     updated_at        TEXT NOT NULL,
     PRIMARY KEY (device_id, raw_storage_name)
 );
+
+-- DBI's own live "InstalledApplications.csv" confirmation (see
+-- mtp.windows.list_installed_title_ids()), persisted per device so it
+-- survives that device disconnecting or the app restarting. Before this
+-- table, WebContext kept this ONLY in an in-memory cache that was pruned
+-- the moment a device dropped out of refresh_devices()'s `live` list --
+-- so "confirmed on this Switch" silently reverted to "unknown" on every
+-- unplug, even though nothing about the console itself had changed. One
+-- row per (device, base_title_id) DBI confirms as of the most recent
+-- successful CSV read; wholesale-replaced for that device on every such
+-- read (see set_device_installed_base_title_ids), never merged -- a
+-- title genuinely removed from the console must stop being claimed here
+-- too, the next time that device is actually reachable and rescanned.
+CREATE TABLE IF NOT EXISTS device_installed_titles (
+    device_id       TEXT NOT NULL,
+    base_title_id   TEXT NOT NULL,
+    confirmed_at    TEXT NOT NULL,
+    PRIMARY KEY (device_id, base_title_id)
+);
 """
 
 # Full job status vocabulary. DEVICE_UNAVAILABLE and FAILED were added in
@@ -1354,6 +1373,35 @@ def clear_device_storage_mapping(conn: sqlite3.Connection, device_id: str, raw_s
         (device_id, raw_storage_name),
     )
     conn.commit()
+
+
+def set_device_installed_base_title_ids(conn: sqlite3.Connection, device_id: str, base_title_ids: set[str]) -> None:
+    """Replaces this device's ENTIRE confirmed set with base_title_ids --
+    called once per successful DBI "InstalledApplications.csv" read
+    (WebContext.refresh_devices()), never a partial add. A title no longer
+    in the fresh read is a title DBI no longer confirms, and must stop
+    being claimed here the moment we actually know that -- see this
+    table's own schema comment (SCHEMA above) for why this exists at all."""
+    now = now_iso()
+    conn.execute("DELETE FROM device_installed_titles WHERE device_id = ?", (device_id,))
+    conn.executemany(
+        "INSERT INTO device_installed_titles (device_id, base_title_id, confirmed_at) VALUES (?, ?, ?)",
+        [(device_id, title_id, now) for title_id in base_title_ids],
+    )
+    conn.commit()
+
+
+def get_all_confirmed_installed_base_title_ids(conn: sqlite3.Connection) -> set[str]:
+    """Union across every device this project has EVER successfully read
+    an "Installed games" CSV from -- deliberately NOT limited to devices
+    currently connected. That's the whole point of this table over
+    WebContext's in-memory cache: unplugging a console, or restarting
+    SwitchAgent, must not make it "forget" what DBI already confirmed
+    there. Empty set if no device has ever had a successful CSV read."""
+    return {
+        row["base_title_id"]
+        for row in conn.execute("SELECT DISTINCT base_title_id FROM device_installed_titles")
+    }
 
 
 # Used by queue_worker.py's install-order dependency check (Base Game ->

@@ -93,3 +93,57 @@ def test_confirmed_on_device_never_set_for_a_mod_even_if_its_family_matches(isol
 
     mods_view = services.list_library_view(conn, kind="mods", installed_on_device_base_ids=installed)
     assert mods_view["entries"][0]["confirmed_on_device"] is False
+
+
+def test_confirmed_on_device_promotes_installed_unverified_to_installed(isolated_db):
+    """A bare DONE_UNVERIFIED job status must never claim "installed" on
+    its own (this module's own docstring rule) -- but once DBI's live CSV
+    independently confirms the same base title_id is actually on the
+    console, that's at least as strong as UI-003's manual user
+    confirmation, which already promotes this exact case (see
+    services._library_entry_view). The raw transport outcome is untouched
+    -- only the entry's user-facing `status` summary is promoted."""
+    base_title_id = "01002B30028F6000"
+    conn, _inbox_dir = isolated_db
+    item_id = _item(conn, "BreadAndFred.nsp", title_id_value=base_title_id)
+    job_id = db.create_job(
+        conn, action="INSTALL_VIA_DBI", target_storage="SD_INSTALL",
+        target_device_id="mock-switch-parent", library_item_id=item_id,
+    )
+    db.update_job_status(conn, job_id, "DONE_UNVERIFIED")
+
+    unconfirmed = services.list_library_view(conn, kind="games")
+    assert unconfirmed["games"][0]["base"]["status"] == "INSTALLED_UNVERIFIED"
+
+    confirmed = services.list_library_view(
+        conn, kind="games", installed_on_device_base_ids={base_title_id},
+    )
+    entry = confirmed["games"][0]["base"]
+    assert entry["confirmed_on_device"] is True
+    assert entry["status"] == "INSTALLED"
+    # The transport fact itself is never rewritten -- job_view still says
+    # what actually happened, this is a display-only promotion.
+    assert entry["job"]["status"] == "DONE_UNVERIFIED"
+
+
+def test_set_device_installed_base_title_ids_replaces_wholesale(isolated_db):
+    """Each call is a full replacement of that device's confirmed set, not
+    a merge -- a title genuinely no longer reported by a fresh CSV read
+    must stop being claimed, never linger from a previous call."""
+    conn, _inbox_dir = isolated_db
+    db.set_device_installed_base_title_ids(conn, "switch-a", {"AAA", "BBB"})
+    assert db.get_all_confirmed_installed_base_title_ids(conn) == {"AAA", "BBB"}
+
+    db.set_device_installed_base_title_ids(conn, "switch-a", {"BBB", "CCC"})
+    assert db.get_all_confirmed_installed_base_title_ids(conn) == {"BBB", "CCC"}
+
+
+def test_get_all_confirmed_installed_base_title_ids_unions_across_devices(isolated_db):
+    conn, _inbox_dir = isolated_db
+    db.set_device_installed_base_title_ids(conn, "switch-a", {"AAA"})
+    db.set_device_installed_base_title_ids(conn, "switch-b", {"BBB"})
+    assert db.get_all_confirmed_installed_base_title_ids(conn) == {"AAA", "BBB"}
+
+    # Replacing switch-a's set never touches switch-b's own rows.
+    db.set_device_installed_base_title_ids(conn, "switch-a", set())
+    assert db.get_all_confirmed_installed_base_title_ids(conn) == {"BBB"}

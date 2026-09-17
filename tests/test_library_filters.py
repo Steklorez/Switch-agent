@@ -388,11 +388,13 @@ def test_confirmed_on_device_badge_suppresses_the_job_status_pill(conn, client, 
         target_device_id=PARENT, library_item_id=item_id,
     )
     db.update_job_status(conn, job_id, "DONE_UNVERIFIED")
-    # Simulates what WebContext.refresh_devices() would have populated from
-    # a real DBI CSV read -- see its own class-level threading note for why
-    # tests poke this cache directly rather than going through a real MTP
-    # call.
-    web_ctx._installed_games_cache = {PARENT: {GAME_A_BASE}}
+    # Simulates what WebContext.refresh_devices() would have persisted from
+    # a real DBI CSV read (db.set_device_installed_base_title_ids) -- the
+    # Library page reads the persisted table directly (db.
+    # get_all_confirmed_installed_base_title_ids), not WebContext's
+    # in-memory cache, so this survives PARENT disconnecting or the app
+    # restarting (see device_installed_titles' own schema comment).
+    db.set_device_installed_base_title_ids(conn, PARENT, {GAME_A_BASE})
 
     html = client.get("/").text
     assert "On Switch" in html
