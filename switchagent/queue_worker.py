@@ -46,7 +46,7 @@ from . import title_id as title_id_mod
 from . import work_cleanup
 from .model import ContentType
 from .mtp.base import MtpBackend, TransferStatus
-from .mtp.errors import DeviceNotFoundError, MtpError
+from .mtp.errors import DeviceNotFoundError, FileAlreadyExistsError, MtpError
 from .preview import PreviewReport
 from .transfer import STORAGE_SD_CARD, STORAGE_SD_INSTALL
 
@@ -673,28 +673,33 @@ def _run_job_transfer(conn: sqlite3.Connection, backend: MtpBackend, job_row: sq
             # W3-006 Override: force_overwrite is only ever true on a job
             # created by services.override_job(), the user's explicit
             # "Override" click on a DESTINATION_CONFLICT card -- for that
-            # one job, and that job only, skip the existence check below
-            # entirely and let send_file's own overwrite=True replace
-            # whatever is there. Every other job still refuses blindly.
-            if job_row["force_overwrite"]:
-                result = backend.send_file(storage, file.dest_relative_path, source_path, overwrite=True)
-            else:
-                if backend.exists(storage, file.dest_relative_path):
-                    # Exists on the device, but WE have no record (progress.json)
-                    # of having put it there ourselves during this job -- cannot
-                    # prove it's the same content, so refuse rather than guess.
-                    # This is idempotent-but-not-blind: a file THIS job already
-                    # delivered was already skipped above via `delivered`;
-                    # anything else present is genuinely unresolved.
-                    error = (
-                        f"'{file.dest_relative_path}' already exists on '{storage}' "
-                        "and was not sent by this job -- refusing to overwrite"
-                    )
-                    db.update_job_status(conn, job_id, "DESTINATION_CONFLICT", bytes_done=bytes_done, error=error)
-                    db.log_job_event(conn, job_id, error)
-                    return JobRunOutcome(job_id=job_id, status="DESTINATION_CONFLICT", error=error)
-
-                result = backend.send_file(storage, file.dest_relative_path, source_path, overwrite=False)
+            # one job, and that job only, send_file's own overwrite=True
+            # replaces whatever is there, no existence check at all. Every
+            # other job still refuses blindly -- via send_file's OWN
+            # existence check (it already does the identical any(i.Name ==
+            # ... for i in parent.GetFolder.Items()) scan internally before
+            # copying) rather than a separate backend.exists() call first --
+            # that used to re-navigate and re-scan the same destination
+            # directory a second time for every single file, pure wasted
+            # MTP round-trips this loop doesn't need.
+            result = backend.send_file(
+                storage, file.dest_relative_path, source_path,
+                overwrite=bool(job_row["force_overwrite"]),
+            )
+        except FileAlreadyExistsError:
+            # Exists on the device, but WE have no record (progress.json) of
+            # having put it there ourselves during this job -- cannot prove
+            # it's the same content, so refuse rather than guess. This is
+            # idempotent-but-not-blind: a file THIS job already delivered
+            # was already skipped above via `delivered`; anything else
+            # present is genuinely unresolved.
+            error = (
+                f"'{file.dest_relative_path}' already exists on '{storage}' "
+                "and was not sent by this job -- refusing to overwrite"
+            )
+            db.update_job_status(conn, job_id, "DESTINATION_CONFLICT", bytes_done=bytes_done, error=error)
+            db.log_job_event(conn, job_id, error)
+            return JobRunOutcome(job_id=job_id, status="DESTINATION_CONFLICT", error=error)
         except MtpError as exc:
             db.update_job_status(
                 conn, job_id, "FAILED", bytes_done=bytes_done, error=str(exc), finished_at=db.now_iso(),

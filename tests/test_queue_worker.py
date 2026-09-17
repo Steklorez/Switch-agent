@@ -449,6 +449,37 @@ def test_destination_conflict_records_install_history(isolated_db):
     assert history[0]["outcome"] == "DESTINATION_CONFLICT"
 
 
+def test_destination_conflict_detected_without_a_separate_exists_probe(isolated_db):
+    """_run_job_transfer() used to call backend.exists() before every
+    send_file() -- a second full navigate + directory-scan of the exact
+    same destination send_file() was about to check again internally on
+    its own. On real MTP hardware each of those is its own COM round-trip
+    to the device, so for a job with many small files this doubled the
+    per-file navigation cost for no benefit. It's gone now: the per-file
+    loop relies entirely on send_file()'s own existence check, catching
+    FileAlreadyExistsError. This confirms both halves of that change
+    still hold: the DESTINATION_CONFLICT outcome and its error message are
+    byte-for-byte unchanged, and the mock backend's operation log no
+    longer contains a standalone EXISTS call for this file."""
+    conn, inbox_dir = isolated_db
+    parent, _child, registry = _two_backends()
+    parent.connect()
+    name = "GameA [0100000000010000][v0].nsp"
+    parent.storage_tree("SD_INSTALL").write_file(name, b"someone else's file")
+    item_id = _make_item(conn, inbox_dir, name, b"content A", "0100000000010000")
+    job_id = _make_confirmed_job(conn, inbox_dir, name, item_id, "mock-switch-parent")
+
+    outcome = queue_worker.run_worker_once(conn, registry)
+
+    assert outcome.status == "DESTINATION_CONFLICT"
+    job = db.get_job(conn, job_id)
+    assert job["error"] == (
+        f"'{name}' already exists on 'SD_INSTALL' and was not sent by this job -- refusing to overwrite"
+    )
+    exists_ops = [op for op in parent.operation_log if op.operation == "EXISTS"]
+    assert exists_ops == []
+
+
 def test_destination_conflict_override_replaces_existing_file(isolated_db):
     """W3-006 Override: a job created with force_overwrite=1 (only ever set
     by services.override_job(), the user's explicit "Override" click on a
