@@ -6,7 +6,7 @@ from switchagent.web.network import home_network_only
 
 @pytest.mark.parametrize("host,headers,status", [
     ("127.0.0.1", {}, 200), ("192.168.1.42", {}, 200),
-    ("10.1.2.3", {}, 200), ("8.8.8.8", {}, 403),
+    ("10.1.2.3", {}, 200), ("100.114.25.124", {}, 200), ("8.8.8.8", {}, 403),
     ("8.8.8.8", {"X-Forwarded-For": "127.0.0.1"}, 403),
     ("192.168.1.42", {"Sec-Fetch-Site": "cross-site"}, 403),
 ])
