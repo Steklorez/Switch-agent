@@ -63,8 +63,6 @@ def test_async_install_cleans_first_archive_before_extracting_next(client, web_c
         assert state["items"][str(a)]["phase"] == "Ready"
         assert state["items"][str(b)]["phase"] == "Extracting"
         assert "preparation-list" in client.get("/queue").text
-        # A restore must not replace SQLite underneath this preparation.
-        assert client.post("/api/restore", files={"file": ("backup.zip", b"unused")}).status_code == 409
         with db.open_db(web_ctx.db_path) as conn:
             assert queue_worker.run_worker_once(conn, web_ctx.registry) is None
     finally:

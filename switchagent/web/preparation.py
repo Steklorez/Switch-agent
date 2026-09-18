@@ -10,7 +10,6 @@ import shutil
 import threading
 import time
 import uuid
-from contextlib import contextmanager
 from pathlib import Path
 
 from .. import config, db, extractor
@@ -142,21 +141,7 @@ class PreparationQueue:
         self.lock = threading.Lock()
         self.serial = threading.Lock()
         self.states = {}
-        self.blocked = False
         self.stop = threading.Event()
-
-    @contextmanager
-    def maintenance(self):
-        from ..restore import RestoreRefused
-        with self.lock:
-            if self.blocked or any(s["phase"] in ("Waiting", "Preparing") for s in self.states.values()):
-                raise RestoreRefused("Wait for batch preparation to finish before restoring a backup")
-            self.blocked = True
-        try:
-            yield
-        finally:
-            with self.lock:
-                self.blocked = False
 
     def submit(self, item_ids, target):
         task_id = uuid.uuid4().hex
@@ -178,8 +163,6 @@ class PreparationQueue:
                     name += ' — Mod'
                 items[str(item_id)] = {'name': name, 'phase': 'Waiting', 'order': position, 'job_ids': []}
         with self.lock:
-            if self.blocked:
-                raise ValueError("Backup restore is in progress; try again when it finishes")
             # A finished ("Ready") preparation is meant to clear itself the
             # instant it completes (see the `run()` closure below) -- this
             # is a backstop for any that didn't (e.g. the process was

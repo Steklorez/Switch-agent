@@ -166,35 +166,9 @@
   <textarea id="diagnostics-text" hidden>{{ diagnostics_text }}</textarea>
 </section>
 
-<section class="settings-section" id="backup-restore-section">
-  <h3>Backup / Restore</h3>
-  <p>
-    A backup contains your database (library, queue, history, device names and storage
-    mappings) and <code>config.yaml</code> — never the game files themselves, so it stays small.
-  </p>
-  <a href="/api/backup" class="btn" id="download-backup-link">Download backup</a>
-  <span id="backup-status" class="settings-hint"></span>
-
-  <h4>Restore from a backup</h4>
-  <p class="settings-warning">
-    Restoring REPLACES your current database and <code>config.yaml</code> with the contents of the
-    backup file. Anything recorded since that backup was taken is lost.
-  </p>
-  <form id="restore-form">
-    <input type="file" id="restore-file-input" name="file" accept=".zip,application/zip">
-    <button type="submit" id="restore-btn" class="btn btn-danger" disabled>Restore from backup</button>
-  </form>
-  <p id="restore-status" class="settings-hint"></p>
-  <p class="settings-hint">
-    Before anything is replaced, SwitchAgent fully validates the backup file and saves an
-    automatic safety copy of your current state, so a failed restore can always be undone.
-    A restore is refused outright while a transfer to a device is still running.
-  </p>
-</section>
 {% endblock %}
 {% block scripts %}
 <script src="/static/preferences.js"></script>
 <script src="/static/motion_preferences.js"></script>
 <script src="/static/settings.js"></script>
-<script src="/static/backup.js"></script>
 {% endblock %}
