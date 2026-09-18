@@ -147,3 +147,57 @@ def test_get_all_confirmed_installed_base_title_ids_unions_across_devices(isolat
     # Replacing switch-a's set never touches switch-b's own rows.
     db.set_device_installed_base_title_ids(conn, "switch-a", set())
     assert db.get_all_confirmed_installed_base_title_ids(conn) == {"BBB"}
+
+
+def test_a_game_deleted_on_the_console_stops_counting_as_installed(isolated_db):
+    """Field report 2026-09-19: a game this app installed, then deleted on
+    the console, kept showing as installed after the console was
+    reconnected and re-read. The entry badge already hid itself
+    (hide_unverified_badge -- "checked, not there"), but the family-level
+    `installed` flag that drives the "Not installed" filter still counted
+    our own INSTALLED_UNVERIFIED record. Those two must never disagree
+    about the same title."""
+    base_title_id = "0100E65002BB8000"
+    conn, _inbox_dir = isolated_db
+    item_id = _item(conn, "StardewValley.nsz", title_id_value=base_title_id)
+    job_id = db.create_job(
+        conn, action="INSTALL_VIA_DBI", target_storage="SD_INSTALL",
+        target_device_id="mock-switch-parent", library_item_id=item_id,
+    )
+    db.update_job_status(conn, job_id, "DONE_UNVERIFIED")
+
+    # No live read at all (no console connected): our own record is all the
+    # information that exists, so it still counts -- unchanged behaviour.
+    blind = services.list_library_view(conn, kind="games")["games"][0]
+    assert blind["installed"] is True
+    assert blind["base"]["hide_unverified_badge"] is False
+
+    # Console connected and read, and this title is NOT in DBI's list.
+    checked = services.list_library_view(
+        conn, kind="games", installed_on_device_base_ids={"010030B0289BC000"},
+    )["games"][0]
+    assert checked["base"]["hide_unverified_badge"] is True
+    assert checked["confirmed_on_device"] is False
+    assert checked["installed"] is False
+
+    # ...so it shows up under "Not installed" again, which is the whole
+    # point: the user can reinstall it without hunting for it.
+    not_installed = services.list_library_view(
+        conn, kind="games", not_installed=True,
+        installed_on_device_base_ids={"010030B0289BC000"},
+    )["games"]
+    assert [g["base_title_id"] for g in not_installed] == [base_title_id]
+
+
+def test_a_confirmed_game_still_counts_as_installed(isolated_db):
+    """The other direction of the same check: present in DBI's live list
+    means installed, no matter what this app's own history says."""
+    base_title_id = "0100E65002BB8000"
+    conn, _inbox_dir = isolated_db
+    _item(conn, "StardewValley.nsz", title_id_value=base_title_id)
+
+    view = services.list_library_view(
+        conn, kind="games", installed_on_device_base_ids={base_title_id},
+    )["games"][0]
+    assert view["confirmed_on_device"] is True
+    assert view["installed"] is True
