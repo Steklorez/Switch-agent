@@ -175,22 +175,9 @@ to a friendly name or a safe fingerprint first; the raw id is still used
 wherever it functionally has to be (API payloads, HTML form values,
 matching logic).
 
-A device's name field has no Save/Rename button on either page -- it saves
-itself (debounced while typing, immediately on blur and on Enter, see
-`static/self_saving_name.js`, shared by the Devices list and Device
-Details), reporting through a small inline status instead. An emptied field
-clears `friendly_name` back to NULL, i.e. "show whatever the device reports
-itself as". Storage mappings deliberately keep their explicit `Save`: those
-are a decision about where content goes, a name is just a label.
-
-On Device Details the name is rendered in the heading and the Device table
-as well as in the field; the old button reloaded the page to resync them,
-the self-saving field updates them in place (it cannot reload -- that would
-happen mid-typing).
-
-A device row can also be **forgotten** (`POST
-/api/devices/by-fingerprint/{fingerprint}/forget`, the corner × on a
-disconnected Devices row): SwitchAgent drops its own memory of
+A device row can also be **forgotten**
+(`POST /api/devices/by-fingerprint/{fingerprint}/forget`, the corner ×
+on a disconnected Devices row): SwitchAgent drops its own memory of
 that identity -- the `devices` row, its friendly name, its storage mappings
 and its cached installed-title list -- and nothing else. Queue/History rows
 that reference it are deliberately left intact and keep rendering through

@@ -24,10 +24,7 @@
       <form class="device-rename-form" data-device-id="{{ d.device_id }}">
         <input type="text" name="friendly_name" value="{{ d.friendly_name or '' }}"
                placeholder="{{ d.display_name }}">
-        {#- No Save button: the field saves itself (debounced while typing,
-            immediately on blur and on Enter -- see devices.js), and this
-            status span is the only feedback that it did. -#}
-        <span class="device-rename-status" role="status" aria-live="polite"></span>
+        <button type="submit" class="btn btn-small">Save</button>
       </form>
       <div class="device-meta">
         {{ "Connected" if d.connected else "Disconnected" }}
@@ -96,6 +93,5 @@
 </ul>
 {% endblock %}
 {% block scripts %}
-<script src="/static/self_saving_name.js?v=1"></script>
-<script src="/static/devices.js?v=2"></script>
+<script src="/static/devices.js"></script>
 {% endblock %}
