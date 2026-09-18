@@ -562,23 +562,11 @@ a { color: var(--accent); text-decoration: none; }
 }
 .device-meta { color: var(--text-dim); font-size: 0.8rem; }
 
-/* The rename field has no Save button -- it saves itself (see devices.js).
-   This is the only feedback that it did, so it gets a fixed width: letting
-   it size to its text would shift the input every time "Saved" appears and
-   faded. "Not saved" stays put (devices.js never fades a failure) and is
-   the one thing here allowed to shout. */
-.device-rename-status {
-  align-self: center; flex: 0 0 auto; width: 62px; text-align: right;
-  font-size: 0.75rem; color: var(--text-dim);
-  opacity: 0; transition: opacity 0.15s ease;
-}
-.device-rename-status.visible { opacity: 1; }
-.device-rename-status.failed { color: var(--danger); font-weight: 600; }
-
-/* "Forget this device" -- the classic corner ×. A plain button, not a .btn:
-   it is a quiet affordance on a row the user is mostly ignoring, and only
-   turns red on hover, at the moment it is actually about to be clicked.
-   Sized to a comfortable click target rather than to the glyph. */
+/* "Forget this device" -- the classic corner x, only ever rendered on a
+   disconnected row (see devices.html). A plain button, not a .btn: it is a
+   quiet affordance on a row the user is mostly ignoring, and only turns red
+   on hover, at the moment it is actually about to be clicked. Sized to a
+   comfortable click target rather than to the glyph. */
 .device-forget {
   align-self: flex-start; flex: 0 0 auto;
   width: 26px; height: 26px; padding: 0;

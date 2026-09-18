@@ -1,31 +1,45 @@
-// Devices page: friendly-name rename (self-saving), storage mapping, and
-// the corner × that forgets a device.
+// Devices page: friendly-name rename, storage mapping, and Forget.
 // device_id itself is never editable here or sent anywhere except as the
 // URL identifier -- renaming can never change identity (see docs/WEB-UI.md
 // point 33).
 (function () {
   "use strict";
 
-  // -- rename: no Save button, the field saves itself ----------------------
-  // The whole behaviour (debounce, blur, Enter, status) lives in
-  // self_saving_name.js, shared with the Device Details page.
-
   document.querySelectorAll(".device-rename-form").forEach((form) => {
-    // The raw device_id embeds the device's USB descriptor path (can
-    // contain '#', '&', ...) -- unencoded, a literal '#' is read as a
-    // URL fragment and silently truncates the path before it ever
-    // reaches the server, so the device_id the server sees never
-    // matches any row (device_detail.js already encodes its own
-    // fingerprint-addressed URLs for the same reason).
-    const url = `/api/devices/${encodeURIComponent(form.dataset.deviceId)}/rename`;
-    window.SwitchAgent.attachSelfSavingName(form, url);
+    form.addEventListener("submit", async (evt) => {
+      evt.preventDefault();
+      const input = form.querySelector("input[name=friendly_name]");
+      const btn = form.querySelector("button");
+      btn.disabled = true;
+      try {
+        // The raw device_id embeds the device's USB descriptor path (can
+        // contain '#', '&', ...) -- unencoded, a literal '#' is read as a
+        // URL fragment and silently truncates the path before it ever
+        // reaches the server, so the device_id the server sees never
+        // matches any row (device_detail.js already encodes its own
+        // fingerprint-addressed URLs for the same reason).
+        const url = `/api/devices/${encodeURIComponent(form.dataset.deviceId)}/rename`;
+        const res = await fetch(url, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ friendly_name: input.value || null }),
+        });
+        if (!res.ok) {
+          alert("Could not rename device.");
+        }
+      } catch (e) {
+        alert("Request failed: " + e);
+      } finally {
+        btn.disabled = false;
+      }
+    });
   });
 
-  // -- the corner ×: erase SwitchAgent's own memory of a device it has seen --
+  // -- Forget: erase SwitchAgent's own memory of a device it has seen --
   // the devices row, its friendly name, its storage mapping and its cached
   // installed-title list. Never the Queue/History records that mention it
   // (those stay, labelled by fingerprint), and never anything on the
-  // console itself. Only rendered on disconnected rows.
+  // console itself. The button only exists on disconnected rows.
 
   document.querySelectorAll(".device-forget").forEach((btn) => {
     btn.addEventListener("click", async () => {
