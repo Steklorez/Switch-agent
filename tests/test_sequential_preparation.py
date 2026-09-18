@@ -68,6 +68,88 @@ def test_submit_prunes_previously_finished_states_immediately(tmp_path):
     assert 'still-running' in queue.states  # never touched -- not settled
 
 
+def _make_job(conn, *, status, finished_at=None, abandoned=False):
+    import uuid
+    item_id = db.upsert_library_item(
+        conn, absolute_path=f'/lib/item-{uuid.uuid4().hex}.nsp', item_type='FILE', file_type='NSP',
+        size=1, mtime=0.0, content_hash=None, title_id=None, title_id_source=None,
+        status='AVAILABLE', suggested_action='INSTALL_VIA_DBI', suggested_target='SD_INSTALL',
+    )
+    job_id = db.create_job(
+        conn, action='INSTALL_VIA_DBI', target_storage='SD_INSTALL',
+        target_device_id='mock-switch', library_item_id=item_id,
+    )
+    db.update_job_status(conn, job_id, status, finished_at=finished_at)
+    if abandoned:
+        conn.execute('UPDATE jobs SET abandoned=1 WHERE id=?', (job_id,))
+        conn.commit()
+    return job_id
+
+
+def test_snapshot_hides_a_resolved_item_once_its_own_grace_period_elapses(tmp_path):
+    """By explicit request: once ONE item's own Override/Skip has resolved
+    it, its row shouldn't linger forever in a "Failed" batch's panel --
+    same 10s grace period submit()'s own whole-batch auto-clear already
+    gives a fully successful batch (test above), applied per-item here so
+    a sibling item that's still genuinely stuck "Not started" stays
+    visible for as long as it needs to."""
+    import datetime
+    queue = PreparationQueue(tmp_path / 'test.db')
+    with db.open_db(queue.db_path) as conn:
+        long_ago = (datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(seconds=30)).isoformat()
+        resolved_job = _make_job(conn, status='DONE_UNVERIFIED', finished_at=long_ago)
+        stuck_job = _make_job(conn, status='DESTINATION_CONFLICT')
+
+    queue.states['batch-1'] = {
+        'id': 'batch-1', 'phase': 'Failed', 'started': 0, 'error': 'Installation stopped', 'items': {
+            'resolved-item': {'name': 'resolved', 'phase': 'Failed', 'order': 0, 'job_ids': [resolved_job]},
+            'stuck-item': {'name': 'stuck', 'phase': 'Installing', 'order': 1, 'job_ids': [stuck_job]},
+        },
+    }
+
+    snapshot = queue.snapshot()
+    items = snapshot[0]['items']
+    assert 'resolved-item' not in items  # long-resolved -- swept from view
+    assert 'stuck-item' in items  # still genuinely unresolved -- stays
+
+
+def test_snapshot_still_shows_a_just_resolved_item_within_the_grace_period(tmp_path):
+    queue = PreparationQueue(tmp_path / 'test.db')
+    with db.open_db(queue.db_path) as conn:
+        just_now = db.now_iso()
+        resolved_job = _make_job(conn, status='DONE_UNVERIFIED', finished_at=just_now)
+
+    queue.states['batch-1'] = {
+        'id': 'batch-1', 'phase': 'Failed', 'started': 0, 'error': 'Installation stopped', 'items': {
+            'resolved-item': {'name': 'resolved', 'phase': 'Failed', 'order': 0, 'job_ids': [resolved_job]},
+        },
+    }
+
+    snapshot = queue.snapshot()
+    assert 'resolved-item' in snapshot[0]['items']  # not yet past the 10s grace period
+
+
+def test_snapshot_never_hides_an_item_that_never_got_a_job(tmp_path):
+    """An item still at "Waiting" (job_ids empty -- the sequential run
+    stopped before ever reaching it) must never be swept up by the
+    resolved-item grace period: all() on an empty job list is vacuously
+    True, which -- without the explicit `rows and ...` guard -- would
+    have silently hidden an item that still genuinely needs the user to
+    manually re-select and install it from Library."""
+    queue = PreparationQueue(tmp_path / 'test.db')
+    with db.open_db(queue.db_path):
+        pass
+
+    queue.states['batch-1'] = {
+        'id': 'batch-1', 'phase': 'Failed', 'started': 0, 'error': 'Installation stopped', 'items': {
+            'never-started': {'name': 'never', 'phase': 'Waiting', 'order': 0, 'job_ids': []},
+        },
+    }
+
+    snapshot = queue.snapshot()
+    assert 'never-started' in snapshot[0]['items']
+
+
 @pytest.mark.parametrize("status", [
     "DESTINATION_CONFLICT", "SOURCE_CHANGED", "DEVICE_UNAVAILABLE", "BLOCKED_BY_DEPENDENCY",
 ])

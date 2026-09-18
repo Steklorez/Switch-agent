@@ -83,8 +83,8 @@
         </div>
         <div class="job-actions">
           {% if j.status == "DESTINATION_CONFLICT" and not j.abandoned %}
-          <button class="btn btn-small btn-warning" data-job-action="override" data-job-id="{{ j.id }}">Override</button>
-          <button class="btn btn-small btn-danger" data-job-action="cancel" data-job-id="{{ j.id }}">Skip</button>
+          <button class="btn btn-small btn-danger" data-job-action="override" data-job-id="{{ j.id }}">Override</button>
+          <button class="btn btn-small btn-ok" data-job-action="cancel" data-job-id="{{ j.id }}">Skip</button>
           {% else %}
           {% if not j.abandoned and j.status in ("FAILED", "INTERRUPTED", "DEVICE_UNAVAILABLE", "SOURCE_CHANGED", "BLOCKED_BY_DEPENDENCY") %}
           <button class="btn btn-small" data-job-action="retry" data-job-id="{{ j.id }}">Retry installation</button>

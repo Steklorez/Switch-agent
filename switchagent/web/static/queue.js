@@ -167,9 +167,9 @@
     const retryBtn = !isConflict && !j.abandoned && RETRYABLE_STATUSES.includes(j.status)
       ? `<button class="btn btn-small" data-job-action="retry" data-job-id="${j.id}">Retry installation</button>` : "";
     const overrideBtn = isConflict && !j.abandoned
-      ? `<button class="btn btn-small btn-warning" data-job-action="override" data-job-id="${j.id}">Override</button>` : "";
+      ? `<button class="btn btn-small btn-danger" data-job-action="override" data-job-id="${j.id}">Override</button>` : "";
     const cancelBtn = !j.abandoned && ["PENDING_CONFIRM", "CONFIRMED", "DEVICE_UNAVAILABLE", "WAITING_FOR_BASE", "WAITING_FOR_DEVICE", ...RETRYABLE_STATUSES].includes(j.status)
-      ? `<button class="btn btn-small btn-danger" data-job-action="cancel" data-job-id="${j.id}">${isConflict ? "Skip" : "Cancel"}</button>` : "";
+      ? `<button class="btn btn-small ${isConflict ? "btn-ok" : "btn-danger"}" data-job-action="cancel" data-job-id="${j.id}">${isConflict ? "Skip" : "Cancel"}</button>` : "";
 
     li.innerHTML = `
       <div class="job-main">
@@ -314,8 +314,26 @@
           line.textContent = `${item.name} — ${displayPhase}` + (item.error ? `: ${item.error}` : "");
           box.appendChild(line);
         }
+        // state.error is a snapshot of why the sequential run stopped,
+        // frozen at the moment it happened -- it does NOT know that the
+        // item which stopped it may since have been resolved (Override
+        // creates a brand-new job the panel now follows forward to, see
+        // _resolve_latest_retry). Without this check, overriding a
+        // conflict and watching its new job actively copy still showed
+        // "Installation stopped" right next to a live, moving progress
+        // bar -- flatly wrong, nothing is stopped. Only keep showing it
+        // while something in this batch genuinely still needs the user's
+        // attention: an item whose current job is stuck in one of the
+        // same statuses that originally halted the run (and wasn't
+        // itself just abandoned via Skip), or an item that never even
+        // got a job created (stuck at "Not started").
+        const stillBlocked = items.some((item) => {
+          if (!item.jobs || !item.jobs.length) return true;
+          return item.jobs.some((job) =>
+            [...RETRYABLE_STATUSES, "WAITING_FOR_BASE"].includes(job.status) && !job.abandoned);
+        });
         const errors = state.result ? state.result.errors.map((error) => error.error) : [];
-        if (state.error) errors.push(state.error);
+        if (state.error && stillBlocked) errors.push(state.error);
         if (errors.length) {
           const error = document.createElement("p");
           error.className = "job-error";

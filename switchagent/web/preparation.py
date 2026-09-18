@@ -17,6 +17,25 @@ from .. import config, db, extractor
 
 RESERVE_BYTES = 512 * 1024 * 1024
 
+# How long a resolved (Overridden-and-now-DONE, or Skipped) item stays
+# visible in a "Failed" batch's panel before PreparationQueue.snapshot()
+# stops including it -- same grace period submit() already gives a fully
+# successful batch (see its own comment), applied per-item here instead of
+# to the whole batch, since sibling "Not started" items in the same batch
+# may still need the user's own attention indefinitely.
+RESOLVED_ITEM_GRACE_SECONDS = 10.0
+
+
+def _resolved_long_enough(row) -> bool:
+    if not (row['abandoned'] or row['status'] in ('DONE', 'DONE_UNVERIFIED')):
+        return False
+    finished_at = row['finished_at']
+    if not finished_at:
+        return False
+    from datetime import datetime, timezone
+    elapsed = (datetime.now(timezone.utc) - datetime.fromisoformat(finished_at)).total_seconds()
+    return elapsed >= RESOLVED_ITEM_GRACE_SECONDS
+
 
 def remove_extraction(path):
     if path is None:
@@ -253,12 +272,29 @@ class PreparationQueue:
         from .services import _job_view, _resolve_latest_retry
         with db.open_db(self.db_path) as conn:
             for state in result:
-                for item in state['items'].values():
+                resolved_item_ids = []
+                for item_id, item in state['items'].items():
                     # A stored job_id is frozen at creation time -- if that
                     # job was since Overridden/Retried (see
                     # _resolve_latest_retry's own docstring), show the
                     # current attempt, not the superseded original.
-                    item['jobs'] = [_job_view(conn, _resolve_latest_retry(conn, row))
-                                    for job_id in item.get('job_ids', [])
-                                    if (row := conn.execute('SELECT * FROM jobs WHERE id=?', (job_id,)).fetchone())]
+                    rows = [_resolve_latest_retry(conn, row) for job_id in item.get('job_ids', [])
+                            if (row := conn.execute('SELECT * FROM jobs WHERE id=?', (job_id,)).fetchone())]
+                    # By explicit request: once THIS item's own conflict has
+                    # been resolved (Override succeeded, or Skip was
+                    # clicked) and stayed that way for 10s -- the same
+                    # grace period submit()'s own auto-clear already gives
+                    # a fully successful batch -- its row is no longer
+                    # useful clutter, even while sibling items in the same
+                    # (already-dead, never-resuming) batch are still stuck
+                    # "Not started" and genuinely still need the user's own
+                    # action elsewhere. `rows and ...`: an item that never
+                    # got a job at all (job_ids empty) must never be swept
+                    # up here -- all() on an empty list is vacuously True.
+                    if rows and all(_resolved_long_enough(row) for row in rows):
+                        resolved_item_ids.append(item_id)
+                        continue
+                    item['jobs'] = [_job_view(conn, row) for row in rows]
+                for item_id in resolved_item_ids:
+                    del state['items'][item_id]
         return result
