@@ -85,6 +85,7 @@ body {
 .btn:not(:disabled):hover { border-color: #96bcff80; box-shadow: 0 4px 18px #427adc20, inset 0 1px #ffffff15; }
 .btn-primary { background: linear-gradient(135deg, #416ec3, #355aa2); border-color: #88adf47a; }
 .btn-danger { background: linear-gradient(135deg, #9d3545, #782939); border-color: #ec7b8c70; }
+.btn-ok { background: linear-gradient(135deg, #3ed17e, #2a9a58); border-color: #7ce6a670; }
 .btn:focus-visible, a:focus-visible, summary:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-visible {
   outline: 2px solid #a1c5ff; outline-offset: 3px;
 }
