@@ -29,6 +29,11 @@ def setup_sequence(tmp_path, monkeypatch, *, fail=False):
 def test_each_payload_is_cleaned_before_next_and_logs_are_bounded(tmp_path, monkeypatch):
     queue, events = setup_sequence(tmp_path, monkeypatch)
     for n in range(12):
+        # _install_sequentially() now requires its own task_id to still be
+        # present in self.states (see its "device connection changed"
+        # check) -- normally guaranteed by submit(), reproduced by hand
+        # here since these tests call it directly.
+        queue.states[str(n)] = {'target': 'mock', 'items': {}}
         queue._install_sequentially(None, [1, 2], 'mock', lambda **kw: None, str(n), {'chain-a': [1, 2]})
     assert events[:6] == [('prepare', 1), ('install', 1), ('cleanup', 1),
                          ('prepare', 2), ('install', 2), ('cleanup', 2)]
@@ -46,6 +51,7 @@ def test_blocked_item_defers_the_rest_of_its_own_chain_but_not_others(tmp_path, 
     never even be attempted; item 3 is its own independent chain and
     must be attempted regardless."""
     queue, events = setup_sequence(tmp_path, monkeypatch, fail=True)
+    queue.states['failure'] = {'target': 'mock', 'items': {}}
     result = queue._install_sequentially(
         None, [1, 2, 3], 'mock', lambda **kw: None, 'failure', {'chain-a': [1, 2], 'chain-b': [3]},
     )
@@ -191,6 +197,7 @@ def test_stuck_job_status_stops_the_batch_instead_of_polling_forever(tmp_path, m
     monkeypatch.setattr(manifest, 'batch_work_dir', lambda batch: tmp_path / str(batch))
 
     queue = PreparationQueue(tmp_path / 'test.db')
+    queue.states[status] = {'target': 'mock', 'items': {}}
     result = queue._install_sequentially(None, [1, 2], 'mock', lambda **kw: None, status, {'chain-a': [1, 2]})
     assert result['blocked'] == [1]
     # Exactly one poll of the stuck status -- never looped waiting for it
