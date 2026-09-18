@@ -1,16 +1,46 @@
-// Devices page: friendly-name rename, storage mapping, and Forget.
+// Devices page: friendly-name rename (self-saving), storage mapping, and
+// the corner × that forgets a device.
 // device_id itself is never editable here or sent anywhere except as the
 // URL identifier -- renaming can never change identity (see docs/WEB-UI.md
 // point 33).
 (function () {
   "use strict";
 
+  // -- rename: no Save button, the field saves itself ------------------------
+  // Debounced while typing, plus an immediate save on blur and on Enter, so
+  // a name is never left unsaved just because the field still has focus.
+  // Every path funnels through save(), which no-ops when the value has not
+  // actually changed -- so blur right after a debounced save sends nothing.
+  // A short inline status replaces the button as the only feedback the user
+  // gets; a failure stays on screen (unlike "Saved", which fades) because
+  // with no button to re-click, an unnoticed failure would look like a
+  // silently lost name.
+
+  const RENAME_DEBOUNCE_MS = 700;
+  const SAVED_VISIBLE_MS = 1800;
+
   document.querySelectorAll(".device-rename-form").forEach((form) => {
-    form.addEventListener("submit", async (evt) => {
-      evt.preventDefault();
-      const input = form.querySelector("input[name=friendly_name]");
-      const btn = form.querySelector("button");
-      btn.disabled = true;
+    const input = form.querySelector("input[name=friendly_name]");
+    const status = form.querySelector(".device-rename-status");
+    let savedValue = input.value;
+    let debounceTimer = null;
+    let fadeTimer = null;
+
+    function showStatus(text, failed) {
+      if (!status) return;
+      window.clearTimeout(fadeTimer);
+      status.textContent = text;
+      status.classList.toggle("failed", Boolean(failed));
+      status.classList.add("visible");
+      if (!failed) {
+        fadeTimer = window.setTimeout(() => status.classList.remove("visible"), SAVED_VISIBLE_MS);
+      }
+    }
+
+    async function save() {
+      window.clearTimeout(debounceTimer);
+      const value = input.value;
+      if (value === savedValue) return;
       try {
         // The raw device_id embeds the device's USB descriptor path (can
         // contain '#', '&', ...) -- unencoded, a literal '#' is read as a
@@ -22,24 +52,38 @@
         const res = await fetch(url, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ friendly_name: input.value || null }),
+          body: JSON.stringify({ friendly_name: value || null }),
         });
         if (!res.ok) {
-          alert("Could not rename device.");
+          // savedValue is deliberately NOT updated -- the next blur retries.
+          showStatus("Not saved", true);
+          return;
         }
+        savedValue = value;
+        showStatus("Saved", false);
       } catch (e) {
-        alert("Request failed: " + e);
-      } finally {
-        btn.disabled = false;
+        showStatus("Not saved", true);
       }
+    }
+
+    input.addEventListener("input", () => {
+      window.clearTimeout(debounceTimer);
+      debounceTimer = window.setTimeout(save, RENAME_DEBOUNCE_MS);
+    });
+    input.addEventListener("blur", save);
+    // The form has no submit button any more; Enter in a lone text input
+    // still submits it, and that should mean "save now", not navigate.
+    form.addEventListener("submit", (evt) => {
+      evt.preventDefault();
+      save();
     });
   });
 
-  // -- Forget: erase SwitchAgent's own memory of a device it has seen --
+  // -- the corner ×: erase SwitchAgent's own memory of a device it has seen --
   // the devices row, its friendly name, its storage mapping and its cached
   // installed-title list. Never the Queue/History records that mention it
   // (those stay, labelled by fingerprint), and never anything on the
-  // console itself. The button only exists on disconnected rows.
+  // console itself. Only rendered on disconnected rows.
 
   document.querySelectorAll(".device-forget").forEach((btn) => {
     btn.addEventListener("click", async () => {

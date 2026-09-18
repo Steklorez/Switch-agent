@@ -562,6 +562,35 @@ a { color: var(--accent); text-decoration: none; }
 }
 .device-meta { color: var(--text-dim); font-size: 0.8rem; }
 
+/* The rename field has no Save button -- it saves itself (see devices.js).
+   This is the only feedback that it did, so it gets a fixed width: letting
+   it size to its text would shift the input every time "Saved" appears and
+   faded. "Not saved" stays put (devices.js never fades a failure) and is
+   the one thing here allowed to shout. */
+.device-rename-status {
+  align-self: center; flex: 0 0 auto; width: 62px; text-align: right;
+  font-size: 0.75rem; color: var(--text-dim);
+  opacity: 0; transition: opacity 0.15s ease;
+}
+.device-rename-status.visible { opacity: 1; }
+.device-rename-status.failed { color: var(--danger); font-weight: 600; }
+
+/* "Forget this device" -- the classic corner ×. A plain button, not a .btn:
+   it is a quiet affordance on a row the user is mostly ignoring, and only
+   turns red on hover, at the moment it is actually about to be clicked.
+   Sized to a comfortable click target rather than to the glyph. */
+.device-forget {
+  align-self: flex-start; flex: 0 0 auto;
+  width: 26px; height: 26px; padding: 0;
+  display: flex; align-items: center; justify-content: center;
+  background: transparent; border: none; border-radius: 6px;
+  color: var(--text-dim); font-size: 1.3rem; line-height: 1; cursor: pointer;
+  transition: background 0.12s ease, color 0.12s ease;
+}
+.device-forget:hover:not(:disabled) { background: rgba(229, 72, 77, 0.16); color: var(--danger); }
+.device-forget:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+.device-forget:disabled { opacity: 0.5; cursor: not-allowed; }
+
 /* -- Devices page: the connected device is the page's visual focus (bright
    neon-blue outline + soft glow + a faint accent-tinted background), while
    disconnected/historical devices read as muted, flat and de-emphasized.
