@@ -95,6 +95,7 @@ import csv
 import hashlib
 import io
 import logging
+import os
 import re
 import time
 import uuid
@@ -133,9 +134,12 @@ COPY_OPERATION_FLAGS = _FOF_SILENT | _FOF_NOCONFIRMATION | _FOF_NOERRORUI
 # automatic fallback. Measured on real hardware 2026-09-18, same 123 MiB
 # .nsp, same console, same cable: Shell 68.5s, WPD 5.97s -- and DBI's own
 # screen reported the install finished in 5s, so the ~60s difference was
-# time the Shell spent after the console was already done. Flip to False to
-# put every transfer back on the Shell path.
-WPD_TRANSPORT_ENABLED = True
+# time the Shell spent after the console was already done.
+#
+# SWITCHAGENT_TRANSPORT=shell puts every transfer back on the Shell path
+# without a rebuild -- an escape hatch that works on a packaged, installed
+# copy, which flipping this constant does not.
+WPD_TRANSPORT_ENABLED = os.environ.get("SWITCHAGENT_TRANSPORT", "wpd").strip().lower() != "shell"
 
 DEFAULT_VERIFY_TIMEOUT_SECONDS = 60.0
 # 2026-09-17 real-hardware finding: a 45-file MOD_FOLDER job (2.3MB total --
@@ -890,13 +894,45 @@ class RealMtpBackend(MtpBackend):
                 TransferStatus.FAILED, timing.bytes_written,
                 f"only {timing.bytes_written} of {expected_size} bytes were accepted by the device",
             )
+        if timing.finalise_timed_out:
+            # Every byte was accepted; the device just never answered the
+            # commit inside the WPD stack's own timeout. Real-hardware case
+            # (2026-09-19): a 388 MiB .nsz whose console screen reported the
+            # install finished in 35s while the commit sat for 82s and then
+            # returned ERROR_SEM_TIMEOUT -- DBI deletes its virtual install
+            # object on completion instead of answering.
+            #
+            # This must NEVER fall through to the Shell fallback. Doing so
+            # re-sent the entire file, so the console installed the same game
+            # twice and one job took 192s instead of ~15s. There is nothing
+            # left to retry: the bytes are already there.
+            return (
+                TransferStatus.UNVERIFIED, timing.bytes_written,
+                f"all {expected_size} bytes were accepted ({timing.stream_mb_per_second:.1f} MB/s), but the "
+                f"device did not answer the end of the transfer within {timing.commit_seconds:.0f}s -- "
+                "normal for a large .nsz, which DBI keeps decompressing after the last byte; "
+                "check the console screen for the install result",
+            )
         if storage in SIZE_VERIFIABLE_STORAGES:
             # A real filesystem-like storage: read the size straight back off
             # the object we just created. No polling and no shell-cache lag to
             # wait out -- that ~2.5s visibility delay was a property of the
             # Shell namespace, not of the device (see this module's docstring).
-            object_id = session.child_id(parent_id, filename)
-            observed = session.object_size(object_id) if object_id is not None else None
+            try:
+                object_id = session.child_id(parent_id, filename)
+                observed = session.object_size(object_id) if object_id is not None else None
+            except Exception as exc:  # noqa: BLE001 -- see below: this must not reach the Shell fallback
+                # The bytes are already committed. Falling back now would
+                # re-send a file that is physically there, which for a real
+                # filesystem storage means walking straight into this
+                # backend's own refuse-to-overwrite check and reporting a
+                # destination conflict for a transfer that actually worked.
+                log.warning("could not read back the written file's size (%s: %s)", type(exc).__name__, exc)
+                return (
+                    TransferStatus.UNVERIFIED, timing.bytes_written,
+                    f"all {expected_size} bytes were committed, but the written file's size could not be "
+                    f"read back to confirm it ({exc})",
+                )
             if observed == expected_size:
                 return TransferStatus.COMPLETED, expected_size, None
             return (

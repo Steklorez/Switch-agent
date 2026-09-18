@@ -375,9 +375,32 @@ def create_file_object(content, parent_object_id, filename, size):
 
 
 def stream_write(stream, buffer, length):
-    written = ULONG(0)
-    vcall(stream, 4, (c_void_p, ULONG, POINTER(ULONG)), buffer, length, byref(written), what="IStream::Write")
-    return written.value
+    """Writes exactly `length` bytes, looping until the stream has taken them
+    all. IStream::Write may legitimately report a SHORT count; treating the
+    requested length as written would silently under-deliver the object and
+    leave the device waiting for bytes that never arrive."""
+    total = 0
+    while total < length:
+        written = ULONG(0)
+        vcall(stream, 4, (c_void_p, ULONG, POINTER(ULONG)),
+              ctypes.byref(buffer, total), length - total, byref(written),
+              what="IStream::Write")
+        if written.value == 0:
+            raise ComError(0, f"IStream::Write accepted 0 of {length - total} remaining bytes")
+        total += written.value
+    return total
+
+
+# HRESULT_FROM_WIN32(ERROR_SEM_TIMEOUT): "the semaphore timeout period has
+# expired" -- what the WPD stack returns when the device does not answer the
+# end of a transfer within its own fixed timeout (~82s observed). Seen on
+# real hardware 2026-09-19 committing a 388 MiB .nsz to DBI's install node:
+# every byte had been accepted and the console's own screen reported the
+# install finished ("Общее время установки: 0:00:35"), but DBI deletes the
+# virtual object on completion rather than answering, so the commit never
+# got its response. That is a device that is BUSY, not a transfer that
+# failed -- see WpdSession.send_file.
+ERROR_SEM_TIMEOUT_HRESULT = 0x80070079
 
 
 def stream_commit(stream):
@@ -432,13 +455,20 @@ class TransferTiming:
     """Where a single file's seconds actually went -- the whole reason this
     module exists (IFileOperation could only ever report one opaque total)."""
 
-    __slots__ = ("create_seconds", "stream_seconds", "commit_seconds", "bytes_written")
+    __slots__ = ("create_seconds", "stream_seconds", "commit_seconds", "bytes_written",
+                 "finalise_timed_out")
 
-    def __init__(self, create_seconds, stream_seconds, commit_seconds, bytes_written):
+    def __init__(self, create_seconds, stream_seconds, commit_seconds, bytes_written,
+                 finalise_timed_out=False):
         self.create_seconds = create_seconds
         self.stream_seconds = stream_seconds
         self.commit_seconds = commit_seconds
         self.bytes_written = bytes_written
+        # True when every byte was accepted but the device never answered the
+        # commit within the WPD stack's own timeout -- see stream_commit's
+        # ERROR_SEM_TIMEOUT_HRESULT comment. The bytes are delivered; what
+        # the device did with them afterwards is simply unknown from here.
+        self.finalise_timed_out = finalise_timed_out
 
     @property
     def total_seconds(self):
@@ -451,8 +481,9 @@ class TransferTiming:
         return self.bytes_written / (1024 * 1024) / self.stream_seconds
 
     def __str__(self):
+        tail = " (timed out waiting for the device to finalise)" if self.finalise_timed_out else ""
         return (f"create={self.create_seconds:.2f}s stream={self.stream_seconds:.2f}s "
-                f"({self.stream_mb_per_second:.1f} MB/s) commit={self.commit_seconds:.2f}s")
+                f"({self.stream_mb_per_second:.1f} MB/s) commit={self.commit_seconds:.2f}s{tail}")
 
 
 DEFAULT_PROGRESS_INTERVAL_SECONDS = 1.0
@@ -603,14 +634,26 @@ class WpdSession:
                             last_report = now
                             progress(written, size)
             streamed = time.perf_counter()
-            stream_commit(stream)
+            # Report the full count BEFORE committing. Everything this side
+            # of the cable can do is done; the commit below is purely waiting
+            # on the device, and on real hardware that wait reached 82s for a
+            # .nsz. Leaving the last partial second of bytes unreported until
+            # after it made a finishing transfer look frozen at 98%.
+            if progress is not None:
+                progress(written, size)
+            timed_out = False
+            try:
+                stream_commit(stream)
+            except ComError as exc:
+                if exc.hr != ERROR_SEM_TIMEOUT_HRESULT:
+                    raise
+                timed_out = True
             committed = time.perf_counter()
         finally:
             release(stream)
         self.forget_children(parent_object_id)
-        if progress is not None:
-            progress(written, size)
-        return TransferTiming(created - started, streamed - created, committed - streamed, written)
+        return TransferTiming(created - started, streamed - created, committed - streamed, written,
+                              finalise_timed_out=timed_out)
 
 
 def available():
