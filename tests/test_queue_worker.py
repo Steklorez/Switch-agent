@@ -717,7 +717,8 @@ def test_last_progress_at_advances_across_multiple_files(isolated_db, monkeypatc
     write at the very start. Counts every db.update_job_status() call that
     actually carries a last_progress_at value -- precise proof the
     touch-points exist at every documented point (RUNNING start, each
-    file's start, each file's completion), not just once up front."""
+    file's start, each file's own live byte reports, each file's
+    completion), not just once up front."""
     conn, inbox_dir = isolated_db
     parent, _child, registry = _two_backends()
 
@@ -753,8 +754,13 @@ def test_last_progress_at_advances_across_multiple_files(isolated_db, monkeypatc
     assert outcome.job_id == job_id
     assert outcome.status == "DONE"
     assert db.get_job(conn, job_id)["last_progress_at"] is not None
-    # RUNNING start (1) + 2 files x (start-of-file + completion) (4) == 5
-    assert progress_touch_count == 5
+    # RUNNING start (1) + 2 files x (start-of-file + one live progress callback
+    # from the backend + completion) (6) == 7. The middle one is the transport
+    # reporting bytes as they actually move (see MtpBackend.send_file's
+    # `progress` contract): MockMtpBackend reports once per file, a real WPD
+    # transfer reports about once a second, and the Shell fallback -- which
+    # cannot see inside its own copy -- reports not at all.
+    assert progress_touch_count == 7
 
 
 # -- FAULT-001: manifest/progress corruption is refused, never guessed at

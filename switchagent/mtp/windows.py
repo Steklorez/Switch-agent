@@ -1,10 +1,28 @@
 """Real Windows MTP backend -- implements MtpBackend against an actual
-Nintendo Switch running DBI's MTP Responder, via pywin32's Shell.Application
-+ IFileOperation.
+Nintendo Switch running DBI's MTP Responder.
 
-Everything here is the direct, production translation of what Stage 5A /
+TWO TRANSPORTS live here. File bytes go out over WPD (IPortableDevice, see
+switchagent/mtp/wpd.py); device discovery, storage listing and the
+installed-games CSV read still go through pywin32's Shell.Application, which
+is proven and cheap for those. The Shell's IFileOperation copy engine
+remains as an automatic per-connection fallback for the bytes themselves,
+and is still the path used for an explicit overwrite.
+
+Why the transport moved (2026-09-18/19, docs/PERF-MTP.md): IFileOperation
+took 68.5s for a 123 MiB .nsp that DBI's own screen reported installing in
+5s, reproducibly, while every Shell enumeration around it measured in
+milliseconds -- so the minute was spent inside PerformOperations() after the
+console had already finished. Streaming the identical file to the identical
+console over WPD took 5.97s (3.28s of bytes at 37.6 MB/s, 2.69s for the
+device to finalise). WPD also reports progress as it writes, which
+IFileOperation cannot do at all.
+
+Everything below is the direct, production translation of what Stage 5A /
 5A.1 / 5B's hands-on experiments established on real hardware (see
-docs/STAGE5A-MTP-RESEARCH.md, docs/STAGE5B-REAL-MTP.md):
+docs/STAGE5A-MTP-RESEARCH.md, docs/STAGE5B-REAL-MTP.md). All of it still
+describes the Shell fallback exactly; the notes about shell-cache visibility
+lag are specifically what the WPD path does not suffer from, since it reads
+object properties live rather than through the shell namespace:
 
   - device_id = FolderItem.Path (stable across reconnect, confirmed on two
     distinct physical consoles -- see docs/STAGE5A-MTP-RESEARCH.md).
@@ -57,8 +75,18 @@ docs/STAGE5A-MTP-RESEARCH.md, docs/STAGE5B-REAL-MTP.md):
 
 One addition was made to switchagent/mtp/base.py: TransferStatus gained an
 UNVERIFIED member (see that module's docstring) for exactly this "cannot
-prove either way" case. Nothing else there changed -- this class still
-implements the ABC's 9 methods exactly as declared.
+prove either way" case. send_file() later gained an optional `progress`
+callback there too. Nothing else changed -- this class still implements the
+ABC's 9 methods exactly as declared.
+
+What did NOT change with the new transport, deliberately: SD_INSTALL still
+never reports COMPLETED (a successful Commit() proves the device accepted
+and finalised the object, not that DBI installed it), SD_CARD is still
+size-verified before COMPLETED, an existing destination file is still never
+overwritten without an explicit Override, and a job is still never sent to
+a device other than the one it was created for -- a WPD device is addressed
+by the PnP id embedded in that job's own recorded device_id
+(wpd.pnp_id_from_device_id), never by picking a device off the WPD list.
 """
 
 from __future__ import annotations
@@ -67,6 +95,7 @@ import csv
 import hashlib
 import io
 import logging
+import os
 import re
 import time
 import uuid
@@ -74,6 +103,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Optional
 
+from . import wpd
 from .. import title_id as title_id_mod
 from .base import DeviceInfo, MtpBackend, StorageInfo, TransferResult, TransferStatus
 from .errors import (
@@ -98,6 +128,18 @@ _FOF_SILENT = 4
 _FOF_NOCONFIRMATION = 16
 _FOF_NOERRORUI = 1024
 COPY_OPERATION_FLAGS = _FOF_SILENT | _FOF_NOCONFIRMATION | _FOF_NOERRORUI
+
+# Transport selection. True: stream files ourselves over WPD
+# (switchagent/mtp/wpd.py) and keep the Shell's IFileOperation as the
+# automatic fallback. Measured on real hardware 2026-09-18, same 123 MiB
+# .nsp, same console, same cable: Shell 68.5s, WPD 5.97s -- and DBI's own
+# screen reported the install finished in 5s, so the ~60s difference was
+# time the Shell spent after the console was already done.
+#
+# SWITCHAGENT_TRANSPORT=shell puts every transfer back on the Shell path
+# without a rebuild -- an escape hatch that works on a packaged, installed
+# copy, which flipping this constant does not.
+WPD_TRANSPORT_ENABLED = os.environ.get("SWITCHAGENT_TRANSPORT", "wpd").strip().lower() != "shell"
 
 DEFAULT_VERIFY_TIMEOUT_SECONDS = 60.0
 # 2026-09-17 real-hardware finding: a 45-file MOD_FOLDER job (2.3MB total --
@@ -503,6 +545,13 @@ class RealMtpBackend(MtpBackend):
         self._device_folder = None  # live Folder (device_item.GetFolder)
         self._transfers: dict[str, TransferResult] = {}
         self._storage_overrides: dict[str, str] = {}  # UI-007, see set_storage_overrides()
+        # Transport state -- see _wpd_session(). The Shell path this class
+        # shipped with is never removed, only demoted to the fallback: any
+        # WPD fault sets _wpd_unavailable and the connection finishes its
+        # work exactly the way it used to.
+        self._wpd = None
+        self._wpd_unavailable = not WPD_TRANSPORT_ENABLED
+        self._wpd_storage_ids: dict[str, str] = {}
 
     def set_storage_overrides(self, overrides: dict[str, str]) -> None:
         """Replaces the whole override set each call (not merged), so a
@@ -607,6 +656,7 @@ class RealMtpBackend(MtpBackend):
         return DeviceInfo(device_id=self._device_id, name=item.Name, connected=True)
 
     def disconnect(self) -> None:
+        self._close_wpd()
         # Release live references -- deliberately does NOT call
         # pythoncom.CoUninitialize() here: that would tear down the COM
         # apartment for the whole calling thread, which could break
@@ -649,6 +699,22 @@ class RealMtpBackend(MtpBackend):
     # -- MtpBackend: paths ---------------------------------------------------
 
     def exists(self, storage: str, path: str) -> bool:
+        session = self._wpd_session()
+        if session is not None:
+            parent_path, name = split_dest_path(path)
+            if not name:
+                return True  # storage root always "exists"
+            try:
+                parent_id = session.navigate(self._wpd_storage_id(session, storage), parent_path,
+                                             create_missing=False)
+                return parent_id is not None and session.child_id(parent_id, name) is not None
+            except StorageNotFoundError:
+                raise
+            except Exception as exc:  # noqa: BLE001 -- same fallback rule as send_file
+                log.warning("WPD exists() failed (%s: %s) -- falling back to the Shell",
+                            type(exc).__name__, exc)
+                self._wpd_unavailable = True
+                self._close_wpd()
         storage_item = self._get_storage_item(storage)
         parent_path, name = split_dest_path(path)
         if not name:
@@ -660,52 +726,83 @@ class RealMtpBackend(MtpBackend):
         return any(i.Name == name for i in parent.GetFolder.Items())
 
     def ensure_directory(self, storage: str, path: str) -> None:
+        session = self._wpd_session()
+        if session is not None:
+            try:
+                # Must go through the SAME transport the following send_file
+                # will navigate with: WpdSession caches a folder's children so
+                # a 45-file mod doesn't re-enumerate its destination once per
+                # file, and a folder created behind that cache's back would be
+                # invisible to the very transfer that needs it.
+                session.navigate(self._wpd_storage_id(session, storage), path, create_missing=True)
+                log.info("ensure_directory storage=%s path=%r -> confirmed (wpd)", storage, path)
+                return
+            except StorageNotFoundError:
+                raise
+            except Exception as exc:  # noqa: BLE001 -- same fallback rule as send_file
+                log.warning("WPD ensure_directory failed (%s: %s) -- falling back to the Shell",
+                            type(exc).__name__, exc)
+                self._wpd_unavailable = True
+                self._close_wpd()
         storage_item = self._get_storage_item(storage)
         self._navigate(storage_item, path, create_missing=True)
-        log.info("ensure_directory storage=%s path=%r -> confirmed", storage, path)
+        log.info("ensure_directory storage=%s path=%r -> confirmed (shell)", storage, path)
 
     # -- MtpBackend: transfer -------------------------------------------------
 
     def send_file(
         self, storage: str, dest_path: str, source_path: Path, *, overwrite: bool = False,
+        progress: Optional[Callable[[int, int], None]] = None,
     ) -> TransferResult:
         self._require_connected()  # re-verifies THIS device specifically, right before touching anything
-        storage_item = self._get_storage_item(storage)
 
         if not source_path.is_file():
             raise InvalidOperationError(f"source file does not exist: {source_path}")
 
         parent_path, filename = split_dest_path(dest_path)
-        parent_item = self._navigate(storage_item, parent_path, create_missing=False)
-
-        if any(i.Name == filename for i in parent_item.GetFolder.Items()) and not overwrite:
-            raise FileAlreadyExistsError(f"'{dest_path}' already exists on '{storage}'")
-
         expected_size = source_path.stat().st_size
         operation_id = uuid.uuid4().hex[:12]
         t0 = time.monotonic()
+        session = self._wpd_session()
         log.info(
-            "send_file start op=%s storage=%s dest=%r source=%r size=%d",
+            "send_file start op=%s storage=%s dest=%r source=%r size=%d transport=%s",
             operation_id, storage, dest_path, source_path.name, expected_size,
+            # An overwrite is the one case a WPD session still hands back to
+            # the Shell (see _send_via_wpd), so say so up front rather than
+            # logging an intent the next line contradicts.
+            "wpd" if session is not None and not overwrite else "shell",
         )
 
-        try:
-            result = self._copy_via_ifileoperation(source_path, parent_item, filename)
-        except _ComError as exc:
-            raise TransferFailedError(f"IFileOperation failed for '{dest_path}': {exc}") from exc
+        outcome = None
+        if session is not None:
+            try:
+                outcome = self._send_via_wpd(
+                    session, storage, parent_path, filename, dest_path, source_path,
+                    overwrite=overwrite, expected_size=expected_size, progress=progress,
+                )
+            except (FileAlreadyExistsError, DestinationNotFoundError):
+                # Real, meaningful answers about the destination -- identical
+                # on either transport (verified on real hardware: the Shell
+                # and WPD enumerate DBI's install node identically, phantom
+                # post-install placeholder included). Retrying such a job on
+                # the other transport would only produce the same refusal a
+                # second time, so these propagate unchanged.
+                raise
+            except Exception as exc:  # noqa: BLE001 -- see _wpd_session(): any WPD fault falls back, never fails the job
+                log.warning(
+                    "op=%s WPD transport failed (%s: %s) -- falling back to the Shell copy engine "
+                    "for the rest of this connection", operation_id, type(exc).__name__, exc,
+                )
+                self._wpd_unavailable = True
+                self._close_wpd()
+                outcome = None
 
-        if result is not None:  # aborted before/without a normal PerformOperations() completion
-            status, bytes_sent, error = result
-        elif storage in SIZE_VERIFIABLE_STORAGES:
-            status, bytes_sent, error = self._verify_after_copy(
-                parent_item, filename, expected_size=expected_size,
+        if outcome is None:
+            outcome = self._send_via_shell(
+                storage, parent_path, filename, dest_path, source_path,
+                overwrite=overwrite, expected_size=expected_size,
             )
-        else:
-            # Install-like virtual node (SD_INSTALL, NAND_INSTALL) -- size is
-            # not a meaningful signal here (see module-level comment on
-            # SIZE_VERIFIABLE_STORAGES). Never reports COMPLETED; at best
-            # UNVERIFIED (transport accepted, DBI-side result unprovable).
-            status, bytes_sent, error = self._verify_after_install_copy(parent_item, filename)
+        status, bytes_sent, error = outcome
 
         elapsed = time.monotonic() - t0
         log.info("send_file end op=%s status=%s elapsed=%.2fs error=%s", operation_id, status.value, elapsed, error)
@@ -716,6 +813,171 @@ class RealMtpBackend(MtpBackend):
         )
         self._transfers[operation_id] = transfer_result
         return transfer_result
+
+    # -- transport A: WPD (default) ------------------------------------------
+
+    def _wpd_session(self):
+        """The open WpdSession for this device, or None to use the Shell.
+
+        None is returned -- never an exception -- when WPD is switched off,
+        when this device_id isn't a convertible Shell WPD path, or when a
+        previous WPD call on this connection failed. Choosing a transport
+        must never be able to fail a transfer: the Shell path that shipped
+        before this existed stays available underneath at all times.
+        """
+        if self._wpd_unavailable or not self._connected:
+            return None
+        if self._wpd is not None:
+            return self._wpd
+        pnp_id = wpd.pnp_id_from_device_id(self._device_id)
+        if pnp_id is None:
+            self._wpd_unavailable = True
+            return None
+        try:
+            self._wpd = wpd.WpdSession(pnp_id).open()
+        except Exception as exc:  # noqa: BLE001 -- see docstring
+            log.warning("could not open a WPD session for device=%s (%s: %s) -- using the Shell transport",
+                        device_fingerprint(self._device_id), type(exc).__name__, exc)
+            self._wpd = None
+            self._wpd_unavailable = True
+        return self._wpd
+
+    def _close_wpd(self) -> None:
+        if self._wpd is not None:
+            try:
+                self._wpd.close()
+            except Exception:  # noqa: BLE001 -- teardown must not raise over a device that already went away
+                log.debug("ignoring error while closing the WPD session", exc_info=True)
+        self._wpd = None
+        self._wpd_storage_ids = {}
+
+    def _wpd_storage_id(self, session, storage: str) -> str:
+        cached = self._wpd_storage_ids.get(storage)
+        if cached is not None:
+            return cached
+        for object_id, raw_name in session.storages():
+            if resolve_storage_name(raw_name, self._storage_overrides) == storage:
+                self._wpd_storage_ids[storage] = object_id
+                return object_id
+        raise StorageNotFoundError(f"storage {storage!r} not found on device {mask_device_id(self._device_id)}")
+
+    def _send_via_wpd(
+        self, session, storage: str, parent_path: str, filename: str, dest_path: str,
+        source_path: Path, *, overwrite: bool, expected_size: int, progress,
+    ):
+        """Streams the file ourselves through IPortableDevice, which -- unlike
+        IFileOperation -- reports progress, separates "bytes moving" from
+        "device finalising", and on real hardware moved a 123 MiB .nsp in
+        5.97s where the Shell took 68.5s for the identical file on the
+        identical console (docs/PERF-MTP.md)."""
+        if overwrite:
+            # Replacing an existing object means deleting it first; MTP would
+            # otherwise happily hold two objects with the same name. The
+            # Shell's copy engine already does that replacement correctly, so
+            # the rare Override path keeps using it rather than growing a
+            # second, less-tested delete implementation here.
+            return None
+        storage_id = self._wpd_storage_id(session, storage)
+        parent_id = session.navigate(storage_id, parent_path, create_missing=False)
+        if parent_id is None:
+            raise DestinationNotFoundError(
+                f"'{parent_path}' does not exist under {storage!r} -- call ensure_directory() first"
+            )
+        if session.child_id(parent_id, filename) is not None:
+            raise FileAlreadyExistsError(f"'{dest_path}' already exists on '{storage}'")
+
+        timing = session.send_file(parent_id, filename, source_path, progress=progress)
+        log.info("wpd transfer dest=%r %s", dest_path, timing)
+
+        if timing.bytes_written != expected_size:
+            return (
+                TransferStatus.FAILED, timing.bytes_written,
+                f"only {timing.bytes_written} of {expected_size} bytes were accepted by the device",
+            )
+        if timing.finalise_timed_out:
+            # Every byte was accepted; the device just never answered the
+            # commit inside the WPD stack's own timeout. Real-hardware case
+            # (2026-09-19): a 388 MiB .nsz whose console screen reported the
+            # install finished in 35s while the commit sat for 82s and then
+            # returned ERROR_SEM_TIMEOUT -- DBI deletes its virtual install
+            # object on completion instead of answering.
+            #
+            # This must NEVER fall through to the Shell fallback. Doing so
+            # re-sent the entire file, so the console installed the same game
+            # twice and one job took 192s instead of ~15s. There is nothing
+            # left to retry: the bytes are already there.
+            return (
+                TransferStatus.UNVERIFIED, timing.bytes_written,
+                f"all {expected_size} bytes were accepted ({timing.stream_mb_per_second:.1f} MB/s), but the "
+                f"device did not answer the end of the transfer within {timing.commit_seconds:.0f}s -- "
+                "normal for a large .nsz, which DBI keeps decompressing after the last byte; "
+                "check the console screen for the install result",
+            )
+        if storage in SIZE_VERIFIABLE_STORAGES:
+            # A real filesystem-like storage: read the size straight back off
+            # the object we just created. No polling and no shell-cache lag to
+            # wait out -- that ~2.5s visibility delay was a property of the
+            # Shell namespace, not of the device (see this module's docstring).
+            try:
+                object_id = session.child_id(parent_id, filename)
+                observed = session.object_size(object_id) if object_id is not None else None
+            except Exception as exc:  # noqa: BLE001 -- see below: this must not reach the Shell fallback
+                # The bytes are already committed. Falling back now would
+                # re-send a file that is physically there, which for a real
+                # filesystem storage means walking straight into this
+                # backend's own refuse-to-overwrite check and reporting a
+                # destination conflict for a transfer that actually worked.
+                log.warning("could not read back the written file's size (%s: %s)", type(exc).__name__, exc)
+                return (
+                    TransferStatus.UNVERIFIED, timing.bytes_written,
+                    f"all {expected_size} bytes were committed, but the written file's size could not be "
+                    f"read back to confirm it ({exc})",
+                )
+            if observed == expected_size:
+                return TransferStatus.COMPLETED, expected_size, None
+            return (
+                TransferStatus.FAILED, timing.bytes_written,
+                f"device reports size {observed!r} for the written file, expected {expected_size} "
+                "-- not reporting success",
+            )
+        # Install-like virtual node (SD_INSTALL, NAND_INSTALL). Commit()
+        # returning success is the device's own acknowledgement that it
+        # accepted and finalised the object -- strictly more than the Shell
+        # path could ever establish, and it is still not proof that DBI
+        # installed anything, so this stays UNVERIFIED exactly as before.
+        return (
+            TransferStatus.UNVERIFIED, timing.bytes_written,
+            f"device accepted and finalised all {expected_size} bytes "
+            f"({timing.stream_mb_per_second:.1f} MB/s, {timing.commit_seconds:.1f}s to finalise); "
+            "DBI-side installation result still cannot be verified via MTP -- check the console screen",
+        )
+
+    # -- transport B: the Shell's copy engine (fallback) ---------------------
+
+    def _send_via_shell(
+        self, storage: str, parent_path: str, filename: str, dest_path: str, source_path: Path,
+        *, overwrite: bool, expected_size: int,
+    ):
+        storage_item = self._get_storage_item(storage)
+        parent_item = self._navigate(storage_item, parent_path, create_missing=False)
+
+        if any(i.Name == filename for i in parent_item.GetFolder.Items()) and not overwrite:
+            raise FileAlreadyExistsError(f"'{dest_path}' already exists on '{storage}'")
+
+        try:
+            result = self._copy_via_ifileoperation(source_path, parent_item, filename)
+        except _ComError as exc:
+            raise TransferFailedError(f"IFileOperation failed for '{dest_path}': {exc}") from exc
+
+        if result is not None:  # aborted before/without a normal PerformOperations() completion
+            return result
+        if storage in SIZE_VERIFIABLE_STORAGES:
+            return self._verify_after_copy(parent_item, filename, expected_size=expected_size)
+        # Install-like virtual node (SD_INSTALL, NAND_INSTALL) -- size is not
+        # a meaningful signal here (see module-level comment on
+        # SIZE_VERIFIABLE_STORAGES). Never reports COMPLETED; at best
+        # UNVERIFIED (transport accepted, DBI-side result unprovable).
+        return self._verify_after_install_copy(parent_item, filename)
 
     def _copy_via_ifileoperation(self, source_path: Path, dest_folder_item, filename: str):
         """Returns None on a normal (exception-free) PerformOperations()
