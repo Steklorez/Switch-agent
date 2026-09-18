@@ -676,9 +676,24 @@ def _finish_family(game: dict) -> dict:
     #     wasn't in DBI's list), so it would keep claiming something
     #     not-yet-installed long after SwitchAgent itself successfully
     #     copied it.
-    game["installed"] = game["confirmed_on_device"] or (
-        game["base"] is not None and game["base"]["status"] in ("INSTALLED", "INSTALLED_UNVERIFIED")
-    )
+    #
+    # ...with one correction (field report, 2026-09-19): SwitchAgent's own
+    # record loses to a live check that says otherwise. A game installed by
+    # this app, then DELETED on the console, kept showing as installed after
+    # the console was reconnected and re-read -- our own INSTALLED_UNVERIFIED
+    # outlived the evidence it was a placeholder for. _library_entry_view
+    # already decided exactly this question one level down (see its
+    # hide_unverified_badge: "INSTALLED_UNVERIFIED is a HOLDING state, not a
+    # claim that survives an actual check"), so this reuses that answer
+    # rather than inventing a second, contradictory one -- the badge and the
+    # "Not installed" filter must never disagree about the same title.
+    # INSTALLED proper is untouched: that one is either user-confirmed or
+    # DBI-confirmed, never a holding state.
+    base = game["base"]
+    base_claims_installed = base is not None and base["status"] in ("INSTALLED", "INSTALLED_UNVERIFIED")
+    if base is not None and base.get("hide_unverified_badge"):
+        base_claims_installed = False
+    game["installed"] = game["confirmed_on_device"] or base_claims_installed
     return game
 
 
