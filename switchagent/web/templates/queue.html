@@ -4,6 +4,11 @@
 <div class="page-header">
   <h2>Queue</h2>
   <div class="worker-controls">
+    <div id="bulk-resolve-bar" class="bulk-resolve-bar" hidden>
+      <span class="bulk-resolve-count" id="bulk-resolve-count"></span>
+      <button class="btn btn-small btn-danger" data-bulk-action="override">Override all</button>
+      <button class="btn btn-small btn-ok" data-bulk-action="cancel">Skip all</button>
+    </div>
     <span class="worker-state">Worker: <strong>{{ "Paused" if worker_paused else "Running" }}</strong></span>
     <button class="btn btn-secondary" data-worker-action="{{ 'resume' if worker_paused else 'pause' }}">
       {{ "Resume" if worker_paused else "Pause" }}
@@ -113,5 +118,5 @@
 </dialog>
 {% endblock %}
 {% block scripts %}
-<script src="/static/queue.js?v=2"></script>
+<script src="/static/queue.js?v=4"></script>
 {% endblock %}

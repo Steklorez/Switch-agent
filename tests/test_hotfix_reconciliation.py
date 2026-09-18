@@ -229,6 +229,76 @@ def test_preparation_panel_shows_the_override_retry_not_the_stale_conflict(clien
     assert item["jobs"][0]["status"] != "DESTINATION_CONFLICT"
 
 
+def test_conflict_defers_the_dependent_update_and_resumes_it_after_override(client, web_ctx):
+    """Full requested scenario, 2026-09-18: Base + Update for the SAME
+    game submitted together. Base already exists on the device -> real
+    DESTINATION_CONFLICT. The Update must NOT be attempted while Base is
+    unresolved -- installing an Update ahead of its own still-unresolved
+    Base must never happen, by explicit request. Then, once Base's
+    conflict is resolved via the real Override endpoint, the Update must
+    actually get picked up and run on its own, not sit stuck at "Not
+    started" forever (see PreparationQueue.continue_chain)."""
+    base_id = _seed_library_item(web_ctx, name="Base [0100000000010000][v0].nsp")
+    with db.open_db(web_ctx.db_path) as conn:
+        update_path = config.LIBRARY_DIR / "Update [0100000000010800][v1].nsp"
+        update_path.write_bytes(b"update payload")
+        update_id = db.upsert_library_item(
+            conn, absolute_path=str(update_path), item_type="FILE", file_type="NSP",
+            size=update_path.stat().st_size, mtime=update_path.stat().st_mtime, content_hash="h-update",
+            title_id="0100000000010800", title_id_source="filename", status="AVAILABLE",
+            suggested_action="INSTALL_VIA_DBI", suggested_target="SD_INSTALL",
+        )
+
+    backend = web_ctx.registry.get("mock-switch-parent")
+    backend.connect()
+    backend.storage_tree("SD_INSTALL").write_file("Base [0100000000010000][v0].nsp", b"already installed")
+
+    response = client.post(
+        "/api/preparations",
+        json={"library_item_ids": [base_id, update_id], "target_device_id": "mock-switch-parent"},
+    )
+    assert response.status_code == 202
+    deadline = time.monotonic() + 5
+    state = None
+    while time.monotonic() < deadline:
+        with db.open_db(web_ctx.db_path) as conn:
+            queue_worker.run_worker_once(conn, web_ctx.registry)
+        state = client.get("/api/preparations").json()[-1]
+        if state["phase"] == "Failed":
+            break
+        time.sleep(.02)
+    assert state["phase"] == "Failed"
+
+    base_item = state["items"][str(base_id)]
+    update_item = state["items"][str(update_id)]
+    assert base_item["jobs"][0]["status"] == "DESTINATION_CONFLICT"
+    # The Update must never even have been attempted while Base is unresolved.
+    assert update_item["jobs"] == []
+    assert update_item["phase"] == "Waiting"
+
+    stale_job_id = base_item["jobs"][0]["id"]
+    override_res = client.post(f"/api/jobs/{stale_job_id}/override")
+    assert override_res.status_code == 200
+
+    # continue_chain() should have picked the Update back up as a fresh
+    # preparation for the remainder of this same game's chain.
+    deadline = time.monotonic() + 5
+    resumed = None
+    while time.monotonic() < deadline:
+        with db.open_db(web_ctx.db_path) as conn:
+            queue_worker.run_worker_once(conn, web_ctx.registry)
+        states = client.get("/api/preparations").json()
+        if states and str(update_id) in states[-1]["items"]:
+            resumed = states[-1]
+            if resumed["phase"] in ("Ready", "Failed"):
+                break
+        time.sleep(.02)
+    assert resumed is not None, "Update was never resumed after Base's conflict was resolved"
+    resumed_update_item = resumed["items"][str(update_id)]
+    assert resumed_update_item["jobs"], "Update's chain never actually attempted it"
+    assert resumed_update_item["jobs"][0]["status"] in ("DONE", "DONE_UNVERIFIED")
+
+
 def test_archived_mods_have_distinct_resolvable_frozen_paths(client, web_ctx):
     title = "0100AAAAAAAAA000"
     name = f"atmosphere/contents/{title}/romfs/text.bin"

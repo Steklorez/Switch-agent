@@ -443,27 +443,34 @@ def create_app(ctx: WebContext) -> FastAPI:
         return job
 
     @app.post("/api/jobs/{job_id}/retry")
-    def api_retry_job(job_id: int, conn=Depends(get_conn)):
+    def api_retry_job(job_id: int, ctx: WebContext = Depends(get_ctx), conn=Depends(get_conn)):
         try:
             result = services.retry_job(conn, job_id)
         except ValueError as exc:
             raise HTTPException(status_code=409, detail=str(exc)) from exc
+        ctx.preparations.continue_chain(job_id)
         return {"ok": True, **result}
 
     @app.post("/api/jobs/{job_id}/override")
-    def api_override_job(job_id: int, conn=Depends(get_conn)):
+    def api_override_job(job_id: int, ctx: WebContext = Depends(get_ctx), conn=Depends(get_conn)):
         try:
             result = services.override_job(conn, job_id)
         except ValueError as exc:
             raise HTTPException(status_code=409, detail=str(exc)) from exc
+        # If this job was the stuck front of a preparation batch's chain
+        # (Base/Update/DLC/Mod for one game), pick the rest of that chain
+        # back up now -- see PreparationQueue.continue_chain's own
+        # docstring for why this doesn't happen automatically on its own.
+        ctx.preparations.continue_chain(job_id)
         return {"ok": True, **result}
 
     @app.post("/api/jobs/{job_id}/cancel")
-    def api_cancel_job(job_id: int, conn=Depends(get_conn)):
+    def api_cancel_job(job_id: int, ctx: WebContext = Depends(get_ctx), conn=Depends(get_conn)):
         try:
             services.cancel_job(conn, job_id)
         except ValueError as exc:
             raise HTTPException(status_code=409, detail=str(exc)) from exc
+        ctx.preparations.continue_chain(job_id)
         return {"ok": True}
 
     # -- JSON API: history ---------------------------------------------------

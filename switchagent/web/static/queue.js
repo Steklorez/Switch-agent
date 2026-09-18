@@ -267,6 +267,48 @@
       if (remaining.length) jobList.appendChild(renderGroup({...g, jobs: remaining}));
     }
     emptyState.hidden = groups.length > 0 || document.getElementById('preparation-list').children.length > 0;
+    updateBulkConflictBar();
+  }
+
+  // -- Override all / Skip all -----------------------------------------
+  // Conflict cards can pile up (one game after another already on the
+  // device) -- clicking Override/Skip one at a time is exactly the kind
+  // of tedium a bulk action exists for. Reuses the SAME single-job
+  // endpoints, one request at a time (never in parallel -- matches how
+  // every other multi-step action in this app is deliberately serial),
+  // so each one gets the same DESTINATION_CONFLICT-only guard, the same
+  // continue_chain() follow-up, and a genuine per-item result rather
+  // than one all-or-nothing call.
+  function updateBulkConflictBar() {
+    const bar = document.getElementById("bulk-resolve-bar");
+    if (!bar) return;
+    const count = document.querySelectorAll('[data-job-action="override"]').length;
+    bar.hidden = count === 0;
+    document.getElementById("bulk-resolve-count").textContent =
+      count > 0 ? `${count} conflict${count === 1 ? "" : "s"}` : "";
+  }
+
+  async function bulkResolveConflicts(action) {
+    const ids = Array.from(document.querySelectorAll('[data-job-action="override"]'))
+      .map((btn) => btn.dataset.jobId);
+    if (!ids.length) return;
+    const verb = action === "override" ? "Override" : "Skip";
+    const message = action === "override"
+      ? `Override all ${ids.length} conflicting file(s) with the new versions? This cannot be undone.`
+      : `Skip all ${ids.length} conflicting install(s), leaving the existing files alone?`;
+    if (!(await confirmAction(message))) return;
+    for (const jobId of ids) {
+      try {
+        const res = await fetch(`/api/jobs/${jobId}/${action}`, { method: "POST" });
+        if (!res.ok) {
+          const data = await res.json().catch(() => ({}));
+          showToast(`${verb} failed for job ${jobId}: ${data.detail || res.status}`, "error");
+        }
+      } catch (e) {
+        showToast(`${verb} failed for job ${jobId}: request error`, "error");
+      }
+    }
+    poll();
   }
 
   async function pollPreparation() {
@@ -322,16 +364,19 @@
         // conflict and watching its new job actively copy still showed
         // "Installation stopped" right next to a live, moving progress
         // bar -- flatly wrong, nothing is stopped. Only keep showing it
-        // while something in this batch genuinely still needs the user's
-        // attention: an item whose current job is stuck in one of the
-        // same statuses that originally halted the run (and wasn't
-        // itself just abandoned via Skip), or an item that never even
-        // got a job created (stuck at "Not started").
-        const stillBlocked = items.some((item) => {
-          if (!item.jobs || !item.jobs.length) return true;
-          return item.jobs.some((job) =>
-            [...RETRYABLE_STATUSES, "WAITING_FOR_BASE"].includes(job.status) && !job.abandoned);
-        });
+        // while there's a job still stuck in one of the same statuses
+        // that originally halted the run, and it wasn't itself just
+        // abandoned via Skip -- i.e. something actually still needs a
+        // click. An item that never got a job created at all ("Not
+        // started (installation stopped)") does NOT keep this banner
+        // alive on its own: that item's own row already says exactly
+        // that, permanently (see `neverStarted` above) -- repeating the
+        // identical sentence in a banner below it forever, long after
+        // the one thing a user COULD act on has already been resolved,
+        // is just noise.
+        const stillBlocked = items.some((item) =>
+          item.jobs && item.jobs.some((job) =>
+            [...RETRYABLE_STATUSES, "WAITING_FOR_BASE"].includes(job.status) && !job.abandoned));
         const errors = state.result ? state.result.errors.map((error) => error.error) : [];
         if (state.error && stillBlocked) errors.push(state.error);
         if (errors.length) {
@@ -349,11 +394,23 @@
   async function tick() {
     try { await poll(); } finally { setTimeout(tick, POLL_INTERVAL_MS); }
   }
+  updateBulkConflictBar();  // reflect the server-rendered initial state before the first poll lands
   tick();
 
   // -- actions (event delegation -- works for rows replaced by poll()) ----
 
   document.addEventListener("click", async (evt) => {
+    const bulkBtn = evt.target.closest("[data-bulk-action]");
+    if (bulkBtn) {
+      bulkBtn.disabled = true;
+      try {
+        await bulkResolveConflicts(bulkBtn.dataset.bulkAction);
+      } finally {
+        bulkBtn.disabled = false;
+      }
+      return;
+    }
+
     const copyBtn = evt.target.closest("[data-copy-conflict-path]");
     if (copyBtn) {
       const path = copyBtn.dataset.copyConflictPath;
