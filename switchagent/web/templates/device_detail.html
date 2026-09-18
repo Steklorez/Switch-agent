@@ -15,7 +15,12 @@
    * The activity section is titled "SwitchAgent activity" and is never
      called "Installed games". SwitchAgent can only ever prove what it
      attempted and transferred, never what the console ended up with.
-   * There is no remote-delete / forget-device action here, by design.
+   * There is no remote-delete action here, by design -- SwitchAgent
+     never deletes anything from the console itself, on any page.
+     Forgetting a device (dropping SwitchAgent's OWN record of a Switch
+     it has seen -- never the console's content) is a different action
+     and lives on the /devices list page, where the stale rows are
+     actually visible -- see web/services.py's forget_device().
 #}
 
 {% block content %}

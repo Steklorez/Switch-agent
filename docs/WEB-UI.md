@@ -22,6 +22,14 @@ switch-agent web --port 9000
 `MOCK_MTP=true` (env var) is equivalent to `--mock`, matching the
 project-wide mock-mode convention from the original spec.
 
+Either way, mock mode opens its **own** database -- `switchagent-mock.db`
+next to the real `switchagent.db`, never the real one (see
+`config.MOCK_DB_PATH`). This matters most for a frozen build: `dist/`
+carries no `portable.flag`, so a hand-started `dist\SwitchAgent\SwitchAgent.exe --mock`
+runs in *installed* mode and its app-data root is the real
+`%LOCALAPPDATA%\SwitchAgent` -- before this split, such a run wrote its two
+fixture devices straight into the user's own Devices page (2026-09-17).
+
 Binds to `127.0.0.1` by default -- not reachable from other devices until
 you explicitly pass `--host 0.0.0.0`. Never exposed to the internet
 automatically; no reverse proxy is set up by this project.
@@ -166,6 +174,17 @@ device's real USB serial number) -- `services.device_label()` resolves it
 to a friendly name or a safe fingerprint first; the raw id is still used
 wherever it functionally has to be (API payloads, HTML form values,
 matching logic).
+
+A device row can also be **forgotten**
+(`POST /api/devices/by-fingerprint/{fingerprint}/forget`, the `Forget`
+button on a disconnected Devices row): SwitchAgent drops its own memory of
+that identity -- the `devices` row, its friendly name, its storage mappings
+and its cached installed-title list -- and nothing else. Queue/History rows
+that reference it are deliberately left intact and keep rendering through
+`services.device_label()`'s fingerprint fallback. It is refused (409) for a
+device that is connected right now, or one with unfinished jobs still
+targeting it, and it is not a blocklist: the same device plugged in again
+is recorded anew, with no name carried over.
 
 ## Jobs / queue / confirmation
 

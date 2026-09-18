@@ -726,6 +726,47 @@ def rename_device(conn, device_id: str, friendly_name: Optional[str]) -> None:
     db.set_device_friendly_name(conn, device_id, friendly_name or None)
 
 
+def forget_device(conn, ctx: WebContext, device_id: str) -> None:
+    """Remove a device SwitchAgent has seen from the Devices page for good
+    (db.forget_device() -- see it for exactly what is and is not deleted).
+
+    Exists because "has ever been seen by this server" is not always the
+    same as "is one of this user's Switches": a mock-mode run against the
+    real database seeded two fixture devices into one (config.MOCK_DB_PATH
+    now makes that specific accident impossible), and a console can also
+    enumerate under a second identity -- e.g. the stock firmware's own MTP
+    with a blanked USB serial before DBI is started -- which is a real
+    device row the user has no use for. Until this existed there was no
+    way to remove either without editing SQLite by hand.
+
+    Two refusals, both ValueError (409 at the route), because forgetting
+    in these states would be either pointless or destructive:
+      * the device is connected RIGHT NOW -- the next refresh_devices()
+        would re-record it within seconds, so the row would visibly come
+        back and look like a bug;
+      * unfinished jobs still target it (_not_settled -- the same
+        predicate the Queue view itself uses), which would leave the
+        Queue holding work for a Switch the app no longer knows.
+    """
+    if db.get_device(conn, device_id) is None:
+        from ..mtp.windows import mask_device_id  # ARCH-001: never echo a raw, serial-bearing device_id into an HTTP response body
+
+        raise ValueError(f"unknown device_id -- never seen before: {mask_device_id(device_id)}")
+    if any(info.device_id == device_id for info in ctx.get_known_devices()):
+        raise ValueError(
+            "this Switch is connected right now -- disconnect it first, "
+            "otherwise it is recorded again the moment it is seen"
+        )
+    all_rows = db.list_jobs(conn)
+    unfinished = [r for r in all_rows if r["target_device_id"] == device_id and _not_settled(all_rows, r)]
+    if unfinished:
+        raise ValueError(
+            f"{len(unfinished)} unfinished job(s) in the Queue still target this Switch -- "
+            "finish or cancel them first"
+        )
+    db.forget_device(conn, device_id)
+
+
 def device_label(conn, device_id: Optional[str]) -> str:
     """Human-facing stand-in for a device_id -- friendly_name if the user
     set one, else the last display name DBI reported, else a safe
