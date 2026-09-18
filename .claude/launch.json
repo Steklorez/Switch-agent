@@ -1,0 +1,17 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "switchagent-web-mock",
+      "runtimeExecutable": "python",
+      "runtimeArgs": ["-m", "switchagent.cli", "web", "--mock", "--port", "8791"],
+      "port": 8791
+    },
+    {
+      "name": "switchagent-web-real",
+      "runtimeExecutable": ".venv/Scripts/python.exe",
+      "runtimeArgs": ["-m", "switchagent.cli", "web", "--port", "8792"],
+      "port": 8792
+    }
+  ]
+}
