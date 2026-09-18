@@ -499,6 +499,27 @@ a { color: var(--accent); text-decoration: none; }
 }
 .job-main, .history-row > div:first-child { flex: 1; min-width: 180px; }
 .job-name, .history-name { font-weight: 600; }
+
+/* Queue badge: what a row actually installs -- Game / Update / DLC / Mod.
+   Same pill shape and the same colour per kind as the install-confirmation
+   dialog's .confirm-tag, so one item looks the same in the dialog that
+   queued it and in the Queue that runs it. Those rules are #confirm-modal-
+   scoped deliberately (see their own comment), so this is a separate rule
+   with matching values rather than a shared class. "base" is the extra one:
+   the dialog leaves a base game untagged because it sits under a header
+   naming it, while Queue is a flat list where a plain game needs saying. */
+.job-tag {
+  flex: 0 0 auto; white-space: nowrap; word-break: normal; overflow-wrap: normal;
+  display: inline-flex; align-items: center; vertical-align: middle;
+  margin-left: 8px;
+  padding: 2px 8px; border-radius: 999px;
+  font-size: 0.68rem; font-weight: 700; letter-spacing: .01em; line-height: 1.35;
+  color: var(--bg);
+}
+.job-tag-base   { background: var(--text-dim); }
+.job-tag-update { background: var(--accent); }
+.job-tag-dlc    { background: var(--ok); }
+.job-tag-mod    { background: var(--warn); }
 .job-meta, .history-meta { color: var(--text-dim); font-size: 0.8rem; margin-top: 2px; }
 .job-progress-text { color: var(--accent); font-size: 0.8rem; font-weight: 600; margin-top: 2px; }
 .job-error, .history-error {

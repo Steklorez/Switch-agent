@@ -13,8 +13,36 @@ import uuid
 from pathlib import Path
 
 from .. import config, db, extractor
+from .. import title_id as title_id_mod
+from ..model import ContentType
 
 RESERVE_BYTES = 512 * 1024 * 1024
+
+# Queue badge vocabulary -- deliberately the same four role names
+# web/services.py's _job_variant_role() and library.js's CONFIRM_ROLE_LABELS
+# use, so one item keeps the same badge as it moves from "waiting to be
+# prepared" (here, no manifest yet) to a real job (there, read off the frozen
+# manifest).
+_TITLE_VARIANT_TO_ROLE = {"BASE": "base", "UPDATE": "update", "DLC": "dlc"}
+
+
+def _library_item_role(row):
+    """'base'/'update'/'dlc'/'mod' for a library item that has no job -- and
+    therefore no frozen manifest -- yet. None when it cannot be told (no
+    title_id, or one that will not parse, e.g. an archive whose contents are
+    only known after extraction): the row then shows no badge at all, which
+    is the honest answer rather than a guessed one."""
+    if row is None:
+        return None
+    if row["item_type"] == "MOD_FOLDER" or row["content_type"] == ContentType.ATMOSPHERE_MOD.value:
+        return "mod"
+    if not row["title_id"]:
+        return None
+    try:
+        variant, _base_id = title_id_mod.classify_title_variant(row["title_id"])
+    except (ValueError, TypeError):
+        return None
+    return _TITLE_VARIANT_TO_ROLE.get(variant)
 
 # How long a resolved (Overridden-and-now-DONE, or Skipped) item stays
 # visible in a "Failed" batch's panel before PreparationQueue.snapshot()
@@ -159,9 +187,10 @@ class PreparationQueue:
                 # convention), so a queued item's name never changes the
                 # moment it's confirmed into a job.
                 name = queue_worker.resolve_library_item_display_name(conn, row) if row else 'Missing library file'
-                if row and row['item_type'] == 'MOD_FOLDER':
-                    name += ' — Mod'
-                items[str(item_id)] = {'name': name, 'phase': 'Waiting', 'order': position, 'job_ids': []}
+                # No ' — Mod' suffix any more: the row now carries a [Mod]
+                # badge, and saying it twice on one line reads as a bug.
+                items[str(item_id)] = {'name': name, 'phase': 'Waiting', 'order': position,
+                                       'job_ids': [], 'role': _library_item_role(row)}
         with self.lock:
             # A finished ("Ready") preparation is meant to clear itself the
             # instant it completes (see the `run()` closure below) -- this

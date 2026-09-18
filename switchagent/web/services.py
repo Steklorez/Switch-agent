@@ -874,12 +874,48 @@ def _resolve_latest_retry(conn, row):
         row = newer
 
 
+# What a queued item actually IS, as a badge on its Queue row -- the same
+# four kinds the install-confirmation dialog already tags (library.js's
+# CONFIRM_ROLE_LABELS), reusing its role names so both surfaces can share one
+# vocabulary and one colour per kind. "base" is the one the dialog leaves
+# untagged (there, everything hangs under a base-game header that names it);
+# Queue is a flat list with no such header, so a plain game needs saying too.
+_VARIANT_ROLE_LABEL = {"base": "Game", "update": "Update", "dlc": "DLC", "mod": "Mod"}
+
+_TITLE_VARIANT_TO_ROLE = {"BASE": "base", "UPDATE": "update", "DLC": "dlc"}
+
+
+def _job_variant_role(job_row) -> Optional[str]:
+    """'base'/'update'/'dlc'/'mod' for one job, or None when this job's own
+    frozen manifest cannot say (missing/unreadable -- FAULT-001's defensive
+    load pattern, same as _package_variant_label below -- or a package with
+    no classifiable title_id). None means the row simply gets no badge:
+    guessing a kind would be worse than showing none."""
+    try:
+        manifest = manifest_mod.load_manifest(job_row["id"])
+    except (FileNotFoundError, ValueError, KeyError, TypeError):
+        return None
+    if manifest.content_type == ContentType.ATMOSPHERE_MOD.value:
+        return "mod"
+    if manifest.content_type != ContentType.GAME_PACKAGE.value or not manifest.title_id:
+        return None
+    variant, _base_id = title_id_mod.classify_title_variant(manifest.title_id)
+    return _TITLE_VARIANT_TO_ROLE.get(variant)
+
+
 def _job_view(conn, row) -> dict:
     from ..mtp.windows import device_fingerprint
 
-    display_name = queue_worker.display_name_for_job(conn, row)  # same helper the worker's history uses
+    variant_role = _job_variant_role(row)
+    # Same helper the worker's history uses -- minus its " — Mod" suffix,
+    # which the [Mod] badge below now says instead (History keeps it: no
+    # badge there).
+    display_name = queue_worker.display_name_for_job(conn, row, mod_suffix=variant_role != "mod")
     stall_seconds = _stall_seconds(row)
     return {
+        # Queue badge: what this job installs (see _job_variant_role).
+        "variant_role": variant_role,
+        "variant_label": _VARIANT_ROLE_LABEL.get(variant_role),
         "abandoned": bool(row["abandoned"]),
         "id": row["id"],
         "display_name": display_name,

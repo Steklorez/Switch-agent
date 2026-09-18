@@ -13,10 +13,6 @@ data/
 work/
 inbox/
 logs/
-# W3-005: automatic pre-restore safety backups (switchagent/restore.py step
-# 4) -- runtime state, never source. Already covered incidentally by the
-# *.zip rule below; listed explicitly so the intent is stated, not inferred.
-restore-backups/
 runtime.json
 update_check_cache.json
 tools/_write_test_artifacts/

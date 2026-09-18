@@ -35,7 +35,15 @@
       {% for j in g.jobs %}
       <li class="job-row {{ 'progress-active' if j.status == 'RUNNING' }}" data-job-id="{{ j.id }}" data-status="{{ j.status }}">
         <div class="job-main">
-          <div class="job-name">{{ j.display_name }}</div>
+          <div class="job-name">
+            <span class="job-name-text">{{ j.display_name }}</span>
+            {%- if j.variant_label %}
+            {#- What this job installs. Omitted entirely when the job's own
+                manifest cannot say (see services._job_variant_role): no badge
+                beats a guessed one. -#}
+            <span class="job-tag job-tag-{{ j.variant_role }}">[{{ j.variant_label }}]</span>
+            {%- endif %}
+          </div>
           <div class="job-meta">
             {{ j.target_device_label }} · {{ j.target_storage }} · attempt {{ j.attempt_count }}
             · created {{ j.created_at }}
@@ -118,5 +126,5 @@
 </dialog>
 {% endblock %}
 {% block scripts %}
-<script src="/static/queue.js?v=4"></script>
+<script src="/static/queue.js?v=5"></script>
 {% endblock %}
