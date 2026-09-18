@@ -24,17 +24,10 @@
       <form class="device-rename-form" data-device-id="{{ d.device_id }}">
         <input type="text" name="friendly_name" value="{{ d.friendly_name or '' }}"
                placeholder="{{ d.display_name }}">
-        <button type="submit" class="btn btn-small">Save</button>
-        {% if not d.connected %}
-        {#- Offered only on a DISCONNECTED row: forgetting a live device
-            would be undone by the next refresh_devices() seconds later and
-            read as a bug (the route refuses it outright -- see
-            services.forget_device). Addressed by the safe fingerprint,
-            never the raw, serial-bearing device_id (W3-004). -#}
-        <button type="button" class="btn btn-small btn-secondary device-forget"
-                data-fingerprint="{{ d.device_fingerprint }}"
-                data-display-name="{{ d.display_name }}">Forget</button>
-        {% endif %}
+        {#- No Save button: the field saves itself (debounced while typing,
+            immediately on blur and on Enter -- see devices.js), and this
+            status span is the only feedback that it did. -#}
+        <span class="device-rename-status" role="status" aria-live="polite"></span>
       </form>
       <div class="device-meta">
         {{ "Connected" if d.connected else "Disconnected" }}
@@ -84,10 +77,24 @@
       <p class="settings-hint">No storage information yet — refreshing in the background.</p>
       {% endif %}
     </div>
+    {% if not d.connected %}
+    {#- The corner ×, offered only on a DISCONNECTED row: forgetting a live
+        device would be undone by the next refresh_devices() seconds later
+        and read as a bug (the route refuses it outright -- see
+        services.forget_device). Addressed by the safe fingerprint, never
+        the raw, serial-bearing device_id (W3-004). Last flex child of the
+        row, aligned to its top -- in flow, so it can never overlap the
+        name field the way an absolutely-positioned corner button would. -#}
+    <button type="button" class="device-forget"
+            title="Forget this Switch"
+            aria-label="Forget this Switch"
+            data-fingerprint="{{ d.device_fingerprint }}"
+            data-display-name="{{ d.display_name }}">&times;</button>
+    {% endif %}
   </li>
   {% endfor %}
 </ul>
 {% endblock %}
 {% block scripts %}
-<script src="/static/devices.js"></script>
+<script src="/static/devices.js?v=1"></script>
 {% endblock %}

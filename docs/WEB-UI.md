@@ -175,9 +175,15 @@ to a friendly name or a safe fingerprint first; the raw id is still used
 wherever it functionally has to be (API payloads, HTML form values,
 matching logic).
 
-A device row can also be **forgotten**
-(`POST /api/devices/by-fingerprint/{fingerprint}/forget`, the `Forget`
-button on a disconnected Devices row): SwitchAgent drops its own memory of
+The Devices page's name field has no Save button -- it saves itself
+(debounced while typing, immediately on blur and on Enter, see
+`static/devices.js`), reporting through a small inline status instead. An
+emptied field clears `friendly_name` back to NULL, i.e. "show whatever the
+device reports itself as".
+
+A device row can also be **forgotten** (`POST
+/api/devices/by-fingerprint/{fingerprint}/forget`, the corner × on a
+disconnected Devices row): SwitchAgent drops its own memory of
 that identity -- the `devices` row, its friendly name, its storage mappings
 and its cached installed-title list -- and nothing else. Queue/History rows
 that reference it are deliberately left intact and keep rendering through
