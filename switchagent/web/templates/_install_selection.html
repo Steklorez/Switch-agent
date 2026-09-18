@@ -27,6 +27,16 @@
   <div class="selection-summary">
     <span id="selection-count">0</span> selected · <span id="selection-size">0 B</span>
   </div>
+  {# This whole area is also rebuilt client-side by library.js's device
+     poll (refreshSelectionTarget()) whenever the connected-device set
+     changes -- e.g. the user plugs the Switch in AFTER this page already
+     loaded, which used to leave this stuck on "No Switch connected" and
+     the Install button permanently disabled until a manual page reload
+     (the topbar device-pill polls live via app.js, but nothing refreshed
+     THIS block). The three branches below and their JS-rebuilt
+     equivalent must stay in exact sync -- same ids/classes/option
+     layout -- since either can be what's in the DOM at any moment. #}
+  <div id="selection-target-area">
   {% if not connected_devices %}
   <div class="selection-target no-device-warning">No Switch connected</div>
   {% elif connected_devices|length > 1 %}
@@ -47,6 +57,7 @@
     </select>
   </div>
   {% endif %}
+  </div>
   <button id="install-selected-btn" class="btn btn-primary" {{ "disabled" if connected_devices|length != 1 }}>
     Install selected
   </button>

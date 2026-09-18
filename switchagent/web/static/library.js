@@ -25,7 +25,12 @@
   const selectionBar = document.getElementById("selection-bar");
   const selectionCount = document.getElementById("selection-count");
   const selectionSize = document.getElementById("selection-size");
-  const targetSelect = document.getElementById("target-device");
+  // Reassigned by refreshSelectionTarget() below whenever the connected-
+  // device set changes -- the <select> this points at only exists in the
+  // DOM for the "exactly one device connected" branch, so it comes and
+  // goes as devices connect/disconnect, never a stable element to keep a
+  // single reference to.
+  let targetSelect = document.getElementById("target-device");
   const installBtn = document.getElementById("install-selected-btn");
 
   function updateSelectionBar() {
@@ -65,6 +70,87 @@
     const onlyOption = Array.from(targetSelect.options).find((o) => o.value && !o.disabled);
     if (onlyOption) targetSelect.value = onlyOption.value;
   }
+
+  // UI-008: the topbar device-pill (app.js) polls /api/devices live, but
+  // until now nothing else on this page did -- plugging the Switch in
+  // AFTER the page had already loaded left this whole area stuck on "No
+  // Switch connected" with Install permanently disabled, no matter what
+  // the pill said, until a manual reload. This mirrors the three branches
+  // _install_selection.html renders server-side, rebuilding only the
+  // #selection-target-area + Install button's disabled state -- never
+  // touches the user's current game selection.
+  const selectionTargetArea = document.getElementById("selection-target-area");
+  let lastConnectedSignature = null;
+
+  function buildTargetSelect(devices, connectedCount) {
+    const select = document.createElement("select");
+    select.id = "target-device";
+    select.dataset.connectedCount = String(connectedCount);
+    const placeholder = document.createElement("option");
+    placeholder.value = "";
+    placeholder.textContent = "Select Switch…";
+    select.appendChild(placeholder);
+    for (const d of devices) {
+      const opt = document.createElement("option");
+      opt.value = d.device_fingerprint;
+      opt.disabled = !d.connected;
+      opt.textContent = d.display_name + (d.connected ? "" : " (disconnected)");
+      select.appendChild(opt);
+    }
+    return select;
+  }
+
+  async function refreshSelectionTarget() {
+    if (!selectionTargetArea) return; // not on a page that includes this partial
+    let devices;
+    try {
+      const res = await fetch("/api/devices");
+      if (!res.ok) return;
+      devices = await res.json();
+    } catch (e) {
+      return; // network hiccup or server briefly restarting -- try again next tick
+    }
+    const connected = devices.filter((d) => d.connected);
+    // Only touch the DOM when the connected SET actually changed -- never
+    // rebuild (and so never reset the user's already-chosen target) just
+    // because a poll tick happened to land.
+    const signature = connected.map((d) => d.device_fingerprint).sort().join(",");
+    if (signature === lastConnectedSignature) return;
+    lastConnectedSignature = signature;
+
+    selectionTargetArea.innerHTML = "";
+    if (connected.length === 0) {
+      const warn = document.createElement("div");
+      warn.className = "selection-target no-device-warning";
+      warn.textContent = "No Switch connected";
+      selectionTargetArea.appendChild(warn);
+    } else if (connected.length > 1) {
+      const warn = document.createElement("div");
+      warn.className = "selection-target no-device-warning";
+      warn.textContent = "Multiple Switches connected — disconnect all but one to install";
+      selectionTargetArea.appendChild(warn);
+    } else {
+      const wrap = document.createElement("div");
+      wrap.className = "selection-target";
+      const label = document.createElement("label");
+      label.setAttribute("for", "target-device");
+      label.textContent = "Target:";
+      const select = buildTargetSelect(devices, connected.length);
+      wrap.appendChild(label);
+      wrap.appendChild(select);
+      selectionTargetArea.appendChild(wrap);
+      targetSelect = select;
+      // Same auto-select as the page-load case above: exactly one
+      // connected device picks itself, never guessed with 0 or 2+.
+      const onlyOption = Array.from(select.options).find((o) => o.value && !o.disabled);
+      if (onlyOption) select.value = onlyOption.value;
+    }
+    if (connected.length !== 1) targetSelect = null;
+    installBtn.disabled = connected.length !== 1;
+  }
+
+  refreshSelectionTarget();
+  setInterval(refreshSelectionTarget, 5000);
 
   function bindSelection() {
   document.querySelectorAll(".select-box:not([data-selection-bound])").forEach((box) => {
@@ -440,7 +526,7 @@
 
   installBtn.addEventListener("click", () => {
     if (selected.size === 0) return;
-    if (!targetSelect.value) {
+    if (!targetSelect || !targetSelect.value) {
       alert("Choose a target Switch first.");
       return;
     }
@@ -455,6 +541,15 @@
 
   confirmInstallBtn.addEventListener("click", async () => {
     if (selected.size === 0) return;
+    // The device could have disconnected (or a second one connected)
+    // while this modal was already open -- refreshSelectionTarget() nulls
+    // targetSelect out from under it in that case; never send a stale or
+    // missing target.
+    if (!targetSelect || !targetSelect.value) {
+      confirmModal.close();
+      alert("The target Switch is no longer available -- choose one again.");
+      return;
+    }
     const originalBtnText = confirmInstallBtn.textContent;
     confirmInstallBtn.disabled = true;
     confirmInstallBtn.textContent = "Preparing…";
