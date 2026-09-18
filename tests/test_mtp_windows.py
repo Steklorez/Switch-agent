@@ -146,6 +146,103 @@ def test_match_device_by_id_never_picks_by_position_when_multiple_present():
 
 
 # ---------------------------------------------------------------------------
+# Pure: has_placeholder_serial -- the mid-enumeration identity every console
+# briefly shares (see that function's own docstring for the 2026-09-18
+# real-hardware finding it exists for)
+# ---------------------------------------------------------------------------
+
+_GUID = "{6ac27878-a6fa-4155-ba85-f98f491d4f33}"
+
+
+def _device_id(serial):
+    """Shaped exactly like the real thing -- a Shell FolderItem.Path, with
+    the USB instance path (and its serial segment) embedded in it."""
+    return (
+        r"::{20D04FE0-3AEA-1069-A2D8-08002B30309D}\\\?"
+        rf"\usb#vid_057e&pid_201d#{serial}#{_GUID}"
+    )
+
+
+def test_the_all_zero_serial_is_recognised_as_a_placeholder():
+    """The exact id two different physical consoles both produced while
+    enumerating -- a week apart, on the same PC."""
+    assert mtpw.has_placeholder_serial(_device_id("xaw00000000000")) is True
+
+
+@pytest.mark.parametrize("serial", ["xtj10229424075", "xkj10066409242", "xaw10000000000", "xaw00000000001"])
+def test_a_real_serial_is_never_treated_as_a_placeholder(serial):
+    assert mtpw.has_placeholder_serial(_device_id(serial)) is False
+
+
+def test_a_serial_with_no_digits_at_all_is_not_a_placeholder():
+    """Only "every digit in it is a zero" counts. A digitless segment is
+    some other kind of id, and guessing about it would be inventing a rule
+    the hardware never showed us."""
+    assert mtpw.has_placeholder_serial(_device_id("switchdevice")) is False
+
+
+def test_a_device_id_that_is_not_a_usb_path_is_left_alone():
+    assert mtpw.has_placeholder_serial("mock-switch-parent") is False
+    assert mtpw.has_placeholder_serial("") is False
+    assert mtpw.has_placeholder_serial(None) is False
+
+
+def test_the_placeholder_is_the_same_id_for_every_console():
+    """Why this is a safety fix rather than a cosmetic one: the placeholder
+    carries no per-console information, so two consoles enumerate as the
+    same device. This project's promise is that it never substitutes a
+    different target device than the one a job was created for, and a
+    colliding device_id cannot support that promise."""
+    mine = _device_id("xaw00000000000")
+    someone_elses = _device_id("xaw00000000000")
+
+    assert mtpw.device_fingerprint(mine) == mtpw.device_fingerprint(someone_elses)
+    assert mtpw.has_placeholder_serial(mine) and mtpw.has_placeholder_serial(someone_elses)
+
+
+class _FakeShellDevice:
+    def __init__(self, path, name):
+        self.Path = path
+        self.Name = name
+
+
+def test_enumeration_drops_the_still_enumerating_device():
+    """The exact situation from the report: an OLED had just been unplugged,
+    the child's Switch plugged in, and for ~3 seconds BOTH the placeholder
+    and nothing else were visible. Only real identities may come out."""
+    items = [
+        _FakeShellDevice(_device_id("xaw00000000000"), "Nintendo Switch"),
+        _FakeShellDevice(_device_id("xkj10066409242"), "Switch"),
+    ]
+
+    devices = mtpw._devices_from_shell_items(items)
+
+    assert [d.name for d in devices] == ["Switch"]
+    assert [d.device_id for d in devices] == [_device_id("xkj10066409242")]
+
+
+def test_enumeration_keeps_every_real_device_including_several_at_once():
+    items = [
+        _FakeShellDevice(_device_id("xtj10229424075"), "Switch"),
+        _FakeShellDevice(_device_id("xkj10066409242"), "Switch"),
+    ]
+
+    devices = mtpw._devices_from_shell_items(items)
+
+    assert len(devices) == 2
+    assert all(d.connected for d in devices)
+
+
+def test_enumeration_can_return_nothing_rather_than_a_placeholder():
+    """Mid-plug there may be only the placeholder present. "No device yet"
+    is the honest answer -- a second later the console reappears under its
+    real id on its own."""
+    items = [_FakeShellDevice(_device_id("xaw00000000000"), "Nintendo Switch")]
+
+    assert mtpw._devices_from_shell_items(items) == []
+
+
+# ---------------------------------------------------------------------------
 # Pure-ish: verify_transfer_completion (fully injected, no real waiting)
 # ---------------------------------------------------------------------------
 
