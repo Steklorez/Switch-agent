@@ -8,7 +8,10 @@ from switchagent.web.preparation import PreparationQueue, _group_by_title
 def setup_sequence(tmp_path, monkeypatch, *, fail=False):
     monkeypatch.setattr(config, 'LOGS_DIR', tmp_path / 'logs')
     events = []
-    def prepare(conn, ids, target, progress=None):
+    # `confirm` mirrors the real create_and_confirm_jobs signature: the
+    # caller now decides when a prepared job becomes visible to the worker
+    # (see preparation._install_sequentially on preparing one item ahead).
+    def prepare(conn, ids, target, progress=None, confirm=True):
         item = ids[0]
         events.append(('prepare', item))
         (tmp_path / str(item)).mkdir()
@@ -21,6 +24,14 @@ def setup_sequence(tmp_path, monkeypatch, *, fail=False):
         (tmp_path / str(batch)).rmdir()
     monkeypatch.setattr(services, 'create_and_confirm_jobs', prepare)
     monkeypatch.setattr(db, 'list_jobs_by_batch', jobs)
+    # Two real DB calls the loop now makes directly: confirming a prepared
+    # job when its turn actually comes, and looking an item up to decide
+    # whether it may be prepared ahead at all. This fixture has no database
+    # (conn is None), so both are stubbed -- and returning None from the
+    # lookup also keeps these tests strictly one-at-a-time, which is exactly
+    # the sequencing they assert about.
+    monkeypatch.setattr(db, 'confirm_job', lambda conn, job_id: None)
+    monkeypatch.setattr(db, 'get_library_item_by_id', lambda conn, item_id: None)
     monkeypatch.setattr(work_cleanup, 'cleanup_batch_if_all_done', cleanup)
     monkeypatch.setattr(manifest, 'batch_work_dir', lambda batch: tmp_path / str(batch))
     return PreparationQueue(tmp_path / 'test.db'), events
@@ -182,7 +193,10 @@ def test_stuck_job_status_stops_the_batch_instead_of_polling_forever(tmp_path, m
     monkeypatch.setattr(config, 'LOGS_DIR', tmp_path / 'logs')
     events = []
 
-    def prepare(conn, ids, target, progress=None):
+    # `confirm` mirrors the real create_and_confirm_jobs signature: the
+    # caller now decides when a prepared job becomes visible to the worker
+    # (see preparation._install_sequentially on preparing one item ahead).
+    def prepare(conn, ids, target, progress=None, confirm=True):
         item = ids[0]
         events.append(('prepare', item))
         (tmp_path / str(item)).mkdir()
@@ -194,6 +208,14 @@ def test_stuck_job_status_stops_the_batch_instead_of_polling_forever(tmp_path, m
 
     monkeypatch.setattr(services, 'create_and_confirm_jobs', prepare)
     monkeypatch.setattr(db, 'list_jobs_by_batch', jobs)
+    # Two real DB calls the loop now makes directly: confirming a prepared
+    # job when its turn actually comes, and looking an item up to decide
+    # whether it may be prepared ahead at all. This fixture has no database
+    # (conn is None), so both are stubbed -- and returning None from the
+    # lookup also keeps these tests strictly one-at-a-time, which is exactly
+    # the sequencing they assert about.
+    monkeypatch.setattr(db, 'confirm_job', lambda conn, job_id: None)
+    monkeypatch.setattr(db, 'get_library_item_by_id', lambda conn, item_id: None)
     monkeypatch.setattr(manifest, 'batch_work_dir', lambda batch: tmp_path / str(batch))
 
     queue = PreparationQueue(tmp_path / 'test.db')
@@ -301,3 +323,77 @@ def test_group_by_title_reorders_base_first_regardless_of_submission_order(tmp_p
 
     assert chains['0100000000010000'] == [base_id, update_id, mod_id]
     assert chains['0100000000020000'] == [other_base_id]
+
+
+# ---------------------------------------------------------------------------
+# Preparing one item ahead (2026-09-18). Extraction/staging/hashing is
+# disk+CPU work with nothing to do with the USB cable, so it now runs while
+# the previous item is still transferring -- except for archives, which stay
+# strictly sequential (only one archive may occupy work/ at a time).
+# ---------------------------------------------------------------------------
+
+
+def _lookahead_sequence(tmp_path, monkeypatch, *, absolute_path):
+    """Two items in one chain. Item 1's install only reports DONE once item 2
+    has been prepared, so the run can only finish at all if preparation really
+    did overlap the transfer -- and `late` records the case where it didn't."""
+    import threading
+    monkeypatch.setattr(config, 'LOGS_DIR', tmp_path / 'logs')
+    events = []
+    prepared_second = threading.Event()
+    late = []
+
+    def prepare(conn, ids, target, progress=None, confirm=True):
+        item = ids[0]
+        events.append(('prepare', item))
+        (tmp_path / str(item)).mkdir(exist_ok=True)
+        if item == 2:
+            prepared_second.set()
+        return {'created': [{'job_id': item}], 'errors': [], 'batch_id': item}
+
+    def jobs(conn, batch):
+        events.append(('install', batch))
+        if batch == 1 and not prepared_second.is_set():
+            if not prepared_second.wait(2):
+                late.append(batch)  # nothing prepared item 2 while item 1 was busy
+        return [{'id': batch, 'status': 'DONE_UNVERIFIED', 'error': None}]
+
+    def cleanup(conn, batch):
+        events.append(('cleanup', batch))
+        path = tmp_path / str(batch)
+        if path.exists():
+            path.rmdir()
+
+    monkeypatch.setattr(services, 'create_and_confirm_jobs', prepare)
+    monkeypatch.setattr(db, 'list_jobs_by_batch', jobs)
+    monkeypatch.setattr(db, 'confirm_job', lambda conn, job_id: None)
+    monkeypatch.setattr(db, 'get_library_item_by_id',
+                        lambda conn, item_id: {'absolute_path': absolute_path})
+    monkeypatch.setattr(work_cleanup, 'cleanup_batch_if_all_done', cleanup)
+    monkeypatch.setattr(manifest, 'batch_work_dir', lambda batch: tmp_path / str(batch))
+    queue = PreparationQueue(tmp_path / 'test.db')
+    queue.states['task'] = {'target': 'mock', 'items': {}}
+    queue._install_sequentially(None, [1, 2], 'mock', lambda **kw: None, 'task', {'chain-a': [1, 2]})
+    return events, late
+
+
+def test_a_bare_package_is_prepared_while_the_previous_item_still_transfers(tmp_path, monkeypatch):
+    events, late = _lookahead_sequence(
+        tmp_path, monkeypatch, absolute_path=r"D:\lib\Game [0100000000010000][v0].nsp",
+    )
+    assert late == [], "item 2 was not prepared while item 1 was still installing"
+    assert events.index(('prepare', 2)) < events.index(('cleanup', 1))
+    # Order within the chain is unchanged: item 2 is still installed after
+    # item 1 finished, no matter how early its bytes were ready.
+    assert events.index(('install', 1)) < events.index(('install', 2))
+
+
+def test_an_archive_is_never_extracted_ahead_of_the_previous_one_being_cleaned(tmp_path, monkeypatch):
+    """The separately-tested guarantee this must not break: only one
+    archive's payload may occupy work/ at a time (see
+    test_each_payload_is_cleaned_before_next_and_logs_are_bounded and
+    test_hotfix_reconciliation.py)."""
+    events, late = _lookahead_sequence(tmp_path, monkeypatch, absolute_path=r"D:\lib\pack.zip")
+    assert late == [1], "an archive must not be prepared ahead"
+    assert events == [('prepare', 1), ('install', 1), ('cleanup', 1),
+                      ('prepare', 2), ('install', 2), ('cleanup', 2)]

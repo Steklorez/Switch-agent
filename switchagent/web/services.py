@@ -676,9 +676,24 @@ def _finish_family(game: dict) -> dict:
     #     wasn't in DBI's list), so it would keep claiming something
     #     not-yet-installed long after SwitchAgent itself successfully
     #     copied it.
-    game["installed"] = game["confirmed_on_device"] or (
-        game["base"] is not None and game["base"]["status"] in ("INSTALLED", "INSTALLED_UNVERIFIED")
-    )
+    #
+    # ...with one correction (field report, 2026-09-19): SwitchAgent's own
+    # record loses to a live check that says otherwise. A game installed by
+    # this app, then DELETED on the console, kept showing as installed after
+    # the console was reconnected and re-read -- our own INSTALLED_UNVERIFIED
+    # outlived the evidence it was a placeholder for. _library_entry_view
+    # already decided exactly this question one level down (see its
+    # hide_unverified_badge: "INSTALLED_UNVERIFIED is a HOLDING state, not a
+    # claim that survives an actual check"), so this reuses that answer
+    # rather than inventing a second, contradictory one -- the badge and the
+    # "Not installed" filter must never disagree about the same title.
+    # INSTALLED proper is untouched: that one is either user-confirmed or
+    # DBI-confirmed, never a holding state.
+    base = game["base"]
+    base_claims_installed = base is not None and base["status"] in ("INSTALLED", "INSTALLED_UNVERIFIED")
+    if base is not None and base.get("hide_unverified_badge"):
+        base_claims_installed = False
+    game["installed"] = game["confirmed_on_device"] or base_claims_installed
     return game
 
 
@@ -1259,7 +1274,8 @@ def _sub_report_for_entry(report, entry):
     )
 
 
-def create_and_confirm_jobs(conn, library_item_ids: list[int], target_device_id: str, *, progress=None) -> dict:
+def create_and_confirm_jobs(conn, library_item_ids: list[int], target_device_id: str, *, progress=None,
+                            confirm: bool = True) -> dict:
     """The ONLY path that creates jobs from the Web UI (point 9/19/25): the
     caller (the bulk-install confirmation dialog) already gathered
     explicit human confirmation before this is ever called -- so every job
@@ -1284,6 +1300,15 @@ def create_and_confirm_jobs(conn, library_item_ids: list[int], target_device_id:
     is the fix). A single-package archive or bare package file
     (package_entries empty/single) takes the original, unchanged one-job
     path.
+
+    confirm=False stops one step short: every job is created and staged
+    exactly as above but left PENDING_CONFIRM, i.e. invisible to the worker,
+    for the caller to confirm later with db.confirm_job(). That is what lets
+    web/preparation.py prepare the NEXT game while the current one is still
+    transferring without ever letting it start early (see
+    _install_sequentially's docstring). The "prepare everything before
+    confirming anything" rule below is unchanged -- confirm=False simply
+    hands that final step to the caller instead of doing it here.
 
     UI-002: one call to this function is one installation batch -- even
     when only a single item is selected. Every job successfully created
@@ -1391,7 +1416,7 @@ def create_and_confirm_jobs(conn, library_item_ids: list[int], target_device_id:
         from ..work_cleanup import cleanup_batch_if_all_done
         cleanup_batch_if_all_done(conn, batch_id)
         created = []
-    else:
+    elif confirm:
         for c in created:
             db.confirm_job(conn, c["job_id"])
 

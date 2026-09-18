@@ -4,6 +4,8 @@ snapshot that fixes the TOCTOU gap between job confirmation and transfer.
 
 from __future__ import annotations
 
+import os
+
 import pytest
 
 from switchagent import config, manifest, preview
@@ -186,3 +188,102 @@ def test_verify_manifest_against_source_propagates_invalid_path_as_manifest_erro
     )
     with pytest.raises(manifest.ManifestError, match="escape"):
         manifest.verify_manifest_against_source(bad_manifest, job_id=99)
+
+
+# ---------------------------------------------------------------------------
+# The pre-send re-verification, and what it is allowed to skip (2026-09-18).
+#
+# The manifest's own hash was computed minutes earlier by
+# build_manifest_and_stage(); re-reading every byte again right before the
+# transfer put a second full hash of the same file on the wall-clock path
+# between "user clicked Install" and "first byte leaves the PC" -- measured
+# on the real library at 265 MB/s, that is 2 x 53s for a 13.8 GB game.
+# ---------------------------------------------------------------------------
+
+
+def _bare_package_manifest(inbox_dir, job_id, name="Game [0100000000010000][v0].nsp", data=b"nsp bytes"):
+    (inbox_dir / name).write_bytes(data)
+    report = preview.preview_path(inbox_dir / name)
+    return manifest.build_manifest_and_stage(report, job_id=job_id, target_storage="SD_INSTALL")
+
+
+def test_verify_skips_the_hash_when_size_and_mtime_are_untouched(isolated_db, monkeypatch):
+    _conn, inbox_dir = isolated_db
+    m = _bare_package_manifest(inbox_dir, job_id=101)
+
+    def _must_not_hash(_path):
+        raise AssertionError("re-hashed a file whose size and mtime had not changed")
+
+    monkeypatch.setattr(manifest, "sha256_file", _must_not_hash)
+    assert manifest.verify_manifest_against_source(m, 101) is None
+
+
+def test_verify_still_hashes_when_mtime_moved_and_passes_on_identical_content(isolated_db):
+    _conn, inbox_dir = isolated_db
+    name = "Game [0100000000010000][v0].nsp"
+    m = _bare_package_manifest(inbox_dir, job_id=102, name=name)
+
+    source = inbox_dir / name
+    stat = source.stat()
+    os.utime(source, ns=(stat.st_atime_ns, stat.st_mtime_ns + 1_000_000_000))
+
+    # Content is byte-identical, so the fallback hash must clear it -- a
+    # touched timestamp alone is not drift.
+    assert manifest.verify_manifest_against_source(m, 102) is None
+
+
+def test_verify_detects_content_rewritten_to_the_same_size(isolated_db):
+    _conn, inbox_dir = isolated_db
+    name = "Game [0100000000010000][v0].nsp"
+    m = _bare_package_manifest(inbox_dir, job_id=103, name=name, data=b"original!")
+
+    source = inbox_dir / name
+    source.write_bytes(b"different")  # same length, new content, new mtime
+    assert len(b"different") == len(b"original!")
+
+    mismatch = manifest.verify_manifest_against_source(m, 103)
+    assert mismatch is not None
+    assert mismatch.kind == "changed"
+
+
+def test_verify_rehashes_a_manifest_frozen_before_mtime_was_recorded(isolated_db, monkeypatch):
+    """Backwards compatibility: a manifest.json written by an older build has
+    no mtime_ns at all. It must fall back to the full hash rather than treat
+    a missing stamp as "unchanged"."""
+    _conn, inbox_dir = isolated_db
+    name = "Game [0100000000010000][v0].nsp"
+    m = _bare_package_manifest(inbox_dir, job_id=104, name=name)
+    legacy = dict(m.to_dict())
+    for entry in legacy["files"]:
+        del entry["mtime_ns"]
+    reloaded = manifest.Manifest.from_dict(legacy)
+    assert reloaded.files[0].mtime_ns is None
+
+    hashed = []
+    real_hash = manifest.sha256_file
+    monkeypatch.setattr(manifest, "sha256_file", lambda p: hashed.append(p) or real_hash(p))
+    assert manifest.verify_manifest_against_source(reloaded, 104) is None
+    assert len(hashed) == 1
+
+
+def test_always_rehash_env_var_forces_the_full_read(isolated_db, monkeypatch):
+    _conn, inbox_dir = isolated_db
+    m = _bare_package_manifest(inbox_dir, job_id=105)
+
+    hashed = []
+    real_hash = manifest.sha256_file
+    monkeypatch.setattr(manifest, "sha256_file", lambda p: hashed.append(p) or real_hash(p))
+    monkeypatch.setenv("SWITCHAGENT_ALWAYS_REHASH", "1")
+    assert manifest.verify_manifest_against_source(m, 105) is None
+    assert len(hashed) == 1
+
+
+def test_verify_reports_a_missing_source_before_looking_at_any_stamp(isolated_db):
+    _conn, inbox_dir = isolated_db
+    name = "Game [0100000000010000][v0].nsp"
+    m = _bare_package_manifest(inbox_dir, job_id=106, name=name)
+    (inbox_dir / name).unlink()
+
+    mismatch = manifest.verify_manifest_against_source(m, 106)
+    assert mismatch is not None
+    assert mismatch.kind == "missing"
