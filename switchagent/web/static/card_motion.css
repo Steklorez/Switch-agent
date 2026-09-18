@@ -66,4 +66,15 @@
 .library-tiles .game-variants summary { display: flex; align-items: center; gap: 5px; white-space: nowrap; overflow-x: auto; scrollbar-width: thin; }
 .library-tiles .game-variants summary::before { flex: none; }
 .extras-pill { display: inline-block; flex: none; padding: 3px 7px; border-radius: 999px; background: #287f50; color: #fff; font-size: .7rem; line-height: 1.4; font-weight: 600; }
+/* One colour per kind, the same three used by the install-confirmation
+   dialog's tags and the Queue badges (.confirm-tag-* / .job-tag-* in
+   style.css): update = accent blue, DLC = ok green, mod = warn orange,
+   dark text on a bright pill. Deliberately placed BEFORE
+   .extras-pill-empty: same specificity, so a zero-count pill still falls
+   through to the muted styling below instead of being coloured as if it
+   had content. "copies" keeps the neutral default -- a duplicate is not
+   one of the three kinds. */
+.extras-pill-update { background: var(--accent); color: var(--bg); }
+.extras-pill-dlc    { background: var(--ok);     color: var(--bg); }
+.extras-pill-mod    { background: var(--warn);   color: var(--bg); }
 .extras-pill-empty { background: #b85e13; color: #fff; }
