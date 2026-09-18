@@ -848,6 +848,32 @@ def _destination_conflict_path(row) -> Optional[str]:
     return match.group(1) if match else None
 
 
+def _resolve_latest_retry(conn, row):
+    """Follows `row`'s retry chain forward to its latest non-abandoned
+    retry, if any -- for a caller that wants "the current state of this
+    piece of work", not this exact job's own permanent record (get_job()/
+    GET /api/jobs/{id} deliberately must NOT do this: a job's own row is a
+    permanent, unaltered record of that one attempt -- see
+    test_retry_leaves_old_install_history_entry_completely_untouched).
+    PreparationQueue.snapshot() is the one caller that wants this: a
+    preparation item stores the job_id it was given at creation and never
+    updates it, so without following forward, an item whose job was
+    Overridden/Retried kept showing the stale original's card forever --
+    with fully live Override/Skip buttons, since the old row's status
+    never itself changes when it's retried (see _not_settled()'s
+    docstring for the matching fix already applied to the plain Queue
+    list). retry_of_job_id always points to a strictly earlier job id
+    (see retry_job()), so this can only terminate."""
+    while True:
+        newer = conn.execute(
+            "SELECT * FROM jobs WHERE retry_of_job_id=? AND abandoned=0 ORDER BY id DESC LIMIT 1",
+            (row["id"],),
+        ).fetchone()
+        if newer is None:
+            return row
+        row = newer
+
+
 def _job_view(conn, row) -> dict:
     from ..mtp.windows import device_fingerprint
 
@@ -1374,6 +1400,18 @@ def retry_job(conn, job_id: int, *, force_overwrite: bool = False) -> dict:
 
     if old["abandoned"]:
         raise ValueError("This attempt was abandoned; select the source again in Library")
+    # A job can have at most one live retry at a time -- without this, a
+    # DESTINATION_CONFLICT/FAILED card whose old row is still displayed
+    # somewhere (e.g. a preparation-batch item, which looks its job up by
+    # the id it recorded at creation and doesn't re-check _not_settled())
+    # keeps its Override/Skip/Retry buttons fully functional even after
+    # they've already been used once -- old["status"] never changes on
+    # this row, so a second click passes every check above and creates
+    # ANOTHER new job, unboundedly. _retry_staged_job() below already had
+    # this guard; the direct-source path (library_item_id/inbox_item_id --
+    # what a MOD_FOLDER retry/override uses) did not.
+    if conn.execute("SELECT 1 FROM jobs WHERE retry_of_job_id=? AND abandoned=0", (job_id,)).fetchone():
+        raise ValueError("This attempt already has a retry; use the latest attempt")
     # Archive retries use the EXACT frozen entry, not the archive's first
     # package. Keep a new attempt/history row without extracting again.
     if old["manifest_path"]:
@@ -1431,8 +1469,9 @@ def _retry_staged_job(conn, old, frozen, *, force_overwrite: bool = False) -> di
     mismatch = manifest_mod.verify_manifest_against_source(frozen, old["id"])
     if mismatch:
         raise ValueError(f"Prepared source {mismatch.kind}: {mismatch.dest_relative_path}; select Library source again")
-    if conn.execute("SELECT 1 FROM jobs WHERE retry_of_job_id=? AND abandoned=0", (old["id"],)).fetchone():
-        raise ValueError("This attempt already has a retry; use the latest attempt")
+    # The "already has a live retry" guard now lives in retry_job() itself
+    # (the only caller of this function) so it applies uniformly to both
+    # the staged and direct-source paths -- see its own comment.
     batch_id = db.create_installation_batch(conn, target_device_id=old["target_device_id"])
     new_id = db.create_job(conn, action=old["action"], target_storage=old["target_storage"],
                            target_device_id=old["target_device_id"], library_item_id=old["library_item_id"],

@@ -7,7 +7,7 @@ import pytest
 
 from switchagent import config, db, extractor, manifest, queue_worker
 from switchagent.web import preparation, services
-from .test_web_api import client, web_ctx  # shared isolated HTTP fixtures
+from .test_web_api import client, web_ctx, _seed_library_item  # shared isolated HTTP fixtures
 from .test_multi_package_archive import (
     _make_archive_library_item, BASE_NAME, UPDATE_NAME, DLC1_NAME,
 )
@@ -172,6 +172,61 @@ def test_colliding_names_are_single_copies_and_cancel_releases_only_after_last_r
     assert client.post(f"/api/jobs/{jobs[1]}/cancel").status_code == 200
     assert not paths[0].exists() and not paths[1].exists()
     assert len(list(config.LIBRARY_DIR.glob("*.zip"))) == 2
+
+
+def test_preparation_panel_shows_the_override_retry_not_the_stale_conflict(client, web_ctx):
+    """Real user report, 2026-09-18 (screenshot on the Queue page): a
+    batch of 3 items finished with item 3 hitting a DESTINATION_CONFLICT.
+    Clicking Override created a new job (correctly), but the preparation
+    panel kept showing item 3's OLD conflict card -- full detail box,
+    live Override/Skip buttons -- indefinitely, while the actual new job
+    ran as a seemingly unrelated row elsewhere on the page. Worse: since
+    the old job's status never changes after a retry, that stale card's
+    Override button stayed genuinely clickable and (before this fix)
+    would have created ANOTHER new job every time -- see
+    test_override_refuses_a_second_click_on_the_same_stale_conflict_card
+    in test_web_api.py for that half. This test is the panel-display
+    half: once overridden, the item's own entry in /api/preparations must
+    reflect the NEW job, not the superseded original."""
+    item_id = _seed_library_item(web_ctx)
+    backend = web_ctx.registry.get("mock-switch-parent")
+    backend.connect()
+    backend.storage_tree("SD_INSTALL").write_file(
+        "Game [0100000000010000][v0].nsp", b"someone else's file",
+    )
+
+    response = client.post(
+        "/api/preparations", json={"library_item_ids": [item_id], "target_device_id": "mock-switch-parent"},
+    )
+    assert response.status_code == 202
+    deadline = time.monotonic() + 5
+    state = None
+    while time.monotonic() < deadline:
+        with db.open_db(web_ctx.db_path) as conn:
+            queue_worker.run_worker_once(conn, web_ctx.registry)
+        state = client.get("/api/preparations").json()[-1]
+        if state["phase"] == "Failed":
+            break
+        time.sleep(.02)
+    assert state["phase"] == "Failed"
+
+    item = state["items"][str(item_id)]
+    assert len(item["jobs"]) == 1
+    stale_job_id = item["jobs"][0]["id"]
+    assert item["jobs"][0]["status"] == "DESTINATION_CONFLICT"
+
+    override_res = client.post(f"/api/jobs/{stale_job_id}/override")
+    assert override_res.status_code == 200
+    new_job_id = override_res.json()["new_job_id"]
+    with db.open_db(web_ctx.db_path) as conn:
+        queue_worker.run_worker_once(conn, web_ctx.registry)
+
+    state = client.get("/api/preparations").json()[-1]
+    item = state["items"][str(item_id)]
+    assert len(item["jobs"]) == 1
+    assert item["jobs"][0]["id"] == new_job_id
+    assert item["jobs"][0]["status"] in ("DONE", "DONE_UNVERIFIED")
+    assert item["jobs"][0]["status"] != "DESTINATION_CONFLICT"
 
 
 def test_archived_mods_have_distinct_resolvable_frozen_paths(client, web_ctx):

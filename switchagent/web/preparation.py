@@ -250,10 +250,15 @@ class PreparationQueue:
             result = copy.deepcopy(list(self.states.values()))
         for state in result:
             state["elapsed"] = int(state.get("finished", time.time()) - state["started"])
-        from .services import _job_view
+        from .services import _job_view, _resolve_latest_retry
         with db.open_db(self.db_path) as conn:
             for state in result:
                 for item in state['items'].values():
-                    item['jobs'] = [_job_view(conn, row) for job_id in item.get('job_ids', [])
+                    # A stored job_id is frozen at creation time -- if that
+                    # job was since Overridden/Retried (see
+                    # _resolve_latest_retry's own docstring), show the
+                    # current attempt, not the superseded original.
+                    item['jobs'] = [_job_view(conn, _resolve_latest_retry(conn, row))
+                                    for job_id in item.get('job_ids', [])
                                     if (row := conn.execute('SELECT * FROM jobs WHERE id=?', (job_id,)).fetchone())]
         return result
