@@ -143,6 +143,7 @@ a { color: var(--accent); text-decoration: none; }
 .btn-primary { background: var(--accent); color: var(--accent-text); border-color: var(--accent); }
 .btn-danger { background: var(--danger); color: #fff; border-color: var(--danger); }
 .btn-warning { background: #ff8a00; color: #fff; border-color: #ff8a00; }
+.btn-ok { background: var(--ok); color: #fff; border-color: var(--ok); }
 .btn-secondary { background: var(--surface-2); }
 .btn-small { padding: 6px 10px; font-size: 0.82rem; min-height: 32px; }
 .btn:disabled { opacity: 0.5; cursor: not-allowed; }
