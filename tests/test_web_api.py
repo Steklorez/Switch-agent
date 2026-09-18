@@ -1319,6 +1319,38 @@ def test_override_only_accepts_destination_conflict_status(client, web_ctx):
     assert old_row["status"] == "DESTINATION_CONFLICT"
 
 
+def test_override_refuses_a_second_click_on_the_same_stale_conflict_card(client, web_ctx):
+    """Real bug, 2026-09-18: old_row["status"] stays DESTINATION_CONFLICT
+    forever after a successful Override (see test above) -- a preparation-
+    batch item displays its job by the id it recorded at creation and
+    never re-checks whether it's since been superseded, so its stale
+    conflict card kept showing fully-live Override/Skip buttons after the
+    first click already went through. Before this fix, clicking Override
+    again on that same stale card would pass every check in retry_job()
+    (old["status"] unchanged, no guard against an existing retry) and
+    create ANOTHER new job -- repeatable without limit. retry_job() now
+    refuses once a live (non-abandoned) retry already exists for this
+    job, regardless of source path."""
+    item_id = _seed_library_item(web_ctx)
+    res = client.post("/api/jobs", json={"library_item_ids": [item_id], "target_device_id": "mock-switch-parent"})
+    job_id = res.json()["created"][0]["job_id"]
+    with db.open_db(web_ctx.db_path) as conn:
+        db.update_job_status(conn, job_id, "DESTINATION_CONFLICT", error="conflict")
+
+    first = client.post(f"/api/jobs/{job_id}/override")
+    assert first.status_code == 200
+    first_new_job_id = first.json()["new_job_id"]
+
+    second = client.post(f"/api/jobs/{job_id}/override")
+    assert second.status_code == 409
+
+    with db.open_db(web_ctx.db_path) as conn:
+        all_jobs = db.list_jobs(conn)
+    retries_of_original = [j for j in all_jobs if j["retry_of_job_id"] == job_id]
+    assert len(retries_of_original) == 1
+    assert retries_of_original[0]["id"] == first_new_job_id
+
+
 # ---------------------------------------------------------------------------
 # UI-002: installation batches
 # ---------------------------------------------------------------------------
