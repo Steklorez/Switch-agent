@@ -154,6 +154,37 @@ def mask_device_id(device_id: Optional[str]) -> str:
     return _SERIAL_SEGMENT_RE.sub(lambda m: f"{m.group(1)}[REDACTED]{m.group(3)}", device_id)
 
 
+def has_placeholder_serial(device_id: Optional[str]) -> bool:
+    """True when this device_id's USB serial segment carries no real serial
+    at all -- every digit in it is a zero.
+
+    Real-hardware finding (2026-09-18): a Switch plugged in fresh spends a
+    few seconds enumerating as name "Nintendo Switch" with the serial
+    `XAW00000000000` before it settles into its own identity (DBI's
+    responder, name "Switch", real serial). Two polls, ~3 seconds, then
+    gone. SwitchAgent recorded that transient as a permanent third device
+    in the Devices list.
+
+    Refusing it is not cosmetic. The SAME zeroed id was produced by two
+    DIFFERENT physical consoles a week apart (the user's OLED on
+    2026-09-11/16, their child's Switch on 2026-09-18) -- it is not an
+    identity, it is a placeholder every console passes through. This
+    project's core promise is that it "never substitutes a different
+    target device than the one a job was created for" (README), and a
+    device_id that collides across consoles cannot support that promise.
+    So such a device is never enumerated, never registered, never
+    recorded, and never a transfer target -- within seconds the same
+    console reappears under its real id anyway.
+    """
+    if not device_id:
+        return False
+    match = _SERIAL_SEGMENT_RE.search(device_id)
+    if match is None:
+        return False
+    digits = [ch for ch in match.group(2) if ch.isdigit()]
+    return bool(digits) and all(ch == "0" for ch in digits)
+
+
 def device_fingerprint(device_id: str) -> str:
     """Safe-to-log stand-in for a device_id -- sha256[:16], same as
     tools/mtp_probe.py's device_fingerprint()."""
@@ -825,7 +856,25 @@ def enumerate_devices() -> list[DeviceInfo]:
     shell = win32com.client.Dispatch("Shell.Application")
     this_pc = shell.NameSpace(THIS_PC_NAMESPACE)
     items = [i for i in this_pc.Items() if i.IsFolder and not i.IsFileSystem]
-    return [DeviceInfo(device_id=i.Path, name=i.Name, connected=True) for i in items]
+    return _devices_from_shell_items(items)
+
+
+def _devices_from_shell_items(items) -> list[DeviceInfo]:
+    """Pure mapping/filtering over duck-typed Shell items -- separated from
+    the live COM walk above so it is unit-testable with plain fake objects,
+    the same split _match_device_by_id() below already uses.
+
+    A console mid-enumeration reports a placeholder serial that EVERY
+    console shares (see has_placeholder_serial). Dropping it here, at the
+    one point every caller enumerates through, is what keeps it out of the
+    registry, out of the devices table and out of the device pickers."""
+    devices = []
+    for item in items:
+        if has_placeholder_serial(item.Path):
+            log.info("ignoring a device still enumerating without a real serial: name=%r", item.Name)
+            continue
+        devices.append(DeviceInfo(device_id=item.Path, name=item.Name, connected=True))
+    return devices
 
 
 def _match_device_by_id(candidates, device_id: str):
