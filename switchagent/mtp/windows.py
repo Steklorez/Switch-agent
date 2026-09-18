@@ -36,6 +36,24 @@ docs/STAGE5A-MTP-RESEARCH.md, docs/STAGE5B-REAL-MTP.md):
     TransferStatus.UNVERIFIED -- "transport accepted, DBI-side result
     unprovable" -- which is never treated as COMPLETED and never treated as
     FAILED by callers.
+  - IFileOperation.CopyItem() called on a whole FOLDER (not one file at a
+    time), targeting a destination that already has a same-named folder,
+    does NOT merge the way Explorer merges two same-named folders on a
+    real filesystem. Confirmed on real hardware 2026-09-18
+    (tools/mtp_folder_merge_test.py, 3 sequential folder uploads into the
+    same destination folder, verified both by size and by downloading
+    every file back and comparing its SHA-256): the SECOND and THIRD
+    folder-level copies silently deleted every file from the PRIOR
+    upload(s) that wasn't also present in the new one -- e.g. after
+    uploading {alpha, beta, sub/gamma, sub/delta} and then {epsilon, zeta,
+    sub/eta, sub/theta} into the same destination folder, alpha/beta/
+    sub-gamma/sub-delta were simply gone. No exception was raised and
+    GetAnyOperationsAborted() reported False every time -- this failure is
+    completely silent. This is why every transfer in this backend is
+    per-file, with its own existence check, never a whole-folder copy: a
+    MOD_FOLDER install into an atmosphere/contents/<title_id> folder that
+    already has content from a previous mod would otherwise silently wipe
+    that previous mod's files.
 
 One addition was made to switchagent/mtp/base.py: TransferStatus gained an
 UNVERIFIED member (see that module's docstring) for exactly this "cannot
