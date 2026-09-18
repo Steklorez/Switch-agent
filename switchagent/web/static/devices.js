@@ -1,6 +1,7 @@
-// Devices page: friendly-name rename. device_id itself is never editable
-// here or sent anywhere except as the URL identifier -- renaming can never
-// change identity (see docs/WEB-UI.md point 33).
+// Devices page: friendly-name rename, storage mapping, and Forget.
+// device_id itself is never editable here or sent anywhere except as the
+// URL identifier -- renaming can never change identity (see docs/WEB-UI.md
+// point 33).
 (function () {
   "use strict";
 
@@ -29,6 +30,43 @@
       } catch (e) {
         alert("Request failed: " + e);
       } finally {
+        btn.disabled = false;
+      }
+    });
+  });
+
+  // -- Forget: erase SwitchAgent's own memory of a device it has seen --
+  // the devices row, its friendly name, its storage mapping and its cached
+  // installed-title list. Never the Queue/History records that mention it
+  // (those stay, labelled by fingerprint), and never anything on the
+  // console itself. The button only exists on disconnected rows.
+
+  document.querySelectorAll(".device-forget").forEach((btn) => {
+    btn.addEventListener("click", async () => {
+      const confirmed = window.confirm(
+        `Forget "${btn.dataset.displayName}"?\n\n` +
+        "SwitchAgent stops listing this Switch and loses its name and storage " +
+        "mapping. Queue and History entries are kept, and nothing on the console " +
+        "itself is touched.\n\n" +
+        "If this Switch is ever connected again, it reappears here as a new device."
+      );
+      if (!confirmed) return;
+
+      btn.disabled = true;
+      try {
+        const fp = encodeURIComponent(btn.dataset.fingerprint);
+        const res = await fetch(`/api/devices/by-fingerprint/${fp}/forget`, { method: "POST" });
+        if (!res.ok) {
+          // 409 carries a written-for-the-user reason (connected right now,
+          // unfinished jobs) -- show it verbatim rather than a generic error.
+          const data = await res.json().catch(() => ({}));
+          alert(`Could not forget this device: ${data.detail || res.status}`);
+          btn.disabled = false;
+          return;
+        }
+        window.location.reload();
+      } catch (e) {
+        alert("Request failed: " + e);
         btn.disabled = false;
       }
     });

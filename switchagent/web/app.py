@@ -777,6 +777,27 @@ def create_app(ctx: WebContext) -> FastAPI:
             raise HTTPException(status_code=404, detail=str(exc)) from exc
         return {"ok": True}
 
+    @app.post("/api/devices/by-fingerprint/{fingerprint}/forget")
+    def api_forget_device_by_fingerprint(
+        fingerprint: str, conn=Depends(get_conn), ctx: WebContext = Depends(get_ctx),
+    ):
+        """Drop a previously-seen device from the Devices page -- see
+        services.forget_device() for what that does and the two states it
+        refuses in. Fingerprint-addressed like its neighbours (W3-004: a
+        raw, serial-bearing device_id must never appear in a request path,
+        which lands verbatim in uvicorn's access log).
+
+        404 vs 409 is a real distinction here, not decoration: 404 means
+        "no device with that fingerprint" (a stale page), 409 means "that
+        device exists and forgetting it right now would be wrong" -- the
+        message is written to be shown to the user as-is."""
+        device_id = _resolve_fingerprint_or_404(conn, fingerprint)
+        try:
+            services.forget_device(conn, ctx, device_id)
+        except ValueError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        return {"ok": True}
+
     @app.get("/api/devices/by-fingerprint/{fingerprint}/storages")
     def api_list_device_storages_by_fingerprint(
         fingerprint: str, conn=Depends(get_conn), ctx: WebContext = Depends(get_ctx),

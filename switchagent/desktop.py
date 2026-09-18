@@ -132,6 +132,13 @@ def _run_primary_instance(args: argparse.Namespace) -> int:
     import uvicorn
 
     use_mock = args.mock or os.environ.get("MOCK_MTP", "").lower() in ("1", "true", "yes")
+    if use_mock:
+        # Before anything opens a connection -- see config.use_mock_database()
+        # for the incident this exists to make impossible. Logged, not silent:
+        # the whole point is that a mock run started by hand from dist/ is
+        # identifiable as such in the same log file the real app writes to.
+        config.use_mock_database()
+        log.info("mock mode -- using %s, never the real database", config.DB_PATH)
     firstrun.ensure_app_config(config.CONFIG_YAML_PATH)
     config.LIBRARY_DIR = config.load_library_dir()
 
