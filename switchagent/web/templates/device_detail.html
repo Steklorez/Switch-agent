@@ -28,7 +28,7 @@
   <div>
     <h2 class="detail-title">
       <span class="device-dot {{ 'connected' if view.connected else 'disconnected' }}"></span>
-      {{ view.display_name }}
+      <span id="device-display-name">{{ view.display_name }}</span>
     </h2>
     <div class="card-meta">
       {{ "Connected" if view.connected else "Disconnected" }} ·
@@ -41,7 +41,7 @@
 <section class="detail-section">
   <h3>Device</h3>
   <table class="detail-table">
-    <tr><th>Friendly name</th><td>{{ view.friendly_name or "— (not set)" }}</td></tr>
+    <tr><th>Friendly name</th><td id="device-friendly-name">{{ view.friendly_name or "— (not set)" }}</td></tr>
     <tr><th>Reports itself as</th><td>{{ view.last_known_display_name or "—" }}</td></tr>
     <tr><th>Status</th><td>{{ "Connected" if view.connected else "Disconnected" }}</td></tr>
     <tr><th>Fingerprint</th><td><code>{{ view.device_fingerprint }}</code></td></tr>
@@ -51,7 +51,9 @@
   <form class="device-rename-form" id="device-rename-form">
     <input type="text" name="friendly_name" value="{{ view.friendly_name or '' }}"
            placeholder="{{ view.display_name }}">
-    <button type="submit" class="btn btn-small">Rename</button>
+    {#- No Rename button: the field saves itself, exactly like the Devices
+        list's (self_saving_name.js). This span is its only feedback. -#}
+    <span class="device-rename-status" role="status" aria-live="polite"></span>
   </form>
 </section>
 
@@ -209,5 +211,6 @@
 </section>
 {% endblock %}
 {% block scripts %}
-<script src="/static/device_detail.js"></script>
+<script src="/static/self_saving_name.js?v=1"></script>
+<script src="/static/device_detail.js?v=1"></script>
 {% endblock %}

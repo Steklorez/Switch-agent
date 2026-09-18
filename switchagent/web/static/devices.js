@@ -6,77 +6,19 @@
 (function () {
   "use strict";
 
-  // -- rename: no Save button, the field saves itself ------------------------
-  // Debounced while typing, plus an immediate save on blur and on Enter, so
-  // a name is never left unsaved just because the field still has focus.
-  // Every path funnels through save(), which no-ops when the value has not
-  // actually changed -- so blur right after a debounced save sends nothing.
-  // A short inline status replaces the button as the only feedback the user
-  // gets; a failure stays on screen (unlike "Saved", which fades) because
-  // with no button to re-click, an unnoticed failure would look like a
-  // silently lost name.
-
-  const RENAME_DEBOUNCE_MS = 700;
-  const SAVED_VISIBLE_MS = 1800;
+  // -- rename: no Save button, the field saves itself ----------------------
+  // The whole behaviour (debounce, blur, Enter, status) lives in
+  // self_saving_name.js, shared with the Device Details page.
 
   document.querySelectorAll(".device-rename-form").forEach((form) => {
-    const input = form.querySelector("input[name=friendly_name]");
-    const status = form.querySelector(".device-rename-status");
-    let savedValue = input.value;
-    let debounceTimer = null;
-    let fadeTimer = null;
-
-    function showStatus(text, failed) {
-      if (!status) return;
-      window.clearTimeout(fadeTimer);
-      status.textContent = text;
-      status.classList.toggle("failed", Boolean(failed));
-      status.classList.add("visible");
-      if (!failed) {
-        fadeTimer = window.setTimeout(() => status.classList.remove("visible"), SAVED_VISIBLE_MS);
-      }
-    }
-
-    async function save() {
-      window.clearTimeout(debounceTimer);
-      const value = input.value;
-      if (value === savedValue) return;
-      try {
-        // The raw device_id embeds the device's USB descriptor path (can
-        // contain '#', '&', ...) -- unencoded, a literal '#' is read as a
-        // URL fragment and silently truncates the path before it ever
-        // reaches the server, so the device_id the server sees never
-        // matches any row (device_detail.js already encodes its own
-        // fingerprint-addressed URLs for the same reason).
-        const url = `/api/devices/${encodeURIComponent(form.dataset.deviceId)}/rename`;
-        const res = await fetch(url, {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ friendly_name: value || null }),
-        });
-        if (!res.ok) {
-          // savedValue is deliberately NOT updated -- the next blur retries.
-          showStatus("Not saved", true);
-          return;
-        }
-        savedValue = value;
-        showStatus("Saved", false);
-      } catch (e) {
-        showStatus("Not saved", true);
-      }
-    }
-
-    input.addEventListener("input", () => {
-      window.clearTimeout(debounceTimer);
-      debounceTimer = window.setTimeout(save, RENAME_DEBOUNCE_MS);
-    });
-    input.addEventListener("blur", save);
-    // The form has no submit button any more; Enter in a lone text input
-    // still submits it, and that should mean "save now", not navigate.
-    form.addEventListener("submit", (evt) => {
-      evt.preventDefault();
-      save();
-    });
+    // The raw device_id embeds the device's USB descriptor path (can
+    // contain '#', '&', ...) -- unencoded, a literal '#' is read as a
+    // URL fragment and silently truncates the path before it ever
+    // reaches the server, so the device_id the server sees never
+    // matches any row (device_detail.js already encodes its own
+    // fingerprint-addressed URLs for the same reason).
+    const url = `/api/devices/${encodeURIComponent(form.dataset.deviceId)}/rename`;
+    window.SwitchAgent.attachSelfSavingName(form, url);
   });
 
   // -- the corner ×: erase SwitchAgent's own memory of a device it has seen --
