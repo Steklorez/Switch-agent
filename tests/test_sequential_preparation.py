@@ -2,7 +2,7 @@ import pytest
 
 from switchagent import config, db, manifest, work_cleanup
 from switchagent.web import services
-from switchagent.web.preparation import PreparationQueue
+from switchagent.web.preparation import PreparationQueue, _group_by_title
 
 
 def setup_sequence(tmp_path, monkeypatch, *, fail=False):
@@ -255,3 +255,42 @@ def test_continue_chain_does_nothing_when_nothing_is_left_after_the_resolved_ite
     queue.continue_chain(999)
 
     assert submitted == []
+
+
+# ---------------------------------------------------------------------------
+# _group_by_title: Base must always come before Update/DLC before Mod,
+# regardless of what order the items were actually submitted in -- the
+# Library page's selection order is click order, not install order (see
+# library.js's Array.from(selected.keys())), so this can never be assumed
+# to already be correct.
+# ---------------------------------------------------------------------------
+
+def _seed_variant(conn, *, title_id, content_type='GAME_PACKAGE'):
+    import uuid
+    kwargs = dict(
+        conn=conn, absolute_path=f'/lib/{uuid.uuid4().hex}.nsp', item_type='FILE', file_type='NSP',
+        size=1, mtime=0.0, content_hash=None, title_id=title_id, title_id_source='filename',
+        status='AVAILABLE', suggested_action='INSTALL_VIA_DBI', suggested_target='SD_INSTALL',
+        content_type=content_type,
+    )
+    if content_type == 'ATMOSPHERE_MOD':
+        kwargs.update(item_type='MOD_FOLDER', file_type='ATMOSPHERE_MOD',
+                      suggested_action='COPY_MERGE', suggested_target='SD_CARD')
+    return db.upsert_library_item(**kwargs)
+
+
+def test_group_by_title_reorders_base_first_regardless_of_submission_order(tmp_path):
+    queue = PreparationQueue(tmp_path / 'test.db')
+    with db.open_db(queue.db_path) as conn:
+        base_id = _seed_variant(conn, title_id='0100000000010000')
+        update_id = _seed_variant(conn, title_id='0100000000010800')
+        mod_id = _seed_variant(conn, title_id='0100000000010000', content_type='ATMOSPHERE_MOD')
+        other_base_id = _seed_variant(conn, title_id='0100000000020000')
+
+        # Deliberately submitted in the WRONG order (mod, update, base) --
+        # exactly what a user clicking cards in visual/random order would
+        # produce -- interleaved with an unrelated, independent game.
+        chains = _group_by_title(conn, [mod_id, other_base_id, update_id, base_id])
+
+    assert chains['0100000000010000'] == [base_id, update_id, mod_id]
+    assert chains['0100000000020000'] == [other_base_id]

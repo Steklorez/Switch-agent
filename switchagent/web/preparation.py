@@ -50,25 +50,54 @@ def remove_extraction(path):
         shutil.rmtree(path)
 
 
+_VARIANT_RANK = {'BASE': 0, 'UPDATE': 1, 'DLC': 1, 'MOD': 2}
+
+
+def _variant_rank(row) -> int:
+    """Where an item belongs within its own chain -- Base first, then
+    Update/DLC, then Mods -- regardless of what order the user happened
+    to select/submit them in. The Library page's selection order is
+    click order, not install order (Array.from(selected.keys()) in
+    library.js), so this must never be assumed to already be correct;
+    _group_by_title() below always re-sorts by this before returning."""
+    if row is None:
+        return 1
+    from ..model import ContentType
+    if row['content_type'] == ContentType.ATMOSPHERE_MOD.value:
+        return _VARIANT_RANK['MOD']
+    from .. import title_id as title_id_mod
+    try:
+        variant = title_id_mod.classify_title_variant(row['title_id']).variant
+    except (ValueError, TypeError, AttributeError):
+        return 1
+    return _VARIANT_RANK.get(variant, 1)
+
+
 def _group_by_title(conn, item_ids):
-    """Groups item_ids into per-title "chains", preserving each item's
-    original relative order within its chain. Items sharing a
+    """Groups item_ids into per-title "chains". Items sharing a
     base_title_id (base/update/DLC/mods for the same game -- see
     services.family_base_title_id) form one chain and are attempted
-    strictly in that order: a later item in the SAME chain is never even
-    attempted while an earlier one hasn't resolved -- by explicit
-    request, an Update must never install ahead of its own Base. An item
-    with no determinable title_id gets its own singleton chain, fully
+    strictly Base, then Update/DLC, then Mods (see _variant_rank) --
+    NEVER just the order they happened to be submitted in -- a later
+    item in the SAME chain is never even attempted while an earlier one
+    hasn't resolved: by explicit request, an Update must never install
+    ahead of its own Base. Ties (e.g. two mods) keep their original
+    relative submission order (stable sort). An item with no
+    determinable title_id gets its own singleton chain, fully
     independent of everything else. Chains themselves are independent of
     each other: one game stuck waiting for a decision never blocks a
     different game in the same batch (see _install_sequentially)."""
     from .services import family_base_title_id
     chains: dict = {}
+    rows_by_id = {}
     for item_id in item_ids:
         row = db.get_library_item_by_id(conn, item_id)
+        rows_by_id[item_id] = row
         family = family_base_title_id(row['title_id']) if row else None
         key = family if family is not None else f'item-{item_id}'
         chains.setdefault(key, []).append(item_id)
+    for key, ids in chains.items():
+        ids.sort(key=lambda item_id: _variant_rank(rows_by_id[item_id]))
     return chains
 
 
