@@ -54,7 +54,7 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
-from typing import Optional
+from typing import Callable, Optional
 
 
 class TransferStatus(str, Enum):
@@ -189,8 +189,16 @@ class MtpBackend(ABC):
     @abstractmethod
     def send_file(
         self, storage: str, dest_path: str, source_path: Path, *, overwrite: bool = False,
+        progress: Optional[Callable[[int, int], None]] = None,
     ) -> TransferResult:
-        """Sends exactly one local file to storage:dest_path. The parent
+        """Sends exactly one local file to storage:dest_path.
+
+        `progress(bytes_sent, bytes_total)` is optional in both directions: a
+        caller need not pass one, and a backend that cannot observe its own
+        transfer mid-flight (the Shell copy engine cannot) simply never calls
+        it. A backend that does call it must do so from the calling thread,
+        while send_file is still running, and must not call it so often that
+        the callback's own cost matters -- roughly once a second. The parent
         directory of dest_path must already exist (call ensure_directory
         first) -- raises DestinationNotFoundError otherwise, it does not
         create it implicitly.

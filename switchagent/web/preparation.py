@@ -278,7 +278,24 @@ class PreparationQueue:
         meantime. Once the user DOES resolve it (via the ordinary
         Override/Retry/Skip job actions, a completely separate code
         path), PreparationQueue.continue_chain() is what picks the rest
-        of that chain back up, as a brand new run."""
+        of that chain back up, as a brand new run.
+
+        Preparing one item AHEAD (2026-09-18): extracting an archive,
+        staging its payload and hashing it are disk/CPU work that has
+        nothing to do with the USB cable, yet this loop used to do all of
+        it only after the previous item had finished transferring -- so a
+        multi-game batch spent the console's idle time doing nothing and
+        the PC's idle time doing nothing, alternately. The next item is now
+        prepared on a background thread while the current one transfers.
+
+        What that deliberately does NOT change: a prepared-ahead item's
+        jobs are created PENDING_CONFIRM and are confirmed -- i.e. become
+        visible to the worker at all -- only when its turn actually
+        arrives, in the same order as before. So "an Update never installs
+        ahead of its own Base" still holds by construction, and an item
+        whose chain turns out to be blocked is abandoned with its staged
+        payload released (_abandon_prepared below), never quietly
+        installed because it happened to be ready early."""
         from .services import create_and_confirm_jobs
         from ..work_cleanup import cleanup_batch_if_all_done
         from ..manifest import batch_work_dir
@@ -292,98 +309,238 @@ class PreparationQueue:
                 old.unlink()
         result = {'created': [], 'errors': [], 'batch_id': None, 'blocked': []}
         item_id = None
+        order = [(chain_key, member_id) for chain_key, ids in chains.items() for member_id in ids]
+        blocked_chains = set()
+        lookahead = None
         with (log_dir / f'install-{task_id}.log').open('w', encoding='utf-8') as log:
             def record(**fields):
                 log.write(json.dumps({'time': db.now_iso(), **fields}, ensure_ascii=False) + '\n')
                 log.flush()
+
+            def check_still_running():
+                if self.stop.is_set():
+                    raise RuntimeError('Application stopped; remaining items were not prepared')
+                with self.lock:
+                    cleared = task_id not in self.states
+                if cleared:
+                    # clear_for_device() removed this run's own state (the
+                    # target device's connection state changed mid-run) --
+                    # update() would already silently no-op from here on, but
+                    # stop doing any further real work (creating jobs,
+                    # polling) too, not just the UI updates.
+                    raise RuntimeError(
+                        'Preparation cleared (device connection changed); remaining items were not prepared',
+                    )
+
+            def progress_for(member_id):
+                def preparing(item_id=None, **fields):
+                    if fields.get('phase') == 'Ready':
+                        fields['phase'] = 'Prepared'
+                    update(item_id=item_id if item_id is not None else member_id, **fields)
+                return preparing
+
+            def prepare(member_id, own_conn):
+                """Everything slow about an item: extraction, staging and the
+                manifest hash. Never confirms -- see this method's docstring."""
+                return create_and_confirm_jobs(
+                    own_conn, [member_id], target, progress=progress_for(member_id), confirm=False,
+                )
+
+            def start_lookahead(next_index):
+                """Prepares order[next_index] on its own thread, with its own
+                DB connection (a sqlite3.Connection is used by one caller at a
+                time by convention here -- see db.get_connection).
+
+                Returns None -- i.e. keeps the old strictly-sequential
+                behaviour -- for an item that has to be EXTRACTED first. Two
+                archives' payloads must never be unpacked into work/ at the
+                same time: an archive is allowed to produce up to
+                config.extraction.max_extracted_size_bytes (~37 GiB by
+                default), and "the previous archive's payload is gone before
+                the next one is extracted" is a deliberate, separately-tested
+                guarantee (test_hotfix_reconciliation.py, plus the cleanup
+                assertion at the bottom of this loop). Nothing else needs
+                workspace at all: a bare package file or mod folder under a
+                scanned root is never copied, only hashed in place (see
+                manifest._build_package_files), which is exactly the work
+                worth overlapping."""
+                if next_index >= len(order):
+                    return None
+                next_chain, next_item = order[next_index]
+                if next_chain in blocked_chains:
+                    return None
+                next_row = db.get_library_item_by_id(conn, next_item)
+                if next_row is None:
+                    return None
+                if Path(next_row['absolute_path']).suffix.lower() in config.ARCHIVE_EXTENSIONS:
+                    record(event='Not prepared ahead: needs extraction, and only one archive is '
+                                 'unpacked at a time', item=next_item, chain=next_chain)
+                    return None
+                state = {'index': next_index, 'item_id': next_item, 'chain_key': next_chain,
+                         'part': None, 'error': None}
+                record(event='Preparing', item=next_item, chain=next_chain, ahead=True)
+
+                def run_ahead():
+                    try:
+                        with db.open_db(self.db_path) as ahead_conn:
+                            state['part'] = prepare(next_item, ahead_conn)
+                    except Exception as exc:  # noqa: BLE001 -- re-raised on the main thread below
+                        state['error'] = exc
+
+                state['thread'] = threading.Thread(
+                    target=run_ahead, name='switchagent-preparation-ahead', daemon=False,
+                )
+                state['thread'].start()
+                return state
+
+            def collect(state):
+                state['thread'].join()
+                if state['error'] is not None:
+                    raise state['error']
+                return state['part']
+
+            def abandon_prepared(state, reason):
+                """A prepared-ahead item whose turn never came (its chain got
+                blocked, or the run stopped). Its jobs were never confirmed,
+                so nothing has been sent and nothing can be: mark them
+                abandoned for the record and release the staged payload."""
+                try:
+                    part = collect(state)
+                except Exception:  # noqa: BLE001 -- it never became a job; nothing to unwind
+                    record(event='Discarded a prepared-ahead item that had failed to prepare',
+                           item=state['item_id'], chain=state['chain_key'])
+                    return
+                batch = part.get('batch_id') if part else None
+                if batch is None:
+                    return
+                conn.execute(
+                    "UPDATE jobs SET status='FAILED', abandoned=1, error=? WHERE batch_id=? AND status='PENDING_CONFIRM'",
+                    (reason, batch),
+                )
+                conn.commit()
+                cleanup_batch_if_all_done(conn, batch)
+                # Back to "Waiting", never "Failed": preparing this item early
+                # was OUR optimisation, and undoing it must leave exactly the
+                # state the strictly-sequential loop would have left -- an
+                # item that simply never started. For the common reason
+                # (an earlier item of the same game hit a conflict) the item
+                # genuinely is still waiting: resolving that conflict resumes
+                # this chain through continue_chain(), which prepares it
+                # again from scratch.
+                update(item_id=state['item_id'], phase='Waiting', error=None)
+                record(event='Abandoned a prepared-ahead item', item=state['item_id'],
+                       chain=state['chain_key'], reason=reason)
+
             record(event='Install started', items=item_ids, chains=chains)
             try:
-                for chain_key, chain_item_ids in chains.items():
-                    for item_id in chain_item_ids:
-                        if self.stop.is_set():
+                for index, (chain_key, item_id) in enumerate(order):
+                    if chain_key in blocked_chains:
+                        continue
+                    check_still_running()
+
+                    if lookahead is not None and lookahead['index'] == index:
+                        part = collect(lookahead)
+                        lookahead = None
+                    else:
+                        if lookahead is not None:
+                            abandon_prepared(lookahead, 'Its game was already resolved another way')
+                            lookahead = None
+                        record(event='Preparing', item=item_id, chain=chain_key)
+                        part = prepare(item_id, conn)
+
+                    result['created'].extend(part['created'])
+                    result['errors'].extend(part['errors'])
+                    result['batch_id'] = part['batch_id']
+                    update(item_id=item_id, job_ids=[j['job_id'] for j in part['created']])
+                    record(event='Prepared', result=part, chain=chain_key)
+                    if part['errors']:
+                        # This ONE item's own preparation failed (bad
+                        # archive, out of space, ...) -- there's no job here
+                        # to Override/Skip, so unlike a stuck job below, this
+                        # chain simply moves on to its own next item rather
+                        # than deferring.
+                        update(item_id=item_id, phase='Failed',
+                               error='; '.join(e['error'] for e in part['errors']))
+                        continue
+                    batch = part['batch_id']
+                    if batch is None:
+                        continue
+
+                    # Only now does the worker get to see this item at all.
+                    for entry in part['created']:
+                        db.confirm_job(conn, entry['job_id'])
+                    update(item_id=item_id, phase='Installing')
+
+                    # The console is busy from here on; use that time to get
+                    # the next game's bytes ready on disk.
+                    if lookahead is None:
+                        lookahead = start_lookahead(index + 1)
+
+                    previous = None
+                    blocked_here = False
+                    while True:
+                        jobs = db.list_jobs_by_batch(conn, batch)
+                        statuses = [(j['id'], j['status'], j['error']) for j in jobs]
+                        if statuses != previous:
+                            record(event='Jobs', jobs=statuses, chain=chain_key)
+                            previous = statuses
+                        # Every status a job can get stuck in without ever
+                        # reaching DONE/DONE_UNVERIFIED on its own -- kept in
+                        # sync with services._RETRYABLE_JOB_STATUSES (the
+                        # canonical "needs a user action" set) plus CANCELLED
+                        # (dead status string, never actually set, kept here
+                        # defensively) and WAITING_FOR_BASE (this run's own
+                        # item racing a DIFFERENT outstanding base job).
+                        if any(j['status'] in (
+                            'FAILED', 'INTERRUPTED', 'CANCELLED', 'WAITING_FOR_BASE',
+                            'DESTINATION_CONFLICT', 'SOURCE_CHANGED', 'DEVICE_UNAVAILABLE', 'BLOCKED_BY_DEPENDENCY',
+                        ) for j in jobs):
+                            blocked_here = True
+                            break
+                        if jobs and all(j['status'] in ('DONE', 'DONE_UNVERIFIED') for j in jobs):
+                            break
+                        if self.stop.wait(.5):
                             raise RuntimeError('Application stopped; remaining items were not prepared')
                         with self.lock:
-                            cleared = task_id not in self.states
-                        if cleared:
-                            # clear_for_device() removed this run's own
-                            # state (the target device's connection state
-                            # changed mid-run) -- update() would already
-                            # silently no-op from here on, but stop doing
-                            # any further real work (creating jobs,
-                            # polling) too, not just the UI updates.
-                            raise RuntimeError('Preparation cleared (device connection changed); remaining items were not prepared')
-                        record(event='Preparing', item=item_id, chain=chain_key)
-                        def preparing(item_id=None, **fields):
-                            if fields.get('phase') == 'Ready':
-                                fields['phase'] = 'Prepared'
-                            update(item_id=item_id, **fields)
-                        part = create_and_confirm_jobs(conn, [item_id], target, progress=preparing)
-                        result['created'].extend(part['created'])
-                        result['errors'].extend(part['errors'])
-                        result['batch_id'] = part['batch_id']
-                        update(item_id=item_id, job_ids=[j['job_id'] for j in part['created']])
-                        record(event='Prepared', result=part, chain=chain_key)
-                        if part['errors']:
-                            # This ONE item's own preparation failed (bad
-                            # archive, out of space, ...) -- there's no
-                            # job here to Override/Skip, so unlike a
-                            # stuck job below, this chain simply moves on
-                            # to its own next item rather than deferring.
-                            update(item_id=item_id, phase='Failed',
-                                   error='; '.join(e['error'] for e in part['errors']))
-                            continue
-                        batch = part['batch_id']
-                        if batch is None:
-                            continue
-                        update(item_id=item_id, phase='Installing')
-                        previous = None
-                        blocked_here = False
-                        while True:
-                            jobs = db.list_jobs_by_batch(conn, batch)
-                            statuses = [(j['id'], j['status'], j['error']) for j in jobs]
-                            if statuses != previous:
-                                record(event='Jobs', jobs=statuses, chain=chain_key)
-                                previous = statuses
-                            # Every status a job can get stuck in without ever
-                            # reaching DONE/DONE_UNVERIFIED on its own -- kept in
-                            # sync with services._RETRYABLE_JOB_STATUSES (the
-                            # canonical "needs a user action" set) plus CANCELLED
-                            # (dead status string, never actually set, kept here
-                            # defensively) and WAITING_FOR_BASE (this run's own
-                            # item racing a DIFFERENT outstanding base job).
-                            if any(j['status'] in (
-                                'FAILED', 'INTERRUPTED', 'CANCELLED', 'WAITING_FOR_BASE',
-                                'DESTINATION_CONFLICT', 'SOURCE_CHANGED', 'DEVICE_UNAVAILABLE', 'BLOCKED_BY_DEPENDENCY',
-                            ) for j in jobs):
-                                blocked_here = True
-                                break
-                            if jobs and all(j['status'] in ('DONE', 'DONE_UNVERIFIED') for j in jobs):
-                                break
-                            if self.stop.wait(.5):
-                                raise RuntimeError('Application stopped; remaining items were not prepared')
-                            with self.lock:
-                                if task_id not in self.states:
-                                    raise RuntimeError(
-                                        'Preparation cleared (device connection changed); '
-                                        'remaining items were not prepared',
-                                    )
-                        if blocked_here:
-                            update(item_id=item_id, phase='Failed',
-                                   error='Needs your action -- see the job above (Override/Retry/Skip)')
-                            result['blocked'].append(item_id)
-                            record(event='Blocked -- moving to the next independent game', item=item_id, chain=chain_key)
-                            break  # stop just THIS chain; the outer loop moves to the next one
-                        update(item_id=item_id, phase='Cleaning')
-                        cleanup_batch_if_all_done(conn, batch)
-                        if batch_work_dir(batch).exists():
-                            raise RuntimeError('Temporary payload cleanup failed; next archive was not extracted')
-                        update(item_id=item_id, phase='Ready')
-                        record(event='Installed and cleaned', item=item_id, chain=chain_key)
+                            if task_id not in self.states:
+                                raise RuntimeError(
+                                    'Preparation cleared (device connection changed); '
+                                    'remaining items were not prepared',
+                                )
+                    if blocked_here:
+                        update(item_id=item_id, phase='Failed',
+                               error='Needs your action -- see the job above (Override/Retry/Skip)')
+                        result['blocked'].append(item_id)
+                        blocked_chains.add(chain_key)
+                        record(event='Blocked -- moving to the next independent game', item=item_id, chain=chain_key)
+                        if lookahead is not None and lookahead['chain_key'] == chain_key:
+                            # Prepared while this item was still transferring,
+                            # and its own turn can no longer come: an Update
+                            # must never install ahead of the Base that just
+                            # stopped.
+                            abandon_prepared(
+                                lookahead, 'Not started: an earlier item of the same game needs your action',
+                            )
+                            lookahead = None
+                        continue  # stop just THIS chain; the outer loop moves to the next one
+                    update(item_id=item_id, phase='Cleaning')
+                    cleanup_batch_if_all_done(conn, batch)
+                    if batch_work_dir(batch).exists():
+                        raise RuntimeError('Temporary payload cleanup failed; next archive was not extracted')
+                    update(item_id=item_id, phase='Ready')
+                    record(event='Installed and cleaned', item=item_id, chain=chain_key)
             except Exception as exc:
+                if lookahead is not None:
+                    abandon_prepared(lookahead, f'Not started: {exc}')
+                    lookahead = None
                 if item_id is not None:
                     update(item_id=item_id, phase='Failed', error=str(exc))
                 record(event='Stopped', error=str(exc))
                 raise
+            finally:
+                if lookahead is not None:
+                    abandon_prepared(lookahead, 'Not started: nothing left in this batch to install it after')
+                    lookahead = None
             record(event='Install finished', errors=result['errors'], blocked=result['blocked'])
         return result
 

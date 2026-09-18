@@ -27,6 +27,7 @@ never by asking the device to prove it.
 from __future__ import annotations
 
 import json
+import os
 import shutil
 from dataclasses import dataclass
 from pathlib import Path
@@ -52,6 +53,10 @@ class ManifestFile:
     size: int
     sha256: str
     source_root: Optional[str] = None
+    # os.stat().st_mtime_ns of the source at the moment it was hashed. Used
+    # by verify_manifest_against_source() as a cheap drift detector; None on
+    # manifests frozen before this field existed, which simply re-hash.
+    mtime_ns: Optional[int] = None
 
 
 @dataclass(frozen=True)
@@ -82,6 +87,7 @@ class Manifest:
                     "size": f.size,
                     "sha256": f.sha256,
                     "source_root": f.source_root,
+                    "mtime_ns": f.mtime_ns,
                 }
                 for f in self.files
             ],
@@ -194,10 +200,12 @@ def _build_package_files(report: PreviewReport, payload_dir: Path) -> list[Manif
             raise ManifestError(f"expected package file not found on disk: {source_path}")
         source_kind, root = _classify_bare_source_root(source_path)
         rel = source_path.relative_to(root).as_posix()
+        stat = source_path.stat()
         return [ManifestFile(
             dest_relative_path=source_path.name, source_kind=source_kind, source_relative_path=rel,
-            size=source_path.stat().st_size, sha256=sha256_file(source_path),
+            size=stat.st_size, sha256=sha256_file(source_path),
             source_root=str(root) if source_kind == "library" else None,
+            mtime_ns=stat.st_mtime_ns,
         )]
 
     if report.work_dir is None:
@@ -219,9 +227,10 @@ def _build_package_files(report: PreviewReport, payload_dir: Path) -> list[Manif
     # extraction dir (report.work_dir), never read again once frozen here --
     # copying would leave the SAME bytes on disk twice for no reason.
     shutil.move(str(extracted), str(frozen))
+    frozen_stat = frozen.stat()
     return [ManifestFile(
         dest_relative_path=extracted.name, source_kind="frozen", source_relative_path=relative.as_posix(),
-        size=frozen.stat().st_size, sha256=sha256_file(frozen),
+        size=frozen_stat.st_size, sha256=sha256_file(frozen), mtime_ns=frozen_stat.st_mtime_ns,
     )]
 
 
@@ -260,10 +269,12 @@ def _build_mod_files(report: PreviewReport, payload_dir: Path) -> list[ManifestF
     for f in sorted((p for p in walk_root.rglob("*") if p.is_file()), key=lambda p: p.as_posix()):
         rel = f.relative_to(walk_root).as_posix()
         source_rel = f.relative_to(payload_dir).as_posix() if source_kind == "frozen" else f.relative_to(bare_root).as_posix()
+        file_stat = f.stat()
         files.append(ManifestFile(
             dest_relative_path=f"{base}/{rel}", source_kind=source_kind, source_relative_path=source_rel,
-            size=f.stat().st_size, sha256=sha256_file(f),
+            size=file_stat.st_size, sha256=sha256_file(f),
             source_root=str(bare_root) if source_kind == "library" else None,
+            mtime_ns=file_stat.st_mtime_ns,
         ))
     if not files:
         raise ManifestError(f"mod source has no files: {report.mod_source_dir}")
@@ -325,16 +336,44 @@ class ManifestMismatch:
 
 def verify_manifest_against_source(manifest: Manifest, job_id: int) -> Optional[ManifestMismatch]:
     """Re-checks every file the manifest expects against what is actually
-    there right now, before any device is touched. Size is checked before
-    the (more expensive) hash; either mismatching counts as "changed" --
-    this is the TOCTOU guard: content that drifted since job creation is
-    refused, never silently substituted."""
+    there right now, before any device is touched. This is the TOCTOU guard:
+    content that drifted since job creation is refused, never silently
+    substituted.
+
+    Drift is detected by (size, mtime_ns) -- the pair the filesystem itself
+    updates on any write -- and only a file whose stamp does NOT match what
+    was recorded when it was hashed gets a full SHA-256 recomputation. The
+    hash in the manifest is still the one this job pinned; nothing here
+    trusts a hash it did not compute itself.
+
+    Why this matters (measured 2026-09-18 on the real library): the source
+    was ALREADY hashed minutes earlier, by build_manifest_and_stage(), and
+    re-hashing it here put a second full read of the same bytes directly on
+    the wall-clock path between "user clicked Install" and "first byte
+    leaves the PC". At the 265 MB/s this machine's library drive sustains
+    that is 2 x 53s for a 13.8 GB game -- the jobs table shows exactly that
+    shape, created->started of 21s for 2.49 GB, 13s for 1.42 GB, 4s for
+    0.29 GB, i.e. twice the hash plus the worker's poll interval, every
+    single install.
+
+    A file rewritten in place with byte-identical size AND an unchanged
+    mtime would now pass without a hash. That requires deliberately
+    restoring the timestamp after modifying the file; ordinary editing,
+    re-downloading, copying or extracting all move mtime forward. Set
+    SWITCHAGENT_ALWAYS_REHASH=1 to force the full hash for every file
+    regardless -- the pre-2026-09-18 behaviour, kept for anyone who wants
+    that trade the other way round."""
+    always_rehash = os.environ.get("SWITCHAGENT_ALWAYS_REHASH") == "1"
     for file in manifest.files:
         path = resolve_source_path(file, job_id, batch_id=manifest.batch_id)
         if not path.is_file():
             return ManifestMismatch(file.dest_relative_path, "missing")
-        if path.stat().st_size != file.size:
+        stat = path.stat()
+        if stat.st_size != file.size:
             return ManifestMismatch(file.dest_relative_path, "changed")
+        unchanged_stamp = file.mtime_ns is not None and stat.st_mtime_ns == file.mtime_ns
+        if unchanged_stamp and not always_rehash:
+            continue
         if sha256_file(path) != file.sha256:
             return ManifestMismatch(file.dest_relative_path, "changed")
     return None

@@ -678,6 +678,19 @@ def _run_job_transfer(conn: sqlite3.Connection, backend: MtpBackend, job_row: sq
         try:
             backend.ensure_directory(storage, parent)
 
+            # Live byte counter for THIS file, on top of whatever earlier
+            # files of the same job already delivered. The WPD transport
+            # (switchagent/mtp/wpd.py) calls this about once a second while
+            # the bytes are actually moving; the Shell fallback cannot report
+            # anything mid-copy and simply never calls it, which is exactly
+            # the old behaviour. Runs on this same worker thread, inside
+            # send_file, so it shares this function's own DB connection
+            # safely.
+            def report_progress(sent: int, _total: int, _already: int = bytes_done) -> None:
+                db.update_job_status(
+                    conn, job_id, "RUNNING", last_progress_at=db.now_iso(), bytes_done=_already + sent,
+                )
+
             # W3-006 Override: force_overwrite is only ever true on a job
             # created by services.override_job(), the user's explicit
             # "Override" click on a DESTINATION_CONFLICT card -- for that
@@ -692,7 +705,7 @@ def _run_job_transfer(conn: sqlite3.Connection, backend: MtpBackend, job_row: sq
             # MTP round-trips this loop doesn't need.
             result = backend.send_file(
                 storage, file.dest_relative_path, source_path,
-                overwrite=bool(job_row["force_overwrite"]),
+                overwrite=bool(job_row["force_overwrite"]), progress=report_progress,
             )
         except FileAlreadyExistsError:
             # Exists on the device, but WE have no record (progress.json) of
