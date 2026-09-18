@@ -17,6 +17,36 @@
 (function () {
   "use strict";
 
+  // What a row installs, as a badge after its name. The same four role
+  // names and the same colour per kind as the install-confirmation dialog
+  // (library.js's CONFIRM_ROLE_LABELS, .confirm-tag-* in style.css), so an
+  // item looks the same in the dialog that queued it and in the Queue that
+  // runs it. No role -> no badge: the backend returns null whenever it
+  // cannot actually tell, and a guessed kind would be worse than none.
+  const ROLE_LABELS = { base: "Game", update: "Update", dlc: "DLC", mod: "Mod" };
+
+  function buildRoleTag(role) {
+    const label = ROLE_LABELS[role];
+    if (!label) return null;
+    const tag = document.createElement("span");
+    tag.className = "job-tag job-tag-" + role;
+    tag.textContent = "[" + label + "]";
+    return tag;
+  }
+
+  // Writes a row's name and (optionally) its badge, replacing whatever was
+  // there -- the live poll re-renders rows in place, so this has to be
+  // idempotent rather than appending.
+  function setRowName(holder, name, role) {
+    holder.replaceChildren();
+    const text = document.createElement("span");
+    text.className = "job-name-text";
+    text.textContent = name;
+    holder.appendChild(text);
+    const tag = buildRoleTag(role);
+    if (tag) holder.appendChild(tag);
+  }
+
   const jobList = document.getElementById("job-list");
   const emptyState = document.getElementById("empty-state");
   const toastContainer = document.getElementById("toast-container");
@@ -173,7 +203,7 @@
 
     li.innerHTML = `
       <div class="job-main">
-        <div class="job-name"></div>
+        <div class="job-name"><span class="job-name-text"></span></div>
         <div class="job-meta"></div>
         ${progressTextHtml}
         ${errorHtml}
@@ -186,7 +216,7 @@
       </div>
       <div class="job-actions">${retryBtn}${overrideBtn}${cancelBtn}</div>
     `;
-    li.querySelector(".job-name").textContent = j.display_name;
+    setRowName(li.querySelector(".job-name"), j.display_name, j.variant_role);
     li.querySelector(".job-meta").textContent = waitingForDevice
       ? `Waiting for ${j.target_device_label} to reconnect — resumes automatically`
       : `${j.target_device_label} · ${j.target_storage} · attempt ${j.attempt_count} · created ${j.created_at}`;
@@ -334,7 +364,9 @@
             for (const job of item.jobs) {
               represented.add(String(job.id));
               const row = renderJobRow(job);
-              row.querySelector('.job-name').textContent = item.jobs.length === 1 ? item.name : job.display_name;
+              setRowName(row.querySelector('.job-name'),
+                         item.jobs.length === 1 ? item.name : job.display_name,
+                         job.variant_role || item.role);
               if (item.phase === 'Cleaning') row.querySelector('.status-pill').textContent = 'Cleaning temporary files';
               box.appendChild(row);
             }
@@ -353,7 +385,14 @@
           line.dataset.status = neverStarted ? "Failed" : item.phase;
           line.classList.toggle("progress-active", ["Extracting", "Analyzing", "Installing", "Cleaning"].includes(item.phase));
           line.style.setProperty("--progress", item.phase === "Ready" ? "100%" : "0%");
-          line.textContent = `${item.name} — ${displayPhase}` + (item.error ? `: ${item.error}` : "");
+          // Built out of elements rather than one textContent write, so the
+          // badge can sit between the name and the phase -- same position
+          // as on a real job row above.
+          setRowName(line, item.name, item.role);
+          const phase = document.createElement("span");
+          phase.className = "preparation-phase";
+          phase.textContent = ` — ${displayPhase}` + (item.error ? `: ${item.error}` : "");
+          line.appendChild(phase);
           box.appendChild(line);
         }
         // state.error is a snapshot of why the sequential run stopped,

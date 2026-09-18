@@ -477,6 +477,7 @@ def resolve_library_item_display_name(
 
 def display_name_for_job(
     conn: sqlite3.Connection, job_row: sqlite3.Row, *, library_items: Optional[list] = None,
+    mod_suffix: bool = True,
 ) -> str:
     """Best-effort human-readable label for install_history -- derived from
     whichever source row this job came from (library_items or inbox_items,
@@ -494,16 +495,23 @@ def display_name_for_job(
     installs always target SD_INSTALL, see _target_storage_for) -- an
     unambiguous, already-available signal to append " -- Mod" with,
     baked into install_history.display_name at recording time (this same
-    function), not just a Queue-only display trick."""
+    function), not just a Queue-only display trick.
+
+    mod_suffix: pass False from a surface that already says "Mod" some
+    other way -- Queue rows carry a [Mod] badge now (see web/services.py's
+    _job_variant_role), and a row reading "Russian Language Mod — Mod
+    [Mod]" says it three times. History has no badge, so it keeps the
+    suffix and is the reason this is a parameter rather than a deletion."""
     if job_row["library_item_id"] is not None:
         row = db.get_library_item_by_id(conn, job_row["library_item_id"])
         if row is not None:
             name = resolve_library_item_display_name(conn, row, library_items=library_items)
-            return _with_mod_suffix(name, job_row)
+            return _with_mod_suffix(name, job_row) if mod_suffix else name
     if job_row["inbox_item_id"] is not None:
         row = db.get_inbox_item_by_id(conn, job_row["inbox_item_id"])
         if row is not None:
-            return _with_mod_suffix(Path(row["relative_path"]).name, job_row)
+            name = Path(row["relative_path"]).name
+            return _with_mod_suffix(name, job_row) if mod_suffix else name
     return f"job {job_row['id']}"
 
 
