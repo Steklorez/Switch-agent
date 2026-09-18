@@ -258,6 +258,25 @@ class WebContext:
             live_ids = {device.device_id for device in live}
             self._installed_games_cache = {key: value for key, value in self._installed_games_cache.items() if key in live_ids}
             self._installed_games_cache.update(installed_games_snapshot)
+
+        # By explicit request: a connection-state change in EITHER
+        # direction -- a device dropping OR a fresh connect (this
+        # includes the very first tick after app startup, indistinguishable
+        # from a fresh connect since previously_live starts empty) --
+        # invalidates whatever was queued against its previous session.
+        # See services.abandon_all_jobs_for_device()'s own docstring for
+        # why nothing survives except the permanent History record, and
+        # PreparationQueue.clear_for_device() for the in-memory half.
+        changed_ids = previously_live.symmetric_difference(live_ids)
+        if changed_ids:
+            from .services import abandon_all_jobs_for_device
+            for device_id in changed_ids:
+                reason = (
+                    "device connection changed (disconnected) -- queue cleared" if device_id not in live_ids
+                    else "device connection changed (connected) -- queue cleared"
+                )
+                abandon_all_jobs_for_device(conn, device_id, reason)
+                self.preparations.clear_for_device(device_id)
         return live
 
     def get_known_installed_title_ids(self) -> set[str]:

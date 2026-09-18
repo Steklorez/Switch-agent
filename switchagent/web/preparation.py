@@ -198,7 +198,16 @@ class PreparationQueue:
 
         def update(item_id=None, **fields):
             with self.lock:
-                state = self.states[task_id]
+                # None once clear_for_device() has removed this run's own
+                # state out from under it (device connection changed
+                # mid-run, see that method's docstring) -- a silent no-op,
+                # never a KeyError, since the background thread calling
+                # this has no other way to learn that's happened except
+                # by checking self.stop-style at its own next loop point
+                # (see _install_sequentially's own check).
+                state = self.states.get(task_id)
+                if state is None:
+                    return
                 if item_id is not None:
                     fields.pop('name', None)  # Keep the resolved family name, especially for mods.
                     state["items"][str(item_id)].update(fields)
@@ -281,6 +290,16 @@ class PreparationQueue:
                     for item_id in chain_item_ids:
                         if self.stop.is_set():
                             raise RuntimeError('Application stopped; remaining items were not prepared')
+                        with self.lock:
+                            cleared = task_id not in self.states
+                        if cleared:
+                            # clear_for_device() removed this run's own
+                            # state (the target device's connection state
+                            # changed mid-run) -- update() would already
+                            # silently no-op from here on, but stop doing
+                            # any further real work (creating jobs,
+                            # polling) too, not just the UI updates.
+                            raise RuntimeError('Preparation cleared (device connection changed); remaining items were not prepared')
                         record(event='Preparing', item=item_id, chain=chain_key)
                         def preparing(item_id=None, **fields):
                             if fields.get('phase') == 'Ready':
@@ -330,6 +349,12 @@ class PreparationQueue:
                                 break
                             if self.stop.wait(.5):
                                 raise RuntimeError('Application stopped; remaining items were not prepared')
+                            with self.lock:
+                                if task_id not in self.states:
+                                    raise RuntimeError(
+                                        'Preparation cleared (device connection changed); '
+                                        'remaining items were not prepared',
+                                    )
                         if blocked_here:
                             update(item_id=item_id, phase='Failed',
                                    error='Needs your action -- see the job above (Override/Retry/Skip)')
@@ -349,6 +374,21 @@ class PreparationQueue:
                 raise
             record(event='Install finished', errors=result['errors'], blocked=result['blocked'])
         return result
+
+    def clear_for_device(self, device_id: str) -> None:
+        """By explicit request: a device's connection-state change, in
+        EITHER direction, invalidates every preparation batch targeting
+        it -- called from WebContext.refresh_devices() alongside
+        services.abandon_all_jobs_for_device() (see its own docstring for
+        why nothing survives a connection-state change except the
+        permanent History record). Removing the state entry here is what
+        makes a currently-running _install_sequentially() actually stop
+        doing further work, not just stop being displayed -- see its own
+        `task_id not in self.states` checks, and update()'s matching
+        silent-no-op for the same reason."""
+        with self.lock:
+            for task_id in [tid for tid, state in self.states.items() if state.get('target') == device_id]:
+                del self.states[task_id]
 
     def continue_chain(self, resolved_job_id):
         """Called right after a job is successfully Overridden/Retried/

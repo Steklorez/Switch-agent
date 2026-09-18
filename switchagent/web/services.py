@@ -1510,6 +1510,69 @@ def override_job(conn, job_id: int) -> dict:
     return retry_job(conn, job_id, force_overwrite=True)
 
 
+def abandon_all_jobs_for_device(conn, device_id: str, reason: str) -> list[int]:
+    """By explicit request: a device's connection-state change, in
+    EITHER direction (disconnect OR a fresh connect -- including the
+    very first refresh_devices() tick after app startup, which looks
+    identical to a fresh connect), invalidates whatever was queued
+    against its previous session. Every one of this device's jobs that
+    hasn't reached DONE/DONE_UNVERIFIED yet is abandoned -- no attempt
+    to judge case by case whether a given job "should" survive; nothing
+    does except the permanent History record, exactly as cancel_job()
+    already treats a single abandoned attempt.
+
+    Unlike cancel_job(), this also covers RUNNING (and any other
+    non-terminal status) -- cancel_job() refuses those because a live
+    transfer can't be atomically stopped, but that reasoning doesn't
+    apply here: the device is already gone (or was never confirmed
+    reachable this session) by the time this runs, so there is nothing
+    left to stop.
+
+    _process_job() (queue_worker.py) is otherwise the ONLY writer of
+    install_history, and only ever runs once per job the first time it
+    reaches a recorded outcome -- a job already in one of those states
+    (DESTINATION_CONFLICT, FAILED, ...) already has its entry. A job
+    that never got that far (PENDING_CONFIRM/CONFIRMED/RUNNING/
+    WAITING_FOR_DEVICE/VERIFYING) never will now that this function is
+    abandoning it out from under _process_job -- so this records it
+    directly, the same shape _process_job itself would have."""
+    from ..work_cleanup import cleanup_batch_if_all_done
+
+    _ALREADY_RECORDED_STATUSES = (
+        "DESTINATION_CONFLICT", "FAILED", "INTERRUPTED", "SOURCE_CHANGED",
+        "DEVICE_UNAVAILABLE", "BLOCKED_BY_DEPENDENCY", "WAITING_FOR_BASE",
+    )
+    rows = conn.execute(
+        "SELECT * FROM jobs WHERE target_device_id=? AND status NOT IN ('DONE','DONE_UNVERIFIED') AND abandoned=0",
+        (device_id,),
+    ).fetchall()
+    abandoned_ids = []
+    for row in rows:
+        job_id = row["id"]
+        needs_history = row["status"] not in _ALREADY_RECORDED_STATUSES
+        db.update_job_status(conn, job_id, "FAILED", error=reason, finished_at=db.now_iso())
+        conn.execute("UPDATE jobs SET abandoned=1 WHERE id=?", (job_id,))
+        conn.commit()
+        db.log_job_event(conn, job_id, reason)
+        if needs_history:
+            try:
+                frozen = manifest_mod.load_manifest(job_id)
+                title_id, bytes_total = frozen.title_id, sum(f.size for f in frozen.files)
+            except (FileNotFoundError, ValueError, KeyError, TypeError):
+                title_id, bytes_total = None, None
+            db.record_install_history(
+                conn, job_id=job_id, title_id=title_id,
+                display_name=queue_worker.display_name_for_job(conn, row),
+                target_device_id=device_id, target_storage=row["target_storage"],
+                outcome="FAILED", error=reason, bytes_total=bytes_total,
+            )
+        cleanup_batch_if_all_done(conn, row["batch_id"])
+        if row["payload_batch_id"]:
+            cleanup_batch_if_all_done(conn, row["payload_batch_id"])
+        abandoned_ids.append(job_id)
+    return abandoned_ids
+
+
 def cancel_job(conn, job_id: int) -> None:
     row = db.get_job(conn, job_id)
     if row is None:
