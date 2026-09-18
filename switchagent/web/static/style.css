@@ -234,8 +234,26 @@ a { color: var(--accent); text-decoration: none; }
   cursor: pointer; padding: 8px 10px; color: var(--text-dim); list-style: none; min-height: 32px;
 }
 .game-variants summary::-webkit-details-marker { display: none; }
-.game-variants summary::before { content: "▸ "; }
-.game-variants[open] summary::before { content: "▾ "; }
+/* Disclosure chevron. Was a "▸" text glyph, which inherited summary's muted
+   colour and the font's own tiny glyph size -- easy to miss entirely on a
+   card whose pills are the eye-catching part. Drawn from two borders
+   instead, so it has a size and a colour of its own: accent-coloured,
+   clearly a control, and it rotates into a ▼ when the list opens rather
+   than swapping to a different character. inline-block because in the list
+   view summary is a plain block (in the tiles view it is a flex container,
+   where this is blockified anyway). */
+.game-variants summary::before {
+  content: ""; flex: none;
+  display: inline-block; vertical-align: middle;
+  width: 7px; height: 7px;
+  margin: -2px 4px 0 2px;
+  border-right: 2px solid var(--accent);
+  border-bottom: 2px solid var(--accent);
+  transform: rotate(-45deg);
+  transition: transform 0.18s ease, border-color 0.12s ease;
+}
+.game-variants[open] summary::before { transform: rotate(45deg); margin-top: -4px; }
+.game-variants summary:hover::before { border-color: var(--text); }
 
 .variant-row {
   display: flex; align-items: center; gap: 8px; padding: 6px 10px; border-top: 1px solid var(--border);

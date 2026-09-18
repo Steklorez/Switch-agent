@@ -1,6 +1,6 @@
 {% extends "base.html" %}
 {% block title %}Library — SwitchAgent{% endblock %}
-{% block styles %}<link rel="stylesheet" href="/static/card_motion.css?v=7">{% endblock %}
+{% block styles %}<link rel="stylesheet" href="/static/card_motion.css?v=8">{% endblock %}
 
 {# confirmed_on_device (DBI's own report) and the job-status pill
    (SwitchAgent's own copy record) can both be true at once for the exact
@@ -165,9 +165,9 @@
       </div>
       {% endif %}
       {% set extras_summary %}
-        <span class="extras-pill {{ 'extras-pill-empty' if not g.updates }}">{{ g.updates|length }} updates</span>
-        <span class="extras-pill {{ 'extras-pill-empty' if not g.dlc }}">{{ g.dlc|length }} DLC</span>
-        <span class="extras-pill {{ 'extras-pill-empty' if not g.mods }}">{{ g.mods|length }} mods</span>
+        <span class="extras-pill extras-pill-update {{ 'extras-pill-empty' if not g.updates }}">{{ g.updates|length }} updates</span>
+        <span class="extras-pill extras-pill-dlc {{ 'extras-pill-empty' if not g.dlc }}">{{ g.dlc|length }} DLC</span>
+        <span class="extras-pill extras-pill-mod {{ 'extras-pill-empty' if not g.mods }}">{{ g.mods|length }} mods</span>
         {% if g.duplicates %}<span class="extras-pill">{{ g.duplicates|length }} copies</span>{% endif %}
       {% endset %}
       {% if g.updates or g.dlc or g.mods or g.duplicates %}
