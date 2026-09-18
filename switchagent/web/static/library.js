@@ -40,13 +40,14 @@
     let newSpaceSize = 0;
     selected.forEach((v) => {
       totalSize += v.size;
-      // A confirmed-on-device item already exists at its destination path,
-      // and installs never overwrite an existing file (see the confirm
-      // modal's own "existing files are never replaced" notice) -- (re)
-      // installing it is a no-op transfer-wise, so it shouldn't count
-      // toward "space this selection is about to add" even though it
+      // An item with an existing copy at its destination (confirmed on
+      // device, or SwitchAgent's own record shows a completed transfer)
+      // -- installs never overwrite an existing file (see the confirm
+      // modal's own "existing files are never replaced" notice), so
+      // (re)selecting it is a no-op transfer-wise and shouldn't count
+      // toward "space this selection is about to add", even though it
       // still counts toward the plain total shown just below.
-      if (!v.confirmedOnDevice) newSpaceSize += v.size;
+      if (!v.existingCopy) newSpaceSize += v.size;
     });
     selectionSize.textContent = formatBytes(totalSize);
     selectionBar.hidden = n === 0;
@@ -166,7 +167,7 @@
           familyName: box.dataset.familyName || null,
           family: box.dataset.family || null,
           coverId: box.dataset.coverId || box.dataset.family || "",
-          confirmedOnDevice: box.dataset.confirmedOnDevice === "1",
+          existingCopy: box.dataset.existingCopy === "1",
         });
       } else {
         selected.delete(id);

@@ -29,7 +29,7 @@
     <input type="checkbox" class="select-box" value="{{ e.id }}" data-name="{{ e.name }}"
            data-size="{{ e.size }}" data-destination="{{ destination_label(e) }}"
            data-cover-id="{{ view.base_title_id }}"
-           data-confirmed-on-device="{{ '1' if e.confirmed_on_device else '' }}"
+           data-existing-copy="{{ '1' if (e.confirmed_on_device or e.status in ('INSTALLED', 'INSTALLED_UNVERIFIED')) else '' }}"
            data-family="{{ view.base_title_id }}" data-family-name="{{ view.name }}"{% if role %} data-role="{{ role }}"{% endif %}
            {{ "disabled" if e.status not in ("AVAILABLE",) }}>
   </td>

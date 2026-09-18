@@ -43,7 +43,7 @@
     <input type="checkbox" class="select-box" value="{{ e.id }}" data-name="{{ e.name }}"
            data-size="{{ e.size }}" data-destination="{{ destination_label(e) }}"
            data-cover-id="{{ family or e.base_title_id or '' }}"
-           data-confirmed-on-device="{{ '1' if e.confirmed_on_device else '' }}"
+           data-existing-copy="{{ '1' if (e.confirmed_on_device or e.status in ('INSTALLED', 'INSTALLED_UNVERIFIED')) else '' }}"
            {% if family %}data-family="{{ family }}" data-role="base" data-family-name="{{ family_name }}"{% endif %}
            {{ "disabled" if not e.can_install }}>
   </label>
@@ -61,7 +61,7 @@
   <input type="checkbox" class="select-box" value="{{ e.id }}" data-name="{{ e.name }}"
          data-size="{{ e.size }}" data-destination="{{ destination_label(e) }}"
          data-cover-id="{{ family or '' }}"
-         data-confirmed-on-device="{{ '1' if e.confirmed_on_device else '' }}"
+         data-existing-copy="{{ '1' if (e.confirmed_on_device or e.status in ('INSTALLED', 'INSTALLED_UNVERIFIED')) else '' }}"
          {% if family %}data-family="{{ family }}" data-role="{{ role }}" data-family-name="{{ family_name }}"{% endif %}
          {{ "disabled" if not e.can_install }}>
   <div class="variant-body card-body" data-detail-url="/api/library/{{ e.id }}">
