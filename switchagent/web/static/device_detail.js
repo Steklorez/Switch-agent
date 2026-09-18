@@ -22,32 +22,29 @@
   if (!fingerprintEl) return;
   const fingerprint = fingerprintEl.textContent.trim();
 
-  // -- rename ---------------------------------------------------------------
+  // -- rename: no Rename button, the field saves itself ---------------------
+  // Same shared behaviour as the Devices list (self_saving_name.js), posting
+  // to the fingerprint-addressed route this page uses for everything.
 
   const renameForm = document.getElementById("device-rename-form");
   if (renameForm) {
-    renameForm.addEventListener("submit", async (evt) => {
-      evt.preventDefault();
-      const input = renameForm.querySelector("input[name=friendly_name]");
-      const btn = renameForm.querySelector("button");
-      btn.disabled = true;
-      try {
-        const res = await fetch(`/api/devices/by-fingerprint/${encodeURIComponent(fingerprint)}/rename`, {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ friendly_name: input.value || null }),
-        });
-        if (!res.ok) {
-          alert("Could not rename device.");
-          return;
-        }
-        window.location.reload();
-      } catch (e) {
-        alert("Request failed: " + e);
-      } finally {
-        btn.disabled = false;
+    const input = renameForm.querySelector("input[name=friendly_name]");
+    window.SwitchAgent.attachSelfSavingName(
+      renameForm,
+      `/api/devices/by-fingerprint/${encodeURIComponent(fingerprint)}/rename`,
+      (value) => {
+        // Unlike the list page, this one renders the name in three places.
+        // The old Rename button reloaded the page to resync them; resync
+        // them in place instead, so they can never disagree with the field
+        // the user just typed in.
+        const shown = value || input.placeholder;
+        const heading = document.getElementById("device-display-name");
+        const cell = document.getElementById("device-friendly-name");
+        if (heading) heading.textContent = shown;
+        if (cell) cell.textContent = value || "— (not set)";
+        document.title = `${shown} — SwitchAgent`;
       }
-    });
+    );
   }
 
   // -- storage mapping --------------------------------------------------------
