@@ -1258,6 +1258,35 @@ def list_devices(conn: sqlite3.Connection) -> list[sqlite3.Row]:
     return conn.execute("SELECT * FROM devices ORDER BY last_seen_at DESC").fetchall()
 
 
+def forget_device(conn: sqlite3.Connection, device_id: str) -> bool:
+    """Erase SwitchAgent's own memory of one device identity: its `devices`
+    row, its MANUAL storage mappings (device_storage_mappings) and its
+    cached DBI installed-title list (device_installed_titles). Returns
+    False if no such row existed -- never invents one, same rule as
+    set_device_friendly_name().
+
+    Deliberately does NOT touch jobs / install_history /
+    installation_batches. Those record what actually happened, and
+    rewriting them so a Devices row disappears cleanly would be a lie
+    about this app's own past. Nothing breaks by leaving them: an
+    orphaned target_device_id is exactly the case web/services.py's
+    device_label() already handles, falling back to the safe fingerprint.
+
+    "Forget" is not "blocklist": if that same device is ever plugged in
+    again, refresh_devices() -> upsert_device_seen() records it anew, with
+    a fresh first_seen_at and no friendly_name. Callers are responsible
+    for refusing to forget something still in use (a connected device,
+    a device with unfinished queue work) -- see services.forget_device().
+    """
+    if get_device(conn, device_id) is None:
+        return False
+    conn.execute("DELETE FROM device_storage_mappings WHERE device_id = ?", (device_id,))
+    conn.execute("DELETE FROM device_installed_titles WHERE device_id = ?", (device_id,))
+    conn.execute("DELETE FROM devices WHERE device_id = ?", (device_id,))
+    conn.commit()
+    return True
+
+
 # ---------------------------------------------------------------------------
 # install_history -- append-only record of terminal job outcomes. See
 # queue_worker.py::_process_job() for the (only) writer.
