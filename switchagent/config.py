@@ -44,6 +44,37 @@ CONFIG_YAML_PATH = APP_DATA_ROOT / "config.yaml"
 
 DB_PATH = DATA_DIR / "switchagent.db"
 
+# Mock mode's OWN database, never the one above. Real incident (2026-09-17):
+# a freshly built dist\SwitchAgent\SwitchAgent.exe was launched by hand in
+# mock mode to eyeball the UI. dist/ carries no portable.flag, so
+# paths.runtime_mode() correctly reported "installed" and APP_DATA_ROOT
+# resolved to the REAL %LOCALAPPDATA%\SwitchAgent -- the same database the
+# user's actual installation uses. web/context.py's build_mock_context()
+# then registered its two fixture devices there, and "Parent's Switch
+# (mock)" / "Child's Switch (mock)" stayed in the user's Devices page for
+# good (nothing in the app can forget a device it has seen... see
+# services.forget_device(), added after this). Isolating mock mode by
+# FILENAME rather than by refusing to start is deliberate: the smoke tests
+# (packaging/smoke_test.py) legitimately run a frozen, installed-mode build
+# and isolate themselves by overriding %LOCALAPPDATA% instead, so a
+# runtime_mode()-based refusal would break them while still leaving a
+# hand-started dist/ build free to do exactly what happened here.
+MOCK_DB_PATH = DATA_DIR / "switchagent-mock.db"
+
+
+def use_mock_database() -> None:
+    """Redirect every later `config.DB_PATH` reader to MOCK_DB_PATH -- call
+    this at an entrypoint the moment mock mode is decided, BEFORE anything
+    opens a connection. Reassigning the module attribute (rather than
+    threading a path through call after call) is what makes the redirect
+    total: db.get_connection(), backup.py and restore.py all deliberately
+    re-read config.DB_PATH at CALL time precisely so an override like this
+    one takes effect everywhere at once -- see get_connection()'s own note
+    on why it is not a parameter default."""
+    global DB_PATH
+    DB_PATH = MOCK_DB_PATH
+
+
 # Recognized installable package types (Atmosphere/DBI side)
 PACKAGE_EXTENSIONS = {".nsp", ".nsz", ".xci", ".xcz"}
 

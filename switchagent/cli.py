@@ -336,6 +336,9 @@ def _cmd_web(args: argparse.Namespace) -> int:
     from .web.context import build_mock_context, build_real_context
 
     use_mock = args.mock or os.environ.get("MOCK_MTP", "").lower() in ("1", "true", "yes")
+    if use_mock:
+        # Before anything opens a connection -- see config.use_mock_database().
+        config.use_mock_database()
     firstrun.ensure_app_config(config.CONFIG_YAML_PATH)
     config.LIBRARY_DIR = config.load_library_dir()
 
@@ -358,7 +361,10 @@ def _cmd_web(args: argparse.Namespace) -> int:
     ctx.start_worker()
     ctx.start_library_watcher()
     app = create_app(ctx)
-    print(f"SwitchAgent Web UI: http://{args.host}:{args.port}  (mode: {'mock' if use_mock else 'real'})")
+    print(
+        f"SwitchAgent Web UI: http://{args.host}:{args.port}  "
+        f"(mode: {'mock' if use_mock else 'real'}, db: {config.DB_PATH.name})"
+    )
     try:
         from .web.network import home_network_only
         app.middleware("http")(home_network_only)
