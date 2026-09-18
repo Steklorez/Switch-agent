@@ -721,7 +721,6 @@ a { color: var(--accent); text-decoration: none; }
 .game-cover { position: absolute; left: 10px; top: 10px; width: 48px; height: 48px; object-fit: cover; border-radius: 6px; }
 .library-rows .recent-transfer { border-left: 4px solid var(--ok); background: linear-gradient(90deg, rgba(53,196,111,.16), var(--surface) 70%); }
 .library-rows .card:has(.status-installed, .status-installed_unverified) { border-left: 4px solid var(--ok); background: linear-gradient(90deg, rgba(53,196,111,.22), var(--surface) 70%); }
-.library-rows .card:has(.status-available) { border-left: 4px solid var(--accent); background: linear-gradient(90deg, rgba(79,142,247,.16), var(--surface) 70%); }
 .library-rows .card:has(.status-on-device) { border-left: 4px solid var(--ok); background: linear-gradient(90deg, rgba(53,196,111,.4), var(--surface) 75%); }
 .content:has(.library-tiles) { max-width: none; padding: 20px; padding-bottom: 90px; }
 .library-tiles { grid-template-columns: repeat(auto-fill, minmax(210px, 1fr)); gap: 18px; align-items: start; }
@@ -746,8 +745,6 @@ a { color: var(--accent); text-decoration: none; }
 .library-tiles .game-group:has(.card.recent-transfer) { border-color: var(--ok); box-shadow: 0 0 0 1px rgba(53,196,111,.2); }
 .library-tiles .card:has(.status-installed, .status-installed_unverified) { box-shadow: inset 0 -4px var(--ok); background: linear-gradient(0deg, rgba(53,196,111,.24), var(--surface) 55%); }
 .library-tiles .game-group:has(.card .status-installed, .card .status-installed_unverified) { border-color: var(--ok); box-shadow: 0 0 0 1px rgba(53,196,111,.25); }
-.library-tiles .card:has(.status-available) { box-shadow: inset 0 -4px var(--accent); background: linear-gradient(0deg, rgba(79,142,247,.16), var(--surface) 55%); }
-.library-tiles .game-group:has(.card .status-available) { border-color: var(--accent); box-shadow: 0 0 0 1px rgba(79,142,247,.2); }
 /* "Confirmed on device" (title_id_mod.normalize_name() match against DBI's
    own live "Installed games" MTP listing, see WebContext.
    get_known_installed_title_ids()) -- a direct, real-time report from the
