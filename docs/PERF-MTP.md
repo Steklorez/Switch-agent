@@ -107,6 +107,44 @@ Mod files still verify by reading the destination size back, so `COMPLETED`
 means exactly what it meant before — the difference is that WPD reads it
 live instead of waiting out the shell namespace cache.
 
+## The finalise timeout (found in the field, 2026-09-19)
+
+First real batch through the new transport hit this immediately. A 388 MiB
+`.nsz` to the install node:
+
+```
+00:35:43  send_file start ... transport=wpd
+00:37:17  WPD transport failed (IStream::Commit failed: 0x80070079)
+          -- falling back to the Shell copy engine
+00:38:54  send_file end elapsed=191.77s
+```
+
+`0x80070079` is `HRESULT_FROM_WIN32(ERROR_SEM_TIMEOUT)`. Every byte had been
+accepted in seconds; `Commit()` then sat for 82s waiting for a response the
+device never sent, because DBI deletes its virtual install object on
+completion rather than answering. The console's own screen reported the
+install finished in 35s, correctly, while the PC was still waiting.
+
+Two separate faults, both fixed:
+
+- **The fallback re-sent the file.** A timeout after every byte was accepted
+  is not something to retry: the bytes are already there. The console
+  installed the same game twice and the job took 192s instead of ~15s. A
+  finalise timeout is now its own outcome (`TransferTiming.finalise_timed_out`)
+  and reports `UNVERIFIED` without touching the Shell. It also no longer
+  demotes the connection, which is what sent the batch's *next* file through
+  the Shell with no progress at all.
+- **Progress was reported after the commit.** So a transfer waiting on the
+  device looked frozen at 98%. The full byte count is now reported before
+  the commit wait begins.
+
+`IStream::Write`'s returned count is also honoured now, looping until a
+chunk is fully accepted, rather than assuming the requested length was
+written.
+
+`SWITCHAGENT_TRANSPORT=shell` forces the old path on an installed copy
+without a rebuild.
+
 ## Things worth knowing that came out of this
 
 - **DBI leaves a phantom placeholder.** After an install completes, the
