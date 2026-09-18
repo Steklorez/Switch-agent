@@ -243,7 +243,7 @@ signed. Do not promise users a signature alone fixes SmartScreen.
 - Authenticode signing itself requires a certificate (`WINDOWS_CERTIFICATE_BASE64`/
   `WINDOWS_CERTIFICATE_PASSWORD` repo secrets); without them the workflow
   builds a normal unsigned release.
-- Backup/Restore and the Game/Device Details and update-check pages behave
+- The Game/Device Details and update-check pages behave
   correctly in both installed and portable packaged modes -- portable
   mode keeps `config.yaml`/`data/`/`logs/`/`runtime.json`/`portable.flag`
   next to the EXE (never under `%LOCALAPPDATA%`), confirming

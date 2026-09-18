@@ -13,7 +13,7 @@ import re
 from pathlib import Path
 from typing import Optional
 
-from fastapi import Depends, FastAPI, File, HTTPException, Request, UploadFile
+from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, PlainTextResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
@@ -629,65 +629,6 @@ def create_app(ctx: WebContext) -> FastAPI:
         and cannot do (never interrupts an in-flight COM call)."""
         ctx.request_worker_restart()
         return {"restart_pending": True}
-
-    # -- JSON/file API: backup / restore (W3-005) -------------------------
-    #
-    # Both routes deliberately have NO `conn=Depends(get_conn)`: that
-    # dependency holds an open sqlite3 connection for the whole request,
-    # and on Windows os.replace() over a file with an open handle fails --
-    # a restore holding one would reliably die at its last step. See
-    # web/backup_service.py and restore.py for the full reasoning. All
-    # logic lives in switchagent/backup.py + switchagent/restore.py; these
-    # two functions only shape the request/response.
-
-    @app.get("/api/backup")
-    def api_create_backup(ctx: WebContext = Depends(get_ctx)):
-        """Takes a FRESH backup at request time and streams it back as a
-        `SwitchAgent-Backup-{YYYY-MM-DD}.zip` file download. The temp
-        directory holding it is removed by the response's background task,
-        once the body has finished streaming."""
-        from starlette.background import BackgroundTask
-
-        from . import backup_service
-        from .. import backup as backup_mod
-
-        try:
-            download = backup_service.create_backup_download(ctx)
-        except backup_mod.BackupError as exc:
-            raise HTTPException(status_code=500, detail=str(exc)) from exc
-        return FileResponse(
-            path=str(download.path),
-            filename=download.filename,
-            media_type="application/zip",
-            background=BackgroundTask(download.cleanup),
-        )
-
-    @app.post("/api/restore")
-    def api_restore_backup(
-        file: UploadFile = File(...), ctx: WebContext = Depends(get_ctx),
-    ):
-        """Runs the full restore sequence against an uploaded archive.
-        Status codes preserve restore.py's own distinction between the
-        three very different failure kinds: 409 = refused, nothing at all
-        happened; 400 = the archive is invalid, live state byte-for-byte
-        untouched; 500 = failed at/after the replace (body says whether
-        the automatic rollback succeeded)."""
-        from . import backup_service
-        from .. import restore as restore_mod
-
-        try:
-            result = backup_service.restore_from_upload(ctx, file.file)
-        except restore_mod.RestoreRefused as exc:
-            raise HTTPException(status_code=409, detail=str(exc)) from exc
-        except restore_mod.RestoreValidationError as exc:
-            raise HTTPException(status_code=400, detail=str(exc)) from exc
-        except restore_mod.RestoreFailed as exc:
-            log.error("restore failed after replace (rolled_back=%s): %s", exc.rolled_back, exc)
-            raise HTTPException(status_code=500, detail=str(exc)) from exc
-        except restore_mod.RestoreError as exc:
-            log.error("restore aborted: %s", exc)
-            raise HTTPException(status_code=500, detail=str(exc)) from exc
-        return {"ok": True, **result}
 
     # =====================================================================
     # W3-001 Game Details / W3-004 Device Details.

@@ -119,13 +119,6 @@ a bare request with no device IDs, library contents, or history in it,
 and never anything more than opening the release page in your own
 browser if you choose to.
 
-You can back up SwitchAgent's entire database, install history, and
-settings from the Settings page (a single `.zip` download) and restore
-from one the same way -- useful before a reinstall or when moving to a
-new PC. Restoring replaces your current database/config after taking an
-automatic safety backup first, and is refused outright while a transfer
-to a device is in progress.
-
 ## Reporting an issue
 
 Please open a [GitHub Issue](../../issues) with what you did, what
