@@ -299,6 +299,86 @@ def test_conflict_defers_the_dependent_update_and_resumes_it_after_override(clie
     assert resumed_update_item["jobs"][0]["status"] in ("DONE", "DONE_UNVERIFIED")
 
 
+def test_chain_resume_recurses_through_two_conflicts_in_a_row(client, web_ctx):
+    """"И так далее" -- continue_chain() must not just handle a single
+    resolve-and-resume step: if the RESUMED item ALSO conflicts, its own
+    resolution must resume the chain a second time. Base + Update + Mod
+    for one game, with BOTH Base and Update already on the device (two
+    separate real conflicts) -- Mod must not be attempted until BOTH are
+    resolved, one at a time, each via its own real Override click."""
+    base_id = _seed_library_item(web_ctx, name="Base [0100000000010000][v0].nsp")
+    with db.open_db(web_ctx.db_path) as conn:
+        update_path = config.LIBRARY_DIR / "Update [0100000000010800][v1].nsp"
+        update_path.write_bytes(b"update payload")
+        update_id = db.upsert_library_item(
+            conn, absolute_path=str(update_path), item_type="FILE", file_type="NSP",
+            size=update_path.stat().st_size, mtime=update_path.stat().st_mtime, content_hash="h-update",
+            title_id="0100000000010800", title_id_source="filename", status="AVAILABLE",
+            suggested_action="INSTALL_VIA_DBI", suggested_target="SD_INSTALL",
+        )
+        mod_root = config.LIBRARY_DIR / "0100000000010000"
+        (mod_root / "romfs").mkdir(parents=True)
+        (mod_root / "romfs" / "text.txt").write_bytes(b"mod payload")
+        mod_id = db.upsert_library_item(
+            conn, absolute_path=str(mod_root), item_type="MOD_FOLDER", file_type="ATMOSPHERE_MOD",
+            size=11, mtime=0.0, content_hash="h-mod", title_id="0100000000010000",
+            title_id_source="atmosphere_path", status="AVAILABLE",
+            suggested_action="COPY_MERGE", suggested_target="SD_CARD", content_type="ATMOSPHERE_MOD",
+        )
+
+    backend = web_ctx.registry.get("mock-switch-parent")
+    backend.connect()
+    backend.storage_tree("SD_INSTALL").write_file("Base [0100000000010000][v0].nsp", b"already installed")
+    backend.storage_tree("SD_INSTALL").write_file("Update [0100000000010800][v1].nsp", b"already installed")
+
+    response = client.post(
+        "/api/preparations",
+        json={"library_item_ids": [base_id, update_id, mod_id], "target_device_id": "mock-switch-parent"},
+    )
+    assert response.status_code == 202
+
+    def run_until_settled(expect_item_id):
+        deadline = time.monotonic() + 5
+        state = None
+        while time.monotonic() < deadline:
+            with db.open_db(web_ctx.db_path) as conn:
+                queue_worker.run_worker_once(conn, web_ctx.registry)
+            states = client.get("/api/preparations").json()
+            if states and str(expect_item_id) in states[-1]["items"]:
+                state = states[-1]
+                if state["phase"] in ("Ready", "Failed"):
+                    break
+            time.sleep(.02)
+        assert state is not None, f"item {expect_item_id} was never picked up"
+        return state
+
+    # Round 1: Base conflicts; Update and Mod never even attempted.
+    state = run_until_settled(base_id)
+    assert state["phase"] == "Failed"
+    assert state["items"][str(base_id)]["jobs"][0]["status"] == "DESTINATION_CONFLICT"
+    assert state["items"][str(update_id)]["jobs"] == []
+    assert state["items"][str(mod_id)]["jobs"] == []
+    base_conflict_job = state["items"][str(base_id)]["jobs"][0]["id"]
+
+    assert client.post(f"/api/jobs/{base_conflict_job}/override").status_code == 200
+
+    # Round 2 (the resumed chain): Update ALSO conflicts; Mod still never attempted.
+    state = run_until_settled(update_id)
+    assert state["phase"] == "Failed"
+    assert update_id in [int(k) for k in state["items"]]
+    assert state["items"][str(update_id)]["jobs"][0]["status"] == "DESTINATION_CONFLICT"
+    assert state["items"][str(mod_id)]["jobs"] == []
+    update_conflict_job = state["items"][str(update_id)]["jobs"][0]["id"]
+
+    assert client.post(f"/api/jobs/{update_conflict_job}/override").status_code == 200
+
+    # Round 3 (resumed a second time): only Mod is left, and it finally installs.
+    state = run_until_settled(mod_id)
+    assert mod_id in [int(k) for k in state["items"]]
+    assert state["items"][str(mod_id)]["jobs"], "Mod's chain never actually attempted it"
+    assert state["items"][str(mod_id)]["jobs"][0]["status"] in ("DONE", "DONE_UNVERIFIED")
+
+
 def test_archived_mods_have_distinct_resolvable_frozen_paths(client, web_ctx):
     title = "0100AAAAAAAAA000"
     name = f"atmosphere/contents/{title}/romfs/text.bin"
