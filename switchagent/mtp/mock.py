@@ -18,7 +18,7 @@ import hashlib
 import uuid
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Optional
+from typing import Callable, Optional
 
 from .base import DeviceInfo, MtpBackend, StorageInfo, TransferResult, TransferStatus
 from .errors import (
@@ -299,6 +299,7 @@ class MockMtpBackend(MtpBackend):
 
     def send_file(
         self, storage: str, dest_path: str, source_path: Path, *, overwrite: bool = False,
+        progress: Optional[Callable[[int, int], None]] = None,
     ) -> TransferResult:
         self._require_connected()
         s = self._get_storage_obj(storage)
@@ -384,6 +385,13 @@ class MockMtpBackend(MtpBackend):
             write_bytes = _corrupt(source_bytes)
 
         s.write_file(dest_path, write_bytes)
+
+        # One honest progress report for a transfer that is instantaneous
+        # here: the callback contract (base.py) only promises calls happen
+        # during send_file, not how many. Enough for a caller's own progress
+        # bookkeeping to be exercised by tests against this backend.
+        if progress is not None:
+            progress(total, total)
 
         # Verify what actually landed before ever reporting success -- a
         # backend must never claim COMPLETED for a transfer that wasn't

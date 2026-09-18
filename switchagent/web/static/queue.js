@@ -148,22 +148,22 @@
     li.className = "job-row";
     li.dataset.status = j.status;
     const done = ["DONE", "DONE_UNVERIFIED"].includes(j.status);
-    const fraction = j.target_storage === "SD_CARD" && j.bytes_total > 0 ? Math.min(100, 100 * j.bytes_done / j.bytes_total) : 0;
+    const fraction = j.bytes_total > 0 ? Math.min(100, 100 * j.bytes_done / j.bytes_total) : 0;
     li.style.setProperty("--progress", `${done ? 100 : fraction}%`);
     li.classList.toggle("progress-active", j.status === "RUNNING");
     li.dataset.jobId = j.id;
 
     const spinner = j.status === "RUNNING" ? '<span class="spinner" aria-label="in progress"></span>' : "";
-    // A plain spinner with no numbers reads as "frozen" for a real
-    // multi-minute, many-small-files mod transfer (each file has real
-    // fixed per-file MTP overhead -- see queue_worker.py's own timing
-    // notes) -- this makes the already-tracked bytes_done/bytes_total
-    // visible instead of just a 13%-opacity background tint. SD_INSTALL
-    // deliberately excluded: its bytes are diagnostic-only and can read 0
-    // even on a real, physically confirmed success (see
-    // _run_job_transfer's own UNVERIFIED-handling comment) -- showing a
-    // percentage there would be actively misleading, not just quiet.
-    const progressTextHtml = (j.target_storage === "SD_CARD" && j.status === "RUNNING" && j.bytes_total > 0)
+    // A plain spinner with no numbers reads as "frozen" -- which is exactly
+    // how a game install used to look for its entire duration. SD_INSTALL
+    // was deliberately excluded here while the Shell copy engine was the
+    // only transport: it could not report anything mid-copy, and the bytes
+    // recorded afterwards could legitimately read 0 even on a physically
+    // confirmed success. The WPD transport (switchagent/mtp/wpd.py) counts
+    // the bytes it writes itself and reports them about once a second, so
+    // these numbers are now real for every storage. On the Shell fallback
+    // the bar simply steps per completed file, as it always did for mods.
+    const progressTextHtml = (j.status === "RUNNING" && j.bytes_total > 0)
       ? `<div class="job-progress-text"></div>` : "";
     const waitingForDevice = j.status === "WAITING_FOR_DEVICE";
     const isConflict = j.status === "DESTINATION_CONFLICT";
