@@ -29,7 +29,7 @@ def setup_sequence(tmp_path, monkeypatch, *, fail=False):
 def test_each_payload_is_cleaned_before_next_and_logs_are_bounded(tmp_path, monkeypatch):
     queue, events = setup_sequence(tmp_path, monkeypatch)
     for n in range(12):
-        queue._install_sequentially(None, [1, 2], 'mock', lambda **kw: None, str(n))
+        queue._install_sequentially(None, [1, 2], 'mock', lambda **kw: None, str(n), {'chain-a': [1, 2]})
     assert events[:6] == [('prepare', 1), ('install', 1), ('cleanup', 1),
                          ('prepare', 2), ('install', 2), ('cleanup', 2)]
     logs = list((config.LOGS_DIR / 'installs').glob('*.log'))
@@ -37,12 +37,21 @@ def test_each_payload_is_cleaned_before_next_and_logs_are_bounded(tmp_path, monk
     assert all('Install finished' in p.read_text() for p in logs)
 
 
-def test_failure_retains_payload_and_does_not_extract_next(tmp_path, monkeypatch):
+def test_blocked_item_defers_the_rest_of_its_own_chain_but_not_others(tmp_path, monkeypatch):
+    """A stuck job (DESTINATION_CONFLICT and friends) no longer kills the
+    whole run -- by explicit request, it only defers the REST OF ITS OWN
+    CHAIN (e.g. an Update must never install ahead of its still-
+    unresolved Base) while a DIFFERENT, independent chain in the same
+    batch keeps going. Item 2 here shares item 1's chain, so it must
+    never even be attempted; item 3 is its own independent chain and
+    must be attempted regardless."""
     queue, events = setup_sequence(tmp_path, monkeypatch, fail=True)
-    with pytest.raises(RuntimeError, match='Installation stopped'):
-        queue._install_sequentially(None, [1, 2], 'mock', lambda **kw: None, 'failure')
-    assert events == [('prepare', 1), ('install', 1)]
-    assert (tmp_path / '1').exists()
+    result = queue._install_sequentially(
+        None, [1, 2, 3], 'mock', lambda **kw: None, 'failure', {'chain-a': [1, 2], 'chain-b': [3]},
+    )
+    assert events == [('prepare', 1), ('install', 1), ('prepare', 3), ('install', 3)]
+    assert result['blocked'] == [1, 3]
+    assert (tmp_path / '1').exists()  # payload retained -- never cleaned while unresolved
 
 
 def test_submit_prunes_previously_finished_states_immediately(tmp_path):
@@ -157,9 +166,13 @@ def test_stuck_job_status_stops_the_batch_instead_of_polling_forever(tmp_path, m
     """Reproduces a real hang: a real DESTINATION_CONFLICT mid-batch left
     the sequential-install poll loop spinning every .5s forever, since that
     status (and these other "needs a user action" ones) wasn't in the set
-    that makes this loop give up and raise. Each of these must be detected
+    that makes this loop give up. Each of these must be detected
     on the FIRST poll -- proven here by only ever mocking a single
-    list_jobs_by_batch call's worth of state, no retry/backoff involved."""
+    list_jobs_by_batch call's worth of state, no retry/backoff involved.
+    Detecting it defers the rest of THIS chain (item 2, same chain as the
+    stuck item 1) rather than raising -- see
+    test_blocked_item_defers_the_rest_of_its_own_chain_but_not_others for
+    the "a different, independent chain keeps going" half."""
     monkeypatch.setattr(config, 'LOGS_DIR', tmp_path / 'logs')
     events = []
 
@@ -178,8 +191,67 @@ def test_stuck_job_status_stops_the_batch_instead_of_polling_forever(tmp_path, m
     monkeypatch.setattr(manifest, 'batch_work_dir', lambda batch: tmp_path / str(batch))
 
     queue = PreparationQueue(tmp_path / 'test.db')
-    with pytest.raises(RuntimeError, match='Installation stopped'):
-        queue._install_sequentially(None, [1, 2], 'mock', lambda **kw: None, status)
+    result = queue._install_sequentially(None, [1, 2], 'mock', lambda **kw: None, status, {'chain-a': [1, 2]})
+    assert result['blocked'] == [1]
     # Exactly one poll of the stuck status -- never looped waiting for it
-    # to change on its own.
+    # to change on its own -- and item 2 (same chain) was never attempted.
     assert events == [('prepare', 1), ('install', 1)]
+
+
+# ---------------------------------------------------------------------------
+# continue_chain: resuming a game's Update/Mod after its Base is resolved.
+# By explicit request: an Update/DLC/Mod must never install ahead of its
+# own still-unresolved Base -- _install_sequentially() defers them (tests
+# above), and continue_chain() is what picks them back up once the user
+# resolves the Base via the ordinary Override/Retry/Skip actions (a
+# completely separate HTTP request -- see app.py's routes). It does NOT
+# poll/wait for that to happen: submit()'s own run() holds self.serial for
+# its whole call, so waiting here would block every OTHER preparation for
+# as long as the user takes to click something.
+# ---------------------------------------------------------------------------
+
+def test_continue_chain_resumes_the_rest_of_the_same_game_after_resolution(tmp_path):
+    queue = PreparationQueue(tmp_path / 'test.db')
+    queue.states['batch-1'] = {
+        'id': 'batch-1', 'phase': 'Failed', 'started': 0, 'target': 'mock-switch',
+        'chains': {'family-a': [10, 20, 30], 'family-b': [40]},
+        'items': {
+            '10': {'name': 'base', 'phase': 'Failed', 'order': 0, 'job_ids': [999]},
+            '20': {'name': 'update', 'phase': 'Waiting', 'order': 1, 'job_ids': []},
+            '30': {'name': 'mod', 'phase': 'Waiting', 'order': 2, 'job_ids': []},
+            '40': {'name': 'other game', 'phase': 'Ready', 'order': 3, 'job_ids': [998]},
+        },
+    }
+    submitted = []
+    queue.submit = lambda item_ids, target: submitted.append((item_ids, target))
+
+    queue.continue_chain(999)
+
+    # Only the SAME game's remaining items (update, mod), in order --
+    # the independent "other game" chain is never touched.
+    assert submitted == [([20, 30], 'mock-switch')]
+
+
+def test_continue_chain_does_nothing_for_a_job_outside_any_known_chain(tmp_path):
+    queue = PreparationQueue(tmp_path / 'test.db')
+    submitted = []
+    queue.submit = lambda item_ids, target: submitted.append((item_ids, target))
+
+    queue.continue_chain(123456)  # not tracked by any preparation state
+
+    assert submitted == []
+
+
+def test_continue_chain_does_nothing_when_nothing_is_left_after_the_resolved_item(tmp_path):
+    queue = PreparationQueue(tmp_path / 'test.db')
+    queue.states['batch-1'] = {
+        'id': 'batch-1', 'phase': 'Failed', 'started': 0, 'target': 'mock-switch',
+        'chains': {'family-a': [10]},
+        'items': {'10': {'name': 'base', 'phase': 'Failed', 'order': 0, 'job_ids': [999]}},
+    }
+    submitted = []
+    queue.submit = lambda item_ids, target: submitted.append((item_ids, target))
+
+    queue.continue_chain(999)
+
+    assert submitted == []
