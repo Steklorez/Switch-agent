@@ -24,6 +24,47 @@
   // space than really exists.
   const MIN_VISIBLE_PENDING_PCT = 1.5;
 
+  // With no Switch plugged in there is no real card to measure, and the
+  // bar used to simply vanish -- so the one moment you most want a sense
+  // of scale (picking what to take with you, console not to hand) was the
+  // one moment it told you nothing. Stand in a plausible empty card
+  // instead: 256 GB is a common size and keeps a realistic selection to a
+  // readable fraction of the track. Explicitly an assumption, never
+  // presented as a measurement -- see renderStorageBar's label/title and
+  // the .storage-bar-assumed styling.
+  const ASSUMED_CARD_TOTAL_BYTES = 256 * 1024 ** 3;
+
+  let usingAssumedCard = false;
+  // WHY there is no card to measure. "no Switch connected" is only one of
+  // the three, and the bar said exactly that in all of them until a mock
+  // run with two consoles plugged in cheerfully reported "(no Switch)".
+  let assumedCardReason = "none";
+  const ASSUMED_CARD_REASONS = {
+    none: "No Switch is connected",
+    ambiguous: "More than one Switch is connected and there is no single target to measure",
+    unreadable: "The connected Switch did not report its SD card size",
+  };
+
+  // Only pages that can actually select games (Library, Game Details --
+  // both render _install_selection.html) get the stand-in. On History or
+  // Settings there is nothing to add to a card, so a card-shaped bar with
+  // nothing to say would be pure furniture.
+  function pageCanSelectGames() {
+    return document.getElementById("selection-bar") !== null;
+  }
+
+  function applyAssumedCard(reason) {
+    if (!pageCanSelectGames()) {
+      if (bar) bar.hidden = true;
+      return;
+    }
+    usingAssumedCard = true;
+    assumedCardReason = reason;
+    sdCardTotalBytes = ASSUMED_CARD_TOTAL_BYTES;
+    sdCardFreeBytes = ASSUMED_CARD_TOTAL_BYTES;  // assumed empty
+    renderStorageBar();
+  }
+
   const bar = document.getElementById("storage-bar");
   const barUsed = document.getElementById("storage-bar-used");
   const barPending = document.getElementById("storage-bar-pending");
@@ -50,6 +91,7 @@
       if (bar) bar.hidden = true;
       return;
     }
+    bar.classList.toggle("storage-bar-assumed", usingAssumedCard);
     const usedBytes = sdCardTotalBytes - sdCardFreeBytes;
     const estimatedPendingBytes = pendingBytes * INSTALL_SIZE_MARGIN;
     const usedPct = Math.max(0, Math.min(100, (100 * usedBytes) / sdCardTotalBytes));
@@ -60,13 +102,32 @@
     barPending.style.left = usedPct + "%";
     barPending.style.width = pendingPct + "%";
     bar.classList.toggle("storage-bar-overflow", estimatedPendingBytes > sdCardFreeBytes);
-    barLabel.textContent = formatBytes(usedBytes) + " / " + formatBytes(sdCardTotalBytes)
-      + (pendingBytes > 0 ? " (+" + formatBytes(estimatedPendingBytes) + ")" : "");
-    bar.title = "SD card: " + formatBytes(usedBytes) + " used of " + formatBytes(sdCardTotalBytes)
-      + (pendingBytes > 0
-        ? ". Selected games would add about " + formatBytes(estimatedPendingBytes)
-          + " (includes a safety margin for on-device unpacking)."
-        : ".");
+    if (usingAssumedCard) {
+      // Never "X used of Y" here -- nothing was measured. The tilde and
+      // the "no Switch" suffix carry that in the few characters the label
+      // has (it is ellipsised at 170px, and hidden outright on narrow
+      // screens), with the full caveat in the tooltip.
+      barLabel.textContent = (pendingBytes > 0 ? "+" + formatBytes(estimatedPendingBytes) + " of " : "")
+        + "~" + formatBytes(sdCardTotalBytes) + " (est.)";
+      bar.title = ASSUMED_CARD_REASONS[assumedCardReason]
+        + ", so this is an estimate against an assumed empty "
+        + formatBytes(sdCardTotalBytes) + " card, not a real measurement"
+        + (pendingBytes > 0
+          ? ". Selected games would take about " + formatBytes(estimatedPendingBytes)
+            + " (includes a safety margin for on-device unpacking)."
+          : ". Tick some games to see roughly how much they need.")
+        + (assumedCardReason === "ambiguous"
+          ? " Disconnect all but one Switch for its real free space."
+          : " Connect a Switch for its real free space.");
+    } else {
+      barLabel.textContent = formatBytes(usedBytes) + " / " + formatBytes(sdCardTotalBytes)
+        + (pendingBytes > 0 ? " (+" + formatBytes(estimatedPendingBytes) + ")" : "");
+      bar.title = "SD card: " + formatBytes(usedBytes) + " used of " + formatBytes(sdCardTotalBytes)
+        + (pendingBytes > 0
+          ? ". Selected games would add about " + formatBytes(estimatedPendingBytes)
+            + " (includes a safety margin for on-device unpacking)."
+          : ".");
+    }
     bar.hidden = false;
   }
 
@@ -74,9 +135,7 @@
     if (!bar) return;
     const fingerprint = pickTargetFingerprint(devices);
     if (!fingerprint) {
-      sdCardFreeBytes = null;
-      sdCardTotalBytes = null;
-      bar.hidden = true;
+      applyAssumedCard(devices.filter((d) => d.connected).length > 1 ? "ambiguous" : "none");
       return;
     }
     try {
@@ -85,11 +144,12 @@
       const storages = await res.json();
       const sdCard = storages.find((s) => s.effective_logical_name === "SD_CARD");
       if (!sdCard || sdCard.free_bytes === null || sdCard.total_bytes === null) {
-        sdCardFreeBytes = null;
-        sdCardTotalBytes = null;
-        bar.hidden = true;
+        // A Switch is there but its card did not report usable numbers --
+        // still nothing measured, so the same honest stand-in applies.
+        applyAssumedCard("unreadable");
         return;
       }
+      usingAssumedCard = false;
       sdCardFreeBytes = sdCard.free_bytes;
       sdCardTotalBytes = sdCard.total_bytes;
       renderStorageBar();
