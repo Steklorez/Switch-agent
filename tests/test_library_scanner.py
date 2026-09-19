@@ -469,3 +469,47 @@ def test_an_unplugged_drive_keeps_its_games_listed(isolated_db, monkeypatch):
     scanner.scan_library_once(conn)
 
     assert len(services.list_library_view(conn)["games"]) == 1
+
+
+def test_re_adding_a_folder_brings_its_games_back(isolated_db, monkeypatch):
+    """Remove a Library folder and add it straight back. Every file is
+    byte-identical, so the size+mtime "unchanged" shortcut fires on every
+    one of them -- and used to skip past re-indexing while the rows still
+    said RETIRED, leaving them permanently invisible no matter how many
+    times the user pressed Rescan. Found on a real library: 19 of its 48
+    rows, 7 games showing where there should have been 15.
+
+    "Unchanged" means its CONTENT is unchanged. A row this pass has just
+    walked to is in the library again whatever it said a moment ago."""
+    from switchagent.web import services
+
+    conn, _inbox_dir = isolated_db
+    for n in range(3):
+        (config.LIBRARY_DIR / f"Game {n} [010000000001{n:04}][v0].nsp").write_bytes(b"nsp bytes")
+    mod = config.LIBRARY_DIR / "SomeMod" / "atmosphere" / "contents" / "0100000000010000"
+    (mod / "romfs").mkdir(parents=True)
+    (mod / "romfs" / "asset.bin").write_bytes(b"asset")
+    scanner.scan_library_once(conn)
+    before = len(services.list_library_view(conn)["games"])
+    assert before
+
+    # Folder removed -- every row retires (jobs or not; unreferenced rows
+    # would simply be deleted, so keep one referenced to prove the point).
+    db.create_job(
+        conn, library_item_id=db.list_library_items(conn)[0]["id"], action="INSTALL_VIA_DBI",
+        target_storage="SD_INSTALL", target_device_id="mock-switch-parent",
+    )
+    library_dir = config.LIBRARY_DIR
+    monkeypatch.setattr(config, "library_dirs", tuple)
+    scanner.scan_library_once(conn)
+    assert services.list_library_view(conn)["games"] == []
+
+    # ...and added straight back, without a single byte having changed.
+    # (Re-pointed rather than monkeypatch.undo(), which would also roll
+    # back the fixture's own LIBRARY_DIR/INBOX_DIR isolation.)
+    monkeypatch.setattr(config, "library_dirs", lambda: (library_dir,))
+    summary = scanner.scan_library_once(conn)
+
+    assert summary["unchanged"] == 0, "a retired row must not be recognised as unchanged"
+    assert not any(r["status"] == db.LIBRARY_ITEM_RETIRED for r in db.list_library_items(conn))
+    assert len(services.list_library_view(conn)["games"]) == before

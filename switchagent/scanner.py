@@ -476,7 +476,18 @@ def scan_library_once(
         existing = db.get_library_item(conn, abs_path)
         content_hash, total_size, max_mtime = hash_mod_folder(folder)
 
-        if existing is not None and existing["content_hash"] == content_hash:
+        # "Unchanged" has to mean "its CONTENT is unchanged", never "its
+        # membership is unchanged". A row this pass has just walked to is, by
+        # definition, in the library again -- and a retired one (see
+        # db.LIBRARY_ITEM_RETIRED) says the opposite, so it must not take the
+        # shortcut past re-indexing. Remove a Library folder and add it straight
+        # back and every file is byte-identical, which is exactly when this
+        # fires: 19 of one real library's 48 rows stayed retired, and therefore
+        # invisible, through any number of rescans. Re-classifying them costs
+        # one pass over files that have just rejoined the library, and only
+        # ever on that pass.
+        if (existing is not None and existing["status"] != db.LIBRARY_ITEM_RETIRED
+                and existing["content_hash"] == content_hash):
             db.touch_library_item_scanned(conn, existing["id"])
             unchanged_count += 1
             continue
@@ -539,7 +550,10 @@ def scan_library_once(
             continue
 
         existing = db.get_library_item(conn, abs_path)
-        if existing is not None and existing["size"] == st.st_size and existing["mtime"] == st.st_mtime:
+        # Same rule as the mod-folder loop above: a retired row must be
+        # re-indexed rather than recognised as unchanged.
+        if (existing is not None and existing["status"] != db.LIBRARY_ITEM_RETIRED
+                and existing["size"] == st.st_size and existing["mtime"] == st.st_mtime):
             db.touch_library_item_scanned(conn, existing["id"])
             unchanged_count += 1
             continue
