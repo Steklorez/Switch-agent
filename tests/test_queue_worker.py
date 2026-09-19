@@ -976,6 +976,32 @@ def test_restart_leaves_every_non_running_status_completely_unchanged(isolated_d
     reopened.close()
 
 
+def test_startup_abandons_a_job_left_unconfirmable_by_a_restart(isolated_db):
+    """A PENDING_CONFIRM job means the process died between staging it and
+    confirming it, and nothing can ever confirm it now: the only caller of
+    confirm_job() for these is web/preparation.py's sequential run, whose
+    state lives in memory and does not survive a restart. Left alone it
+    pins its staged payload in work/ forever, keeps forget_device()
+    refusing that Switch, and (before services._not_yet_queued) sat in
+    Queue permanently as a phantom row with a live Cancel button."""
+    conn, inbox_dir = isolated_db
+    name = "Game [0100000000099000][v0].nsp"
+    item_id = _make_item(conn, inbox_dir, name, b"bytes", "0100000000099000")
+    staged = _make_confirmed_job(conn, inbox_dir, name, item_id, "mock-switch-parent")
+    db.update_job_status(conn, staged, "PENDING_CONFIRM")
+    confirmed = _make_confirmed_job(conn, inbox_dir, name, item_id, "mock-switch-parent")
+
+    reopened = _reopen(conn)
+    assert db.abandon_unconfirmed_jobs(reopened) == 1
+
+    after = db.get_job(reopened, staged)
+    assert after["status"] == "FAILED" and after["abandoned"]
+    # Nothing else is touched, and a second startup finds nothing left.
+    assert db.get_job(reopened, confirmed)["status"] == "CONFIRMED"
+    assert db.abandon_unconfirmed_jobs(reopened) == 0
+    reopened.close()
+
+
 def test_restart_recovers_a_partially_delivered_job_and_resume_still_works(isolated_db):
     """Combines two mandate-named scenarios in one coherent flow: a
     multi-file job partially delivered, THEN a real process restart

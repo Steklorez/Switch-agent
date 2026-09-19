@@ -1085,9 +1085,36 @@ def _not_settled(rows: list, row) -> bool:
     return not any(r["retry_of_job_id"] == row["id"] for r in rows)
 
 
+def _not_yet_queued(row) -> bool:
+    """A job the worker cannot see yet, and which therefore has no business
+    being drawn as a Queue row: PENDING_CONFIRM means "created and staged,
+    but deliberately not confirmed" (see create_and_confirm_jobs' own
+    confirm=False path).
+
+    Why this is separate from _not_settled() rather than folded into it:
+    _not_settled() also answers "is there unfinished work against this
+    device" for forget_device(), where a staged-but-unconfirmed job very
+    much still counts. This predicate is display-only.
+
+    What it fixes: web/preparation.py prepares the NEXT item while the
+    current one is still transferring, and records that item's job_ids
+    only when its own turn actually arrives (_install_sequentially). In
+    between, those PENDING_CONFIRM rows belonged to no preparation item,
+    so queue.js's `represented` filter could not suppress them and the
+    same file was drawn TWICE -- once as a "Waiting" preparation row and
+    again as a separate batch group below it, for the whole duration of
+    the previous file's transfer. The same window exists, more briefly,
+    on the ordinary non-lookahead path (jobs are created before the
+    batch is confirmed) and permanently for any job orphaned in
+    PENDING_CONFIRM by a process that died mid-preparation -- the
+    in-memory PreparationQueue that owned it does not survive a restart
+    (db.abandon_unconfirmed_jobs cleans those up at startup)."""
+    return row["status"] == "PENDING_CONFIRM"
+
+
 def list_queue(conn) -> list[dict]:
     all_rows = db.list_jobs(conn)
-    rows = [r for r in all_rows if _not_settled(all_rows, r)]
+    rows = [r for r in all_rows if not _not_yet_queued(r) and _not_settled(all_rows, r)]
     return [_job_view(conn, r) for r in rows]
 
 
@@ -1183,7 +1210,9 @@ def list_queue_grouped(conn) -> list[dict]:
     History instead, see list_history_grouped(). Legacy batch_id=NULL jobs
     (created before this feature existed, or anything that predates it in
     an upgraded DB) each render as their own single-job group, exactly
-    matching list_queue()'s own filtering."""
+    matching list_queue()'s own filtering. Staged-but-unconfirmed jobs are
+    excluded from both, per job and then per batch -- see _not_yet_queued()
+    for the duplicated-row bug that is about."""
     all_rows = db.list_jobs(conn)
     by_batch: dict[Optional[int], list] = {}
     for row in all_rows:
@@ -1191,11 +1220,19 @@ def list_queue_grouped(conn) -> list[dict]:
 
     groups = []
     for row in by_batch.pop(None, []):
-        if not _not_settled(all_rows, row):
+        if _not_yet_queued(row) or not _not_settled(all_rows, row):
             continue
         groups.append(_batch_group_view(conn, None, [row]))
 
     for batch_id, rows in by_batch.items():
+        # Unconfirmed rows are dropped from the group BEFORE the keep/drop
+        # decision below, so a batch that is nothing but staged-ahead work
+        # disappears wholesale rather than rendering as a phantom duplicate
+        # of a file the preparation panel is already showing. Settled rows
+        # are deliberately NOT dropped here -- a DONE base still belongs in
+        # its batch's "N / M finished" while its DLC waits (see this
+        # function's own docstring).
+        rows = [r for r in rows if not _not_yet_queued(r)]
         if not any(_not_settled(all_rows, r) for r in rows):
             continue
         groups.append(_batch_group_view(conn, batch_id, rows))

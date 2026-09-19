@@ -986,6 +986,34 @@ def recover_stale_running_jobs(conn: sqlite3.Connection) -> int:
     return len(rows)
 
 
+def abandon_unconfirmed_jobs(conn: sqlite3.Connection) -> int:
+    """Called once at process/worker startup, alongside
+    recover_stale_running_jobs(). A job still PENDING_CONFIRM means the
+    process died between staging it and confirming it -- and nothing can
+    ever confirm it now: the only caller of confirm_job() for these is
+    web/preparation.py's sequential run, whose state lives in memory
+    (PreparationQueue.states) and does not survive a restart.
+
+    Left alone, such a job is not merely untidy: it holds its staged
+    payload in work/ forever, and counts as unfinished work against its
+    target device, so forget_device() refuses that Switch for good. Marked
+    abandoned (not just FAILED) because there is genuinely nothing to do
+    with it -- retry_job()/override_job() both refuse an abandoned job and
+    tell the user to select the source again in Library, which is exactly
+    the right answer here. Nothing was ever sent to the device, so this
+    can never discard real progress."""
+    rows = conn.execute("SELECT id FROM jobs WHERE status = 'PENDING_CONFIRM'").fetchall()
+    for row in rows:
+        update_job_status(
+            conn, row["id"], "FAILED",
+            error="process restarted before this job was confirmed -- nothing was installed",
+        )
+        conn.execute("UPDATE jobs SET abandoned=1 WHERE id=?", (row["id"],))
+        log_job_event(conn, row["id"], "recovered at startup: PENDING_CONFIRM -> FAILED (abandoned)")
+    conn.commit()
+    return len(rows)
+
+
 def log_job_event(conn: sqlite3.Connection, job_id: int, message: str) -> None:
     conn.execute(
         "INSERT INTO job_log (job_id, ts, message) VALUES (?, ?, ?)",

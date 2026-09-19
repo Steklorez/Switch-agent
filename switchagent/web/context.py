@@ -390,6 +390,20 @@ class WebContext:
         recovered = db.recover_stale_running_jobs(conn)
         if recovered:
             log.info("worker startup: recovered %d stale RUNNING job(s) -> INTERRUPTED", recovered)
+        # Staged but never confirmed, and now unconfirmable -- the in-memory
+        # preparation that owned these did not survive the restart. Their
+        # batches' staging is released here the same way preparation.py's
+        # own _abandon_prepared() does it.
+        unconfirmed = conn.execute(
+            "SELECT DISTINCT batch_id FROM jobs WHERE status = 'PENDING_CONFIRM'"
+        ).fetchall()
+        abandoned = db.abandon_unconfirmed_jobs(conn)
+        if abandoned:
+            from ..work_cleanup import cleanup_batch_if_all_done
+
+            log.info("worker startup: abandoned %d unconfirmed job(s) -> FAILED", abandoned)
+            for row in unconfirmed:
+                cleanup_batch_if_all_done(conn, row["batch_id"])
         try:
             while not self._stop_event.is_set():
                 if self._worker_restart_requested.is_set():
