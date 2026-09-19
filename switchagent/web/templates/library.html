@@ -140,7 +140,13 @@
     Rescan
   </button>
 </div>
-<div id="scan-status" class="scan-status" hidden></div>
+<div id="scan-status" class="scan-status" hidden>
+  <span id="scan-status-text"></span>
+  {# Shown only while a scan is actually running -- see library.js. A big
+     Library folder can take minutes per pass, and until this existed the
+     only way out was to wait it out. #}
+  <button id="scan-cancel-btn" class="btn btn-small" type="button" hidden>Stop scanning</button>
+</div>
 <div id="cover-status" class="scan-status" role="status" aria-live="polite">
   <span id="cover-status-text">Checking covers…</span>
   <button id="cover-retry" class="btn btn-small" type="button" hidden>Retry covers</button>

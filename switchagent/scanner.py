@@ -188,14 +188,24 @@ def hash_mod_folder(folder: Path) -> tuple[str, int, float]:
     return h.hexdigest(), total_size, max_mtime
 
 
-def find_mod_folders(inbox_dir: Path) -> list[Path]:
+def find_mod_folders(inbox_dir: Path, *, should_stop: Optional[Callable[[], bool]] = None) -> list[Path]:
     """Finds every atmosphere/contents/<TITLE_ID> directory placed directly
     in inbox/ (not inside an archive -- that case is handled by
     extractor.list_archive_entries + classify_entries). Matched by regex on
     the TITLE_ID directory name, not a fixed depth, so 'atmosphere' can be
-    nested wherever the user happened to drop it."""
+    nested wherever the user happened to drop it.
+
+    `should_stop`, if given, is polled while walking the tree and makes
+    this return whatever it has found so far. A Library folder pointed at
+    something like a real Downloads directory can take minutes just to
+    enumerate, and a scan the user has asked to stop must not have to
+    finish walking it first (see scan_library_once)."""
     result = []
-    atmosphere_dirs = list(inbox_dir.rglob("atmosphere"))
+    atmosphere_dirs = []
+    for candidate in inbox_dir.rglob("atmosphere"):
+        if should_stop is not None and should_stop():
+            return result
+        atmosphere_dirs.append(candidate)
     if inbox_dir.name.lower() == "atmosphere":
         atmosphere_dirs.insert(0, inbox_dir)
     for atmosphere_dir in atmosphere_dirs:
@@ -375,7 +385,10 @@ def scan_once(conn) -> dict:
 # docs/WEB-UI.md for the "separate table, minimal overlap" rationale.
 # ---------------------------------------------------------------------------
 
-def scan_library_once(conn, *, on_file: Optional[Callable[[str], None]] = None) -> dict:
+def scan_library_once(
+    conn, *, on_file: Optional[Callable[[str], None]] = None,
+    should_stop: Optional[Callable[[], bool]] = None,
+) -> dict:
     """One full pass over config.LIBRARY_DIR. Safe to call repeatedly --
     items unchanged since the last pass (by size+mtime for files, or the
     folder fingerprint for mod folders) are recognized and skipped without
@@ -391,7 +404,17 @@ def scan_library_once(conn, *, on_file: Optional[Callable[[str], None]] = None) 
     progress signal, not just "currently indexing new content". Purely a
     UI progress hook (see switchagent/web/context.py's
     run_scan_in_background); scan_library_once() itself has no other use
-    for it and works identically with or without one."""
+    for it and works identically with or without one.
+
+    `should_stop`, if given, is polled at every step -- while enumerating
+    the tree as well as per item -- and makes this return early with
+    cancelled=True. Everything already indexed in this pass is kept (each
+    item is committed as it is read), but the two whole-library passes at
+    the bottom are deliberately SKIPPED: both reason from
+    seen_absolute_paths as if it were the complete picture, so running
+    either on a half-finished walk would merge or delete rows for files
+    this pass simply never got to. A cancelled scan therefore only ever
+    adds knowledge, never removes it."""
     library_dirs = config.library_dirs()
     missing = [p for p in library_dirs if not p.is_dir()]
     if len(missing) == len(library_dirs):
@@ -399,6 +422,9 @@ def scan_library_once(conn, *, on_file: Optional[Callable[[str], None]] = None) 
             new=0, updated=0, unchanged=0, skipped_unstable=0, duplicates=0, errors=0, removed=0,
             relocated=0, error=f"library directories do not exist: {missing}",
         )
+
+    def _stopped() -> bool:
+        return should_stop is not None and should_stop()
 
     seen_absolute_paths: set[str] = set()
     # Which of those were inserted, not just refreshed -- see the
@@ -412,8 +438,22 @@ def scan_library_once(conn, *, on_file: Optional[Callable[[str], None]] = None) 
     duplicate_count = 0
     errors = 0
 
-    mod_folders = list(dict.fromkeys(folder for root in library_dirs if root.is_dir() for folder in find_mod_folders(root)))
+    def _cancelled() -> dict:
+        return dict(
+            new=new_count, updated=updated_count, unchanged=unchanged_count,
+            skipped_unstable=skipped_unstable, duplicates=duplicate_count,
+            errors=errors, removed=0, relocated=0, cancelled=True,
+        )
+
+    mod_folders = list(dict.fromkeys(
+        folder for root in library_dirs if root.is_dir()
+        for folder in find_mod_folders(root, should_stop=should_stop)
+    ))
+    if _stopped():
+        return _cancelled()
     for folder in mod_folders:
+        if _stopped():
+            return _cancelled()
         abs_path = str(folder)
         seen_absolute_paths.add(abs_path)
         if on_file is not None:
@@ -453,14 +493,26 @@ def scan_library_once(conn, *, on_file: Optional[Callable[[str], None]] = None) 
         else:
             updated_count += 1
 
-    candidate_files = list(dict.fromkeys(
-        p for root in library_dirs if root.is_dir() for p in root.rglob("*")
-        if p.is_file()
-        and p.suffix.lower() in config.ALL_TRACKED_EXTENSIONS
-        and not path_is_inside_any(p, mod_folders)
-    ))
+    # Materialised with an explicit loop rather than a comprehension purely
+    # so the walk itself can be interrupted: on a folder the size of a real
+    # Downloads directory this enumeration alone is most of the wait, and a
+    # cancel that only took effect afterwards would not feel like a cancel.
+    candidate_files: list[Path] = []
+    for root in library_dirs:
+        if not root.is_dir():
+            continue
+        for candidate in root.rglob("*"):
+            if _stopped():
+                return _cancelled()
+            if (candidate.is_file()
+                    and candidate.suffix.lower() in config.ALL_TRACKED_EXTENSIONS
+                    and not path_is_inside_any(candidate, mod_folders)):
+                candidate_files.append(candidate)
+    candidate_files = list(dict.fromkeys(candidate_files))
 
     for abs_path_obj in candidate_files:
+        if _stopped():
+            return _cancelled()
         abs_path = str(abs_path_obj)
         seen_absolute_paths.add(abs_path)
         if on_file is not None:
