@@ -31,8 +31,10 @@ def test_multiple_roots_scan_and_transfer_keep_sources_distinct(isolated_db, tmp
     assert (second / name).read_bytes() == b"second"
     config.set_library_source_dirs([first])
     scanner.scan_library_once(conn)
-    # Keep job history references, but make removed sources unavailable.
-    assert db.get_library_item(conn, str(second / name))["status"] == "ERROR"
+    # Keep job history references, but make removed sources unavailable --
+    # which is precisely what RETIRED names (db.LIBRARY_ITEM_RETIRED): a
+    # record, not content, and not something to review either.
+    assert db.get_library_item(conn, str(second / name))["status"] == db.LIBRARY_ITEM_RETIRED
     with pytest.raises(manifest.ManifestError, match="no longer configured"):
         manifest.resolve_source_path(loaded.files[0], job_id)
     assert (mod / "text.bin").exists()
