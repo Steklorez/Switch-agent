@@ -1,0 +1,34 @@
+name: Feature request
+description: Suggest something SwitchAgent should do
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Before writing: SwitchAgent deliberately stops at "the transport
+        accepted the bytes". Installing on the console is
+        [DBI](https://github.com/rashevskyv/dbi)'s job, and anything that
+        needs SwitchAgent to know what happened *after* the transfer is
+        outside what MTP can tell it.
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: What are you trying to do?
+      description: >
+        The situation, not the solution — what you were doing when you
+        wished this existed. That usually leads somewhere better than the
+        feature as first imagined.
+    validations:
+      required: true
+
+  - type: textarea
+    id: idea
+    attributes:
+      label: What would you like it to do?
+
+  - type: textarea
+    id: workaround
+    attributes:
+      label: How do you handle it today?
+      description: Including "I don't" — that is useful to know.

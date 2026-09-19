@@ -1,0 +1,11 @@
+blank_issues_enabled: true
+contact_links:
+  - name: Question or general discussion
+    url: https://github.com/Steklorez/Switch-agent/discussions
+    about: Not sure whether it is a bug? Ask here first.
+  - name: Security report
+    url: https://github.com/Steklorez/Switch-agent/security/advisories/new
+    about: Report a vulnerability privately — never in a public issue.
+  - name: DBI (the installer on the console)
+    url: https://github.com/rashevskyv/dbi
+    about: Installs failing on the console itself, or DBI not appearing as a device, belong there.

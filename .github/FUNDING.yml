@@ -1,0 +1,4 @@
+# Renders the "Sponsor" button on the repository page, so the README
+# doesn't have to carry a donation block above the fold.
+ko_fi: I3I0273OYI
+custom: ["https://boosty.to/steklorez"]

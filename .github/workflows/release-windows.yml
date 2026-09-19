@@ -276,11 +276,44 @@ jobs:
             $prereleaseFlag = @("--prerelease")
           }
 
+          # Human-written notes for this exact version, taken from
+          # CHANGELOG.md's own `## <tag>` section. --generate-notes alone
+          # produces nothing but a "Full Changelog" compare link, which is
+          # not much of a release page for the people who arrive there to
+          # download something. When the section is missing (an older tag
+          # re-published, say) this falls back to generated notes only,
+          # exactly as before -- a release is never blocked on prose.
+          # gh appends the generated notes below --notes-file, so the
+          # compare link is kept either way.
+          $notesFlag = @()
+          if (Test-Path "CHANGELOG.md") {
+            $heading = '^##\s+' + [regex]::Escape($tag) + '\b'
+            $section = @()
+            $inSection = $false
+            foreach ($line in Get-Content "CHANGELOG.md" -Encoding utf8) {
+              if ($line -match '^##\s') {
+                if ($inSection) { break }
+                $inSection = $line -match $heading
+                continue
+              }
+              if ($inSection) { $section += $line }
+            }
+            $text = ($section -join "`n").Trim()
+            if ($text) {
+              Set-Content -Path "release-notes.md" -Value $text -Encoding utf8
+              $notesFlag = @("--notes-file", "release-notes.md")
+              Write-Host "Release notes taken from CHANGELOG.md ($($text.Length) chars)"
+            } else {
+              Write-Host "CHANGELOG.md has no section for $tag -- using generated notes only"
+            }
+          }
+
           gh release create $tag `
             --title "SwitchAgent $tag" `
             --generate-notes `
             --draft `
             --target "${{ github.sha }}" `
+            @notesFlag `
             @prereleaseFlag
           gh release upload $tag "SwitchAgent-Setup-x64.exe" "SwitchAgent-Portable-x64.zip" "SHA256SUMS.txt"
           gh release edit $tag --draft=false

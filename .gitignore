@@ -28,3 +28,6 @@ packaging/output/
 *.exe
 *.zip
 SHA256SUMS.txt
+
+# Launch/marketing drafts -- kept local on purpose, not part of the product.
+promo/

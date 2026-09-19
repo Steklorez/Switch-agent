@@ -1,17 +1,22 @@
 # SwitchAgent
 
-<div align="center">
+**Install NSP/NSZ/XCI/XCZ packages and Atmosphère mods onto a Nintendo
+Switch from Windows, over USB** -- a library browser, a job queue and a
+local web UI on top of [DBI](https://github.com/rashevskyv/dbi)'s "MTP
+Responder" mode.
 
-![](https://capsule-render.vercel.app/api?type=waving&color=gradient&customColorList=12&height=90&section=header)
+[![Latest release](https://img.shields.io/github/v/release/Steklorez/Switch-agent?label=latest%20release&color=2ea043)](../../releases/latest)
+[![Downloads](https://img.shields.io/github/downloads/Steklorez/Switch-agent/total?label=downloads&color=2ea043)](../../releases)
+[![Platform](https://img.shields.io/badge/platform-Windows%2010%2F11%20x64-0078D6?logo=windows&logoColor=white)](../../releases/latest)
+[![License: MIT](https://img.shields.io/github/license/Steklorez/Switch-agent?color=blue)](LICENSE)
 
-### ☕ Enjoying SwitchAgent? Consider buying the author a cup of coffee!
+![Library view](screenshots/library.webp)
 
-[![Ko-fi](https://img.shields.io/badge/Ko--fi-Donate-FF5E5B?style=for-the-badge&logo=kofi&logoColor=white)](https://ko-fi.com/I3I0273OYI)
-[![Boosty](https://img.shields.io/badge/Boosty-Donate-F15F2C?style=for-the-badge&logo=boosty&logoColor=white)](https://boosty.to/steklorez)
+📺 **[Watch the Web UI in action](https://www.youtube.com/watch?v=xm-BTAGAqhU)**
+-- a short walkthrough of browsing the library and installing to a
+console through DBI.
 
-![](https://capsule-render.vercel.app/api?type=waving&color=gradient&customColorList=12&height=60&section=footer)
-
-</div>
+## What it does
 
 A local, single-user Windows tool that turns a downloads folder full of
 Nintendo Switch content (NSP/NSZ/XCI/XCZ install packages and Atmosphère
@@ -27,22 +32,47 @@ never overwrites an existing file automatically, never auto-retries a
 failed job, and never substitutes a different target device than the one
 a job was created for.
 
-📺 **[Watch the Web UI in action](https://www.youtube.com/watch?v=xm-BTAGAqhU)**
--- a short walkthrough of browsing the library and installing to a
-console through DBI.
+- **One library out of several folders** -- point it at the folders you
+  download into and it scans, classifies and groups what it finds as
+  **Base Game / Update / DLC / Mod**, including content still sitting
+  inside a ZIP/7Z/RAR archive.
+- **A queue that survives a restart** -- close the app, unplug the
+  console or reboot Windows: an unfinished job is still there afterwards,
+  marked `INTERRUPTED` and still bound to the device it was created for.
+  It is never silently reported as installed and never silently re-sent.
+- **Install order taken care of** -- Base Game -> Update -> DLC -> Mod.
+- **Nothing happens by accident** -- an existing file on the console is
+  never overwritten automatically, a failed job is never auto-retried,
+  and a job never lands on a different console than the one you picked.
+- **Usable away from the PC** -- started with `--host 0.0.0.0`, the same
+  web UI opens on a phone or tablet on your own network.
+- **Nothing to install on the console** -- DBI does the installing;
+  SwitchAgent's job is getting the bytes there over MTP, and saying
+  honestly how that went.
+
+## How it compares
+
+If you already copy files to DBI's MTP mode through Windows Explorer,
+this is the same transport with the parts Explorer knows nothing about:
+
+| | Explorer over DBI MTP | SwitchAgent |
+|---|---|---|
+| Knows what a file actually is (Base/Update/DLC/Mod) | no | yes |
+| Content inside ZIP/7Z/RAR | unpack by hand first | listed, and extracted for you |
+| Transfer interrupted halfway | nothing remembers it | job kept as `INTERRUPTED`, retried when you say so |
+| Install order | your problem | Base -> Update -> DLC -> Mod |
+| More than one console | whichever drive letter you clicked | each job is bound to one device |
+| Record of what went where | none | install history |
+
+[NS-USBloader](https://github.com/developersu/ns-usbloader) solves a
+neighbouring problem by a different route: it speaks the Awoo / GoldLeaf
+/ TinFoil USB protocols and runs anywhere Java does. If that is your
+installer, use it -- SwitchAgent is for DBI's MTP mode specifically, on
+Windows, with the library and the queue on top.
 
 **Requirements:** Windows 10 or 11, 64-bit, with a Switch running DBI in
 MTP Responder mode connected over USB. No Python or any other runtime
 needs to be installed separately.
-
-![Library view](screenshots/library.webp)
-
-A job can finish as **Installed** (`DONE`) or **Installed (unverified)**
-(`DONE_UNVERIFIED`) -- the latter means SwitchAgent confirmed the file
-transport completed, but the console's own install destination (`SD Card
-install`) has no way to report back whether DBI actually finished
-installing it. It is not a failure; it just isn't independently provable
-over MTP -- check the console's own screen to confirm.
 
 ## Install (recommended)
 
@@ -100,6 +130,15 @@ from the Start Menu group. Your database, config, and install history
 under `%LOCALAPPDATA%\SwitchAgent` are **not** deleted by uninstalling --
 remove that folder yourself if you want a truly clean slate.
 
+## How a job finishes
+
+A job can finish as **Installed** (`DONE`) or **Installed (unverified)**
+(`DONE_UNVERIFIED`) -- the latter means SwitchAgent confirmed the file
+transport completed, but the console's own install destination (`SD Card
+install`) has no way to report back whether DBI actually finished
+installing it. It is not a failure; it just isn't independently provable
+over MTP -- check the console's own screen to confirm.
+
 ## Troubleshooting
 
 - **Windows warns "Windows protected your PC" (SmartScreen)** -- this is
@@ -135,15 +174,20 @@ browser if you choose to.
 
 ## Reporting an issue
 
-Please open a [GitHub Issue](../../issues) with what you did, what
-happened, your SwitchAgent version (Settings page, or `switch-agent
---version`), and the relevant lines from `switchagent.log`.
+Please open a [GitHub Issue](../../issues/new/choose) -- the bug template
+asks for the four things that decide whether a report can be acted on:
+your SwitchAgent version (Settings page, or `switch-agent --version`),
+what happened, the relevant lines from `switchagent.log`, and what kind of
+content was involved.
+
+Found a security problem? Do not open a public issue -- see
+[SECURITY.md](SECURITY.md).
 
 ## Building from source
 
 ```powershell
-git clone <this repo>
-cd switch-agent
+git clone https://github.com/Steklorez/Switch-agent.git
+cd Switch-agent
 python -m venv .venv
 .venv\Scripts\activate
 pip install -e .
@@ -157,9 +201,14 @@ Building the packaged EXE/installer yourself is documented in
 
 ## Documentation
 
+- [`CHANGELOG.md`](CHANGELOG.md) -- what changed in each release.
 - [`docs/WEB-UI.md`](docs/WEB-UI.md) -- Web UI feature walkthrough.
 - [`docs/PACKAGING.md`](docs/PACKAGING.md) -- how the Windows
   installer/portable build works and how to reproduce it.
+- [`docs/PERF-MTP.md`](docs/PERF-MTP.md) -- why transfers are as fast as
+  they are, and what was measured to get there.
+- [`SECURITY.md`](SECURITY.md) -- what is and is not in scope, and how to
+  report a vulnerability privately.
 
 ## License
 
@@ -168,3 +217,18 @@ for the licenses of bundled dependencies.
 
 SwitchAgent includes no Nintendo firmware, keys, copyrighted assets, or
 game content, and its icon is an original, unrelated-to-Nintendo graphic.
+
+## Support the project
+
+<div align="center">
+
+![](https://capsule-render.vercel.app/api?type=waving&color=gradient&customColorList=12&height=90&section=header)
+
+### ☕ Enjoying SwitchAgent? Consider buying the author a cup of coffee!
+
+[![Ko-fi](https://img.shields.io/badge/Ko--fi-Donate-FF5E5B?style=for-the-badge&logo=kofi&logoColor=white)](https://ko-fi.com/I3I0273OYI)
+[![Boosty](https://img.shields.io/badge/Boosty-Donate-F15F2C?style=for-the-badge&logo=boosty&logoColor=white)](https://boosty.to/steklorez)
+
+![](https://capsule-render.vercel.app/api?type=waving&color=gradient&customColorList=12&height=60&section=footer)
+
+</div>

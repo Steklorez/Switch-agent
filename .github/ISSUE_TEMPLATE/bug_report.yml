@@ -1,0 +1,75 @@
+name: Bug report
+description: Something behaves differently than it should
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for taking the time. The three fields marked required are the
+        ones that decide whether a report can be acted on at all — a version,
+        what actually happened, and the log lines around it.
+
+        **Security problems do not belong here** — see
+        [SECURITY.md](../blob/main/SECURITY.md) for how to report those
+        privately.
+
+  - type: input
+    id: version
+    attributes:
+      label: SwitchAgent version
+      description: The **Settings** page shows it, or run `switch-agent --version`.
+      placeholder: "1.0.12"
+    validations:
+      required: true
+
+  - type: dropdown
+    id: install-kind
+    attributes:
+      label: How is it installed?
+      options:
+        - Installer (SwitchAgent-Setup-x64.exe)
+        - Portable (SwitchAgent-Portable-x64.zip)
+        - From source
+    validations:
+      required: true
+
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened
+      description: >
+        What you did, what you expected, and what you got instead. A
+        screenshot of the page helps if it is something visible.
+    validations:
+      required: true
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: Relevant log lines
+      description: >
+        `%LOCALAPPDATA%\SwitchAgent\logs\switchagent.log` (installed), or
+        `.\logs\switchagent.log` next to the EXE (portable). The lines
+        around the time it happened are enough — no need for the whole file.
+        These never contain a raw device serial number.
+      render: text
+    validations:
+      required: true
+
+  - type: input
+    id: content
+    attributes:
+      label: What content was involved
+      description: >
+        Format and rough size, and whether it was inside an archive — e.g.
+        "a 4 GB NSZ inside a ZIP", "an Atmosphère mod folder". The **file
+        name itself is not needed**, and please do not paste links to it.
+      placeholder: "a 2.7 GB NSZ, not archived"
+
+  - type: textarea
+    id: anything-else
+    attributes:
+      label: Anything else
+      description: >
+        Windows version, whether the Switch was connected over a hub, what
+        DBI reported on its own screen — anything you think mattered.
