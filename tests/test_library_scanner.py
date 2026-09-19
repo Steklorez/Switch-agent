@@ -330,3 +330,65 @@ def test_stopping_before_anything_is_walked_is_still_a_clean_cancel(isolated_db)
     assert summary["cancelled"] is True
     assert summary["new"] == 0
     assert db.list_library_items(conn) == []
+
+
+# ---------------------------------------------------------------------------
+# Removing the LAST Library folder. Refused outright before ("At least one
+# folder is required -- add a replacement before removing the last one"),
+# which left no way to stop SwitchAgent looking at a folder without first
+# finding some other folder to hand it.
+# ---------------------------------------------------------------------------
+
+def test_no_configured_folder_retires_the_whole_index(isolated_db, monkeypatch):
+    conn, _inbox_dir = isolated_db
+    for n in range(3):
+        (config.LIBRARY_DIR / f"Game {n} [010000000001{n:04}][v0].nsp").write_bytes(b"nsp bytes")
+    scanner.scan_library_once(conn)
+    assert len(db.list_library_items(conn)) == 3
+
+    monkeypatch.setattr(config, "library_dirs", tuple)  # the user removed every folder
+    summary = scanner.scan_library_once(conn)
+
+    assert "error" not in summary, "no folders is a choice, not a failure"
+    assert summary["removed"] == 3
+    assert db.list_library_items(conn) == []
+
+
+def test_retiring_the_index_still_keeps_a_row_some_job_references(isolated_db, monkeypatch):
+    """Same rule the single-deleted-file path already follows: a row a job
+    points at is flagged ERROR and kept, never hard-deleted, so Queue and
+    History keep their display names (see
+    db.delete_library_items_missing_from)."""
+    conn, _inbox_dir = isolated_db
+    (config.LIBRARY_DIR / "Game [0100000000010000][v0].nsp").write_bytes(b"nsp bytes")
+    scanner.scan_library_once(conn)
+    item_id = db.list_library_items(conn)[0]["id"]
+    db.create_job(
+        conn, library_item_id=item_id, action="INSTALL_VIA_DBI",
+        target_storage="SD_INSTALL", target_device_id="mock-switch-parent",
+    )
+
+    monkeypatch.setattr(config, "library_dirs", tuple)
+    summary = scanner.scan_library_once(conn)
+
+    assert summary["removed"] == 0  # nothing was actually deleted
+    rows = db.list_library_items(conn)
+    assert len(rows) == 1 and rows[0]["status"] == "ERROR"
+
+
+def test_an_empty_folder_list_is_told_apart_from_one_never_configured(isolated_db):
+    """`source_dirs: []` is a decision; the key being absent is a default.
+    Only the first empties library_dirs() -- otherwise a fresh install with
+    no config.yaml would look exactly like "the user removed everything"
+    and retire an index it had every reason to keep."""
+    conn, _inbox_dir = isolated_db
+    assert config.library_dirs() == (config.LIBRARY_DIR,)  # nothing configured -> the default
+
+    config.set_library_source_dirs([config.LIBRARY_DIR])
+    assert config.library_dirs() == (config.LIBRARY_DIR,)
+
+    config.set_library_source_dirs([])
+    assert config.library_dirs() == ()
+    # The legacy single-folder key must not be left pointing at a folder
+    # the user just removed, or library_dir_info() keeps calling it chosen.
+    assert config.library_dir_info(config.CONFIG_YAML_PATH).configured is False

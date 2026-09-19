@@ -554,6 +554,36 @@ def test_library_folders_can_be_changed_while_a_scan_is_running(client, web_ctx,
         web_ctx.stop_library_watcher()
 
 
+def test_the_last_library_folder_can_be_removed(client, web_ctx, tmp_path):
+    """Refused outright before ("At least one folder is required -- add a
+    replacement before removing the last one"), so there was no way to stop
+    SwitchAgent looking at a folder without first finding another folder to
+    hand it. Removing everything is now a legitimate configured state, and
+    the rescan it triggers is what retires the orphaned index."""
+    folder = tmp_path / "some-library"
+    folder.mkdir()
+    _add_game(folder, name="Game [0100000000090000][v0].nsp")
+    assert client.post(
+        "/api/settings/library-dir", json={"path": str(folder), "paths": [str(folder)]},
+    ).status_code == 200
+
+    res = client.post("/api/settings/library-dir", json={"path": "", "paths": []})
+
+    assert res.status_code == 200, res.text
+    assert res.json()["library_dirs"] == []
+    assert res.json()["library_dir_configured"] is False
+    web_ctx.stop_library_watcher()
+
+
+def test_sending_no_path_at_all_is_still_an_error(client, web_ctx):
+    """"I chose nothing" (paths: []) and "I sent nothing" (no paths, empty
+    path) are different requests -- only the first is a decision."""
+    res = client.post("/api/settings/library-dir", json={"path": ""})
+
+    assert res.status_code == 400
+    assert "folder path is required" in res.json()["detail"]
+
+
 def test_start_stop_library_watcher_is_idempotent_and_clean(web_ctx):
     choose_library_folder()
     web_ctx.start_library_watcher()

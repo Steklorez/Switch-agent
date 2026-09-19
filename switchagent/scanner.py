@@ -416,6 +416,20 @@ def scan_library_once(
     this pass simply never got to. A cancelled scan therefore only ever
     adds knowledge, never removes it."""
     library_dirs = config.library_dirs()
+    if not library_dirs:
+        # The user removed their last Library folder. Not a failure and not
+        # "the drive is unplugged" (the branch below): nothing is part of
+        # the collection any more, so nothing should still be indexed as
+        # if it were. delete_library_items_missing_from() is the same pass
+        # that already retires a single deleted file, with the same rule
+        # for a row some job still references -- flagged ERROR and kept,
+        # never hard-deleted, so Queue/History keep their display names.
+        removed_count = db.delete_library_items_missing_from(conn, set())
+        return dict(
+            new=0, updated=0, unchanged=0, skipped_unstable=0, duplicates=0,
+            errors=0, removed=removed_count, relocated=0,
+        )
+
     missing = [p for p in library_dirs if not p.is_dir()]
     if len(missing) == len(library_dirs):
         return dict(

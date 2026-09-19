@@ -1885,12 +1885,24 @@ def set_library_dir(conn, ctx: WebContext, raw_path: str, raw_paths: list[str] |
     Raises ValueError (surfaced by the caller as a 4xx, never a 500) on
     any validation failure -- the old config/watcher state is left
     completely untouched in that case. Validation happens BEFORE the
-    running scan is cancelled, so a rejected path costs nothing."""
+    running scan is cancelled, so a rejected path costs nothing.
+
+    An empty `raw_paths` removes every folder -- allowed, and the scan it
+    triggers is what clears the now-orphaned index. `raw_paths=None` with
+    an empty `raw_path` is still an error ("a folder path is required"):
+    "I chose nothing" and "I sent nothing" are different requests."""
     from .. import config as config_mod
 
-    candidates = list(dict.fromkeys(_validate_library_dir_candidate(p) for p in (raw_paths if raw_paths is not None else [raw_path])))
-    if not candidates:
-        raise ValueError("Choose at least one folder")
+    # `paths: []` is a real request -- "remove my last Library folder" --
+    # and used to be refused outright ("At least one folder is required"),
+    # which left no way to stop SwitchAgent looking at a folder without
+    # first finding some other folder to offer it. An empty list is now a
+    # legitimate configured state; see config.library_dirs() for how it is
+    # told apart from a config that simply never named one.
+    candidates = list(dict.fromkeys(
+        _validate_library_dir_candidate(p)
+        for p in (raw_paths if raw_paths is not None else [raw_path])
+    ))
 
     # A running scan used to make this fail outright ("Wait for the current
     # scan to finish, then save the folders again"), which turned the one
@@ -1904,10 +1916,16 @@ def set_library_dir(conn, ctx: WebContext, raw_path: str, raw_paths: list[str] |
     ctx.cancel_scan(wait_seconds=10.0)
 
     config_mod.set_library_source_dirs(candidates)
-    config_mod.LIBRARY_DIR = candidates[0]
+    if candidates:
+        config_mod.LIBRARY_DIR = candidates[0]
 
     ctx.stop_library_watcher()  # safe no-op if it wasn't running yet
+    # A no-op while no folder is configured -- which, after removing the
+    # last one, is exactly the point: nothing left to watch.
     ctx.start_library_watcher()  # re-reads config.LIBRARY_DIR (just updated above)
+    # Still a scan even with no folders left: that pass is what retires the
+    # rows for files that are no longer part of the collection (see
+    # scan_library_once's own zero-folder branch).
     ctx.run_scan_in_background()
 
     return get_settings(conn, ctx)
