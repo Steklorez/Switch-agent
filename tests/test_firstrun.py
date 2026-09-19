@@ -31,15 +31,33 @@ def test_never_overwrites_an_existing_config(tmp_path):
     assert "MyOwnFolder" in config_path.read_text(encoding="utf-8")
 
 
-def test_uses_the_resolved_downloads_folder_when_available(tmp_path):
+def _uncommented_source_dir(text: str) -> str:
+    """The commented-out `# source_dir: "..."` suggestion firstrun writes,
+    read back as if the user had uncommented it -- which is the only thing
+    that line has to get right (escaping included)."""
+    line = next(l for l in text.splitlines() if l.strip().startswith("# source_dir:"))
+    return yaml.safe_load(line.replace("#", "", 1))["source_dir"]
+
+
+def test_suggests_the_resolved_downloads_folder_without_adopting_it(tmp_path):
+    """The detected Downloads folder is written as a commented suggestion,
+    never as an active source_dir: adopting it silently made a fresh
+    install start watching and re-walking a folder of unrelated junk from
+    its very first launch. config.load_library_dir() still falls back to
+    this same path to prefill Settings; what it no longer does is call it
+    chosen."""
     downloads = tmp_path / "Downloads"
     downloads.mkdir()
     config_path = tmp_path / "config.yaml"
 
     firstrun.ensure_app_config(config_path, downloads_resolver=lambda: downloads)
 
-    data = yaml.safe_load(config_path.read_text(encoding="utf-8"))
-    assert data["library"]["source_dir"] == str(downloads)
+    text = config_path.read_text(encoding="utf-8")
+    data = yaml.safe_load(text)
+    assert (data.get("library") or {}).get("source_dir") is None
+    # The suggestion itself must still be there, ready to uncomment -- and
+    # still correctly escaped, so uncommenting it yields the real path.
+    assert _uncommented_source_dir(text) == str(downloads)
 
 
 def test_omits_source_dir_when_downloads_cannot_be_resolved(tmp_path):
@@ -95,5 +113,4 @@ def test_a_downloads_path_with_an_apostrophe_round_trips_through_yaml(tmp_path):
 
     firstrun.ensure_app_config(config_path, downloads_resolver=lambda: tricky)
 
-    data = yaml.safe_load(config_path.read_text(encoding="utf-8"))
-    assert data["library"]["source_dir"] == str(tricky)
+    assert _uncommented_source_dir(config_path.read_text(encoding="utf-8")) == str(tricky)

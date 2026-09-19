@@ -1847,14 +1847,24 @@ def set_library_dir(conn, ctx: WebContext, raw_path: str, raw_paths: list[str] |
     and "scanning never creates a job" already holds here for free).
     Raises ValueError (surfaced by the caller as a 4xx, never a 500) on
     any validation failure -- the old config/watcher state is left
-    completely untouched in that case."""
+    completely untouched in that case. Validation happens BEFORE the
+    running scan is cancelled, so a rejected path costs nothing."""
     from .. import config as config_mod
 
     candidates = list(dict.fromkeys(_validate_library_dir_candidate(p) for p in (raw_paths if raw_paths is not None else [raw_path])))
     if not candidates:
         raise ValueError("Choose at least one folder")
-    if ctx.scan_status_snapshot()["running"]:
-        raise ValueError("Wait for the current scan to finish, then save the folders again")
+
+    # A running scan used to make this fail outright ("Wait for the current
+    # scan to finish, then save the folders again"), which turned the one
+    # thing a user needs in order to STOP an unwanted scan into the one
+    # thing they could not do while it ran -- and, because every save below
+    # kicks off a scan of its own, adding a second folder immediately
+    # re-armed that refusal against removing the first. Nothing about the
+    # old scan is worth protecting here: it is walking folders the user is
+    # in the middle of replacing. Stop it and wait for it to notice, so the
+    # rescan started below is the only one running against the new list.
+    ctx.cancel_scan(wait_seconds=10.0)
 
     config_mod.set_library_source_dirs(candidates)
     config_mod.LIBRARY_DIR = candidates[0]

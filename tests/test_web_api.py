@@ -19,7 +19,7 @@ from switchagent import config, db, known_folders, queue_worker
 from switchagent.web.app import create_app
 from switchagent.web.context import build_mock_context
 
-from .conftest import build_zip
+from .conftest import build_zip, choose_library_folder
 
 
 @pytest.fixture
@@ -485,7 +485,77 @@ def test_library_watcher_does_not_start_automatically(web_ctx):
     assert web_ctx.library_watcher_running is False
 
 
+def test_watcher_does_not_run_against_a_folder_nobody_chose(web_ctx):
+    """config.LIBRARY_DIR falls back to the Windows Downloads folder when
+    config.yaml names none -- a fine suggestion to prefill Settings with,
+    and a terrible thing to start walking and re-walking unasked: it is
+    mostly junk, takes minutes per pass, and none of it is Switch content.
+    The app already knows the difference (an unchosen folder is exactly
+    what raises onboarding's "Choose Library Folder" banner), so the
+    watcher waits for the answer instead of guessing."""
+    web_ctx.start_library_watcher()
+    try:
+        assert web_ctx.library_watcher_running is False
+    finally:
+        web_ctx.stop_library_watcher()
+
+    choose_library_folder()
+    web_ctx.start_library_watcher()
+    try:
+        assert web_ctx.library_watcher_running is True
+    finally:
+        web_ctx.stop_library_watcher()
+
+
+def test_cancelling_a_scan_reports_whether_there_was_one(client, web_ctx):
+    assert client.post("/api/scan/cancel").json()["cancelled"] is False  # nothing running
+    assert client.get("/api/scan/status").json()["cancel_requested"] is False
+
+
+def test_library_folders_can_be_changed_while_a_scan_is_running(client, web_ctx, tmp_path):
+    """The deadlock this replaces: saving the folder list used to fail
+    outright with "Wait for the current scan to finish" -- so the one
+    action that ends an unwanted scan was the one action that scan
+    blocked, and since every save starts a scan of its own, adding a
+    second folder immediately re-armed the refusal against removing the
+    first."""
+    import threading
+
+    started, release = threading.Event(), threading.Event()
+
+    def _slow_scan(conn, *, on_file=None, should_stop=None):
+        started.set()
+        # Behaves like the real thing: polls for the stop flag rather than
+        # running to completion, so "cancel" is what actually ends it.
+        while not release.wait(0.02):
+            if should_stop is not None and should_stop():
+                return dict(new=0, updated=0, unchanged=0, skipped_unstable=0,
+                            duplicates=0, errors=0, removed=0, relocated=0, cancelled=True)
+        return dict(new=0, updated=0, unchanged=0, skipped_unstable=0,
+                    duplicates=0, errors=0, removed=0, relocated=0)
+
+    # _run() imports scanner lazily, so the module attribute is the seam.
+    from switchagent import scanner as scanner_mod
+
+    original = scanner_mod.scan_library_once
+    scanner_mod.scan_library_once = _slow_scan
+    try:
+        assert web_ctx.run_scan_in_background() is True
+        assert started.wait(5.0)
+
+        second = tmp_path / "second-library"
+        second.mkdir()
+        res = client.post("/api/settings/library-dir", json={"path": str(second), "paths": [str(second)]})
+        assert res.status_code == 200, res.text
+        assert res.json()["library_dirs"] == [str(second)]
+    finally:
+        release.set()
+        scanner_mod.scan_library_once = original
+        web_ctx.stop_library_watcher()
+
+
 def test_start_stop_library_watcher_is_idempotent_and_clean(web_ctx):
+    choose_library_folder()
     web_ctx.start_library_watcher()
     try:
         assert web_ctx.library_watcher_running is True
@@ -498,6 +568,7 @@ def test_start_stop_library_watcher_is_idempotent_and_clean(web_ctx):
 
 
 def test_library_watcher_triggers_a_scan_after_a_debounced_file_change(client, web_ctx):
+    choose_library_folder()
     web_ctx.library_watch_debounce_seconds = 0.3  # fast enough for a test; production default is 5.0s
     web_ctx.start_library_watcher()
     try:
@@ -522,6 +593,7 @@ def test_library_watcher_never_creates_a_job(client, web_ctx):
     job-free as a manual one (already proven by
     test_scan_never_creates_a_job_via_api for the manual path -- this is
     the same invariant via the watcher's own trigger path)."""
+    choose_library_folder()
     web_ctx.library_watch_debounce_seconds = 0.3
     web_ctx.start_library_watcher()
     try:

@@ -113,7 +113,8 @@ def library_dirs() -> tuple[Path, ...]:
     """Current primary folder plus configured additional folders."""
     import yaml
     data = yaml.safe_load(CONFIG_YAML_PATH.read_text(encoding="utf-8")) if CONFIG_YAML_PATH.exists() else {}
-    extra = (data or {}).get("library", {}).get("source_dirs", []) or []
+    # See load_library_dir(): a comments-only `library:` section is None.
+    extra = ((data or {}).get("library") or {}).get("source_dirs") or []
     return tuple(dict.fromkeys([LIBRARY_DIR, *(Path(p) for p in extra)]))
 
 
@@ -197,7 +198,12 @@ def library_dir_info(yaml_path: Path = CONFIG_YAML_PATH) -> "LibraryDirInfo":
 
         with yaml_path.open("r", encoding="utf-8") as f:
             data = yaml.safe_load(f) or {}
-        configured_value = data.get("library", {}).get("source_dir")
+        # `or {}` and not just a default: a `library:` section holding
+        # nothing but comments parses as None, not as an empty mapping, and
+        # that is now the ordinary shape of a fresh config.yaml (firstrun
+        # writes the detected Downloads folder commented out rather than
+        # adopting it). `.get` straight off that None crashed every caller.
+        configured_value = (data.get("library") or {}).get("source_dir")
 
     if configured_value:
         path = Path(configured_value)

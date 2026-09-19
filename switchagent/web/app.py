@@ -398,6 +398,14 @@ def create_app(ctx: WebContext) -> FastAPI:
         started = ctx.run_scan_in_background()
         return {"started": started}
 
+    @app.post("/api/scan/cancel")
+    def api_cancel_scan(ctx: WebContext = Depends(get_ctx)):
+        """Cooperative stop -- see WebContext.cancel_scan(). Returns
+        immediately with whether there was a scan to stop; the scan itself
+        unwinds on its own thread, and /api/scan/status is what says when
+        it actually has."""
+        return {"cancelled": ctx.cancel_scan(), **ctx.scan_status_snapshot()}
+
     @app.get("/api/scan/status")
     def api_scan_status(ctx: WebContext = Depends(get_ctx)):
         return ctx.scan_status_snapshot()

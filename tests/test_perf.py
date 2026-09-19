@@ -437,6 +437,8 @@ def test_perf003_watcher_survives_an_event_storm_with_single_flight_and_clean_sh
     rewrites_per_file = 50  # 10 x 50 = 500 raw filesystem events
 
     threads_before = threading.active_count()
+    from .conftest import choose_library_folder
+    choose_library_folder()
     perf_ctx.start_library_watcher()
     try:
         paths = [

@@ -274,3 +274,59 @@ def test_an_unreachable_library_folder_is_never_merged_away(isolated_db, monkeyp
     summary = scanner.scan_library_once(conn)
     assert summary["relocated"] == 0
     assert len(db.list_library_items(conn)) == 2
+
+
+# ---------------------------------------------------------------------------
+# Cancellation. A Library folder pointed at something the size of a real
+# Downloads directory takes minutes per pass, and until this existed there
+# was no way out of one: ScanState had no stop flag, scan_library_once() had
+# no cancellation hook, and set_library_dir() refused to change the folder
+# list while a scan ran -- so the one action that would end an unwanted scan
+# was the one action blocked by it.
+# ---------------------------------------------------------------------------
+
+def test_a_scan_stops_when_asked_and_keeps_what_it_already_indexed(isolated_db):
+    conn, _inbox_dir = isolated_db
+    for n in range(6):
+        (config.LIBRARY_DIR / f"Game {n} [010000000001{n:04}][v0].nsp").write_bytes(b"nsp bytes")
+
+    seen = []
+
+    def stop_after_two():
+        return len(seen) >= 2
+
+    summary = scanner.scan_library_once(conn, on_file=seen.append, should_stop=stop_after_two)
+
+    assert summary["cancelled"] is True
+    indexed = db.list_library_items(conn)
+    assert 0 < len(indexed) < 6, "a cancelled pass keeps its partial work, and stops early"
+
+
+def test_a_cancelled_scan_never_deletes_what_it_did_not_reach(isolated_db):
+    """The two whole-library passes at the bottom of scan_library_once()
+    both reason from seen_absolute_paths as if it were complete. Running
+    either after a half-finished walk would delete (or merge away) rows for
+    files the pass simply never got to -- a "stop" that silently emptied
+    the library would be far worse than the wait it saved."""
+    conn, _inbox_dir = isolated_db
+    for n in range(4):
+        (config.LIBRARY_DIR / f"Game {n} [010000000001{n:04}][v0].nsp").write_bytes(b"nsp bytes")
+    scanner.scan_library_once(conn)
+    assert len(db.list_library_items(conn)) == 4
+
+    summary = scanner.scan_library_once(conn, should_stop=lambda: True)
+
+    assert summary["cancelled"] is True
+    assert summary["removed"] == 0 and summary["relocated"] == 0
+    assert len(db.list_library_items(conn)) == 4, "nothing may be dropped on the strength of a partial walk"
+
+
+def test_stopping_before_anything_is_walked_is_still_a_clean_cancel(isolated_db):
+    conn, _inbox_dir = isolated_db
+    (config.LIBRARY_DIR / "Game [0100000000010000][v0].nsp").write_bytes(b"nsp bytes")
+
+    summary = scanner.scan_library_once(conn, should_stop=lambda: True)
+
+    assert summary["cancelled"] is True
+    assert summary["new"] == 0
+    assert db.list_library_items(conn) == []
