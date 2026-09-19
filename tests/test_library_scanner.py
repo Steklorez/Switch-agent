@@ -142,3 +142,135 @@ def test_scan_reports_error_if_library_dir_missing(tmp_path, monkeypatch):
         summary = scanner.scan_library_once(conn)
     assert summary["new"] == 0
     assert "error" in summary
+
+
+# ---------------------------------------------------------------------------
+# Relocation: the same file reached by a different path spelling. A Library
+# folder re-pointed at the SAME directory over UNC (D:\shared\Download ->
+# \192.168.50.2\shared\Download), a changed drive letter, a renamed parent --
+# absolute_path is the identity key here, so every one of those used to
+# re-index the whole folder as brand new items while the old rows stayed
+# behind as ERROR "source file no longer found on disk" (they cannot be
+# deleted once a job references them). One file then counted as two:
+# Game Details said "Base game: present (2 copies)" for a single base game.
+# ---------------------------------------------------------------------------
+
+def _relocate(library_dir, monkeypatch, tmp_path, name="library-elsewhere"):
+    """Copies LIBRARY_DIR to a second directory byte-for-byte, mtimes
+    included (SMB preserves them exactly -- verified against the real
+    duplicated rows this fixes), and points config at the copy. The
+    original files are deliberately left on disk: in the case this is
+    about, nothing was deleted, the folder is simply reached another way."""
+    import os
+    import shutil
+
+    other = tmp_path / name
+    shutil.copytree(library_dir, other)
+    for source in library_dir.rglob("*"):
+        st = source.stat()
+        os.utime(other / source.relative_to(library_dir), ns=(st.st_atime_ns, st.st_mtime_ns))
+    monkeypatch.setattr(config, "LIBRARY_DIR", other)
+    return other
+
+
+def test_the_same_file_reached_by_a_new_path_is_not_indexed_twice(isolated_db, monkeypatch, tmp_path):
+    conn, _inbox_dir = isolated_db
+    library_dir = config.LIBRARY_DIR
+    (library_dir / "Game [0100000000010000][v0].nsp").write_bytes(b"nsp bytes")
+    scanner.scan_library_once(conn)
+    original = db.list_library_items(conn)[0]
+
+    other = _relocate(library_dir, monkeypatch, tmp_path)
+    summary = scanner.scan_library_once(conn)
+
+    assert summary["relocated"] == 1
+    assert summary["new"] == 0
+    rows = db.list_library_items(conn)
+    assert len(rows) == 1, "one file must not count as two just because the path changed"
+    assert rows[0]["absolute_path"] == str(other / "Game [0100000000010000][v0].nsp")
+    assert rows[0]["status"] == "AVAILABLE"
+    # The library did not learn about this file today.
+    assert rows[0]["first_seen_at"] == original["first_seen_at"]
+
+
+def test_a_relocated_file_keeps_the_job_history_pointing_at_it(isolated_db, monkeypatch, tmp_path):
+    """The whole reason the old row could not simply be deleted: a job
+    references it. The surviving row is the one describing where the file
+    actually is now, so jobs are repointed at it rather than left dangling
+    (or blocking the merge)."""
+    conn, _inbox_dir = isolated_db
+    library_dir = config.LIBRARY_DIR
+    (library_dir / "Game [0100000000010000][v0].nsp").write_bytes(b"nsp bytes")
+    scanner.scan_library_once(conn)
+    item_id = db.list_library_items(conn)[0]["id"]
+    job_id = db.create_job(
+        conn, library_item_id=item_id, action="INSTALL_VIA_DBI",
+        target_storage="SD_INSTALL", target_device_id="mock-switch-parent",
+    )
+
+    _relocate(library_dir, monkeypatch, tmp_path)
+    assert scanner.scan_library_once(conn)["relocated"] == 1
+
+    rows = db.list_library_items(conn)
+    assert len(rows) == 1
+    assert db.get_job(conn, job_id)["library_item_id"] == rows[0]["id"]
+
+
+def test_a_relocated_mod_folder_is_merged_by_its_own_fingerprint(isolated_db, monkeypatch, tmp_path):
+    conn, _inbox_dir = isolated_db
+    library_dir = config.LIBRARY_DIR
+    mod_dir = library_dir / "SomeMod" / "atmosphere" / "contents" / "0100000000010000" / "romfs"
+    mod_dir.mkdir(parents=True)
+    (mod_dir / "asset.bin").write_bytes(b"asset data")
+    scanner.scan_library_once(conn)
+    assert len(db.list_library_items(conn)) == 1
+
+    _relocate(library_dir, monkeypatch, tmp_path)
+    assert scanner.scan_library_once(conn)["relocated"] == 1
+    assert len(db.list_library_items(conn)) == 1
+
+
+def test_two_live_copies_of_one_file_are_still_two_items(isolated_db, monkeypatch, tmp_path):
+    """A relocation is "the row I did not visit IS the row I did". Two
+    copies sitting in two watched folders are both visited, so neither is
+    stale and nothing is merged -- that is SKIP_DUPLICATE's job, not this
+    one, and collapsing them would silently lose a real file."""
+    import os
+    import shutil
+
+    conn, _inbox_dir = isolated_db
+    library_dir = config.LIBRARY_DIR
+    source = library_dir / "Game [0100000000010000][v0].nsp"
+    source.write_bytes(b"nsp bytes")
+    (library_dir / "second").mkdir()
+    copy = library_dir / "second" / "Game [0100000000010000][v0].nsp"
+    shutil.copy2(source, copy)
+    st = source.stat()
+    os.utime(copy, ns=(st.st_atime_ns, st.st_mtime_ns))
+
+    summary = scanner.scan_library_once(conn)
+    assert summary["relocated"] == 0
+    assert len(db.list_library_items(conn)) == 2
+
+
+def test_an_unreachable_library_folder_is_never_merged_away(isolated_db, monkeypatch, tmp_path):
+    """An unplugged drive already keeps its index (test above). It must not
+    lose it to a file that merely looks identical under a folder that IS
+    reachable -- the offline copy is not a stale spelling of it."""
+    conn, _inbox_dir = isolated_db
+    offline = tmp_path / "offline-drive"
+    offline.mkdir()
+    (offline / "Game [0100000000010000][v0].nsp").write_bytes(b"nsp bytes")
+    monkeypatch.setattr(config, "LIBRARY_DIR", offline)
+    scanner.scan_library_once(conn)
+    assert len(db.list_library_items(conn)) == 1
+
+    online = _relocate(offline, monkeypatch, tmp_path, name="still-plugged-in")
+    shutil_rmtree_offline = offline
+    import shutil
+    shutil.rmtree(shutil_rmtree_offline)  # the drive is gone, its rows must stay
+    monkeypatch.setattr(config, "library_dirs", lambda: (online, offline))
+
+    summary = scanner.scan_library_once(conn)
+    assert summary["relocated"] == 0
+    assert len(db.list_library_items(conn)) == 2
