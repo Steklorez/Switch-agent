@@ -27,6 +27,10 @@ never overwrites an existing file automatically, never auto-retries a
 failed job, and never substitutes a different target device than the one
 a job was created for.
 
+📺 **[Watch the Web UI in action](https://www.youtube.com/watch?v=xm-BTAGAqhU)**
+-- a short walkthrough of browsing the library and installing to a
+console through DBI.
+
 **Requirements:** Windows 10 or 11, 64-bit, with a Switch running DBI in
 MTP Responder mode connected over USB. No Python or any other runtime
 needs to be installed separately.
@@ -59,14 +63,24 @@ No Python, pip, or any dependency needs to be installed separately.
 ### First run
 
 On first launch, SwitchAgent writes a config file to
-`%LOCALAPPDATA%\SwitchAgent\config.yaml` and tries to auto-detect your
-Windows **Downloads** folder as the initial library source. If it can't
-be detected, open **Settings** in the web UI, which tells you plainly if
-no folder is configured yet. You can point SwitchAgent at your library
-folder directly from that page -- type or paste the path, click
-**Validate**, then **Save**; no config.yaml editing or restart is needed
-(Save re-scans automatically). Editing `library: source_dir:` in
-config.yaml by hand still works too, if you prefer.
+`%LOCALAPPDATA%\SwitchAgent\config.yaml` and **scans nothing until you
+choose a folder**. If your Windows **Downloads** folder can be detected
+it is written into that file as a commented-out suggestion, ready to
+uncomment -- but it is never adopted on your behalf: a real Downloads
+folder is mostly unrelated files, and walking it unasked is not a
+reasonable thing to do to somebody on first launch.
+
+Open **Settings** in the web UI, which tells you plainly that no folder
+is configured yet. Add your library folder there -- type or paste the
+path, or use **Choose folder…** on the machine running SwitchAgent --
+and it is checked before it is accepted; no config.yaml editing or
+restart is needed (adding one re-scans automatically). Editing
+`library: source_dir:` in config.yaml by hand still works too, if you
+prefer.
+
+You can add **several** folders and remove any of them with the **×**
+next to it, including the last one: SwitchAgent then watches nothing and
+clears its index. Removing a folder never touches the files themselves.
 
 Your configured library folder, queue/install history, and settings are
 never touched by an app update or reinstall.

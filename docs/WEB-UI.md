@@ -74,10 +74,10 @@ each own their own connection. WAL mode (already enabled by
 `db.get_connection()`) makes this safe for SQLite's one-writer/many-readers
 model at this scale.
 
-## Library: how `D:\shared\Download` is scanned
+## Library: how your chosen folders are scanned
 
-`config.LIBRARY_DIR` (default `D:\shared\Download`, overridable via
-`config.yaml`'s `library: source_dir:`) is scanned by
+`config.library_dirs()` -- the folders named by `config.yaml`'s
+`library: source_dir:` and `library: source_dirs:` -- is scanned by
 `scanner.scan_library_once()` -- the same classification logic as Stage
 2's `scan_once()` (NSP/NSZ/XCI/XCZ detection, archive listing, atmosphere
 mod folder detection, TITLE_ID validation, SHA-256 dedup), applied to a
@@ -87,18 +87,68 @@ different root and indexed into a **new, separate table**,
 (`switch-agent scan`/`preview`/`mtp-mock`) are completely unchanged and
 still work.
 
-A full rescan only happens when you press **Rescan** (`POST /api/scan`) --
-it runs in a background thread (`WebContext.run_scan_in_background()`) so
-the UI never blocks; `GET /api/scan/status` is polled by the page to show
-progress and refresh once done. Unchanged files (same size+mtime, or same
-folder fingerprint for atmosphere mods) are recognized and skipped without
-re-hashing, exactly like Stage 2.
+A rescan happens when you press **Rescan** (`POST /api/scan`), when the
+filesystem watcher notices a change (debounced, see
+`WebContext.start_library_watcher()`), and whenever the folder list is
+saved. It runs in a background thread
+(`WebContext.run_scan_in_background()`) so the UI never blocks;
+`GET /api/scan/status` is polled by the page to show progress and refresh
+once done.
+
+A scan can be **stopped**: `POST /api/scan/cancel` (the "Stop scanning"
+button) sets a flag that `scan_library_once()` polls at every step,
+including while enumerating the tree -- on a large folder that
+enumeration is most of the wait, and a cancel landing only after it would
+not feel like one. A cancelled pass keeps whatever it had already indexed
+and deliberately skips both whole-library passes at the end (relocation
+merge, retire-what-is-missing): each reasons from "everything I saw" as
+if it were the complete picture, which a half-finished walk is not. A
+stop therefore only ever costs knowledge not yet gathered; it never
+removes any.
+
+Saving the folder list cancels a running scan rather than refusing to
+save -- otherwise the one action that ends an unwanted scan would be the
+one action that scan blocks.
+
+Unchanged files (same size+mtime, or same folder fingerprint for
+atmosphere mods) are recognized and skipped without re-hashing, exactly
+like Stage 2 -- with one exception: a `RETIRED` row (below) is always
+re-indexed. "Unchanged" means its content is unchanged, never its
+membership, and a row this pass walked to is in the library again
+whatever it said a moment ago. Without that, removing a folder and adding
+it straight back left every byte-identical file retired and invisible.
 
 **Scanning never creates a job.** `scan_library_once()` only ever writes
 `library_items` rows with a status like `AVAILABLE`/`NEEDS_REVIEW`/
-`ERROR`/`SKIP_DUPLICATE` -- see `tests/test_library_scanner.py::
+`ERROR`/`SKIP_DUPLICATE`/`RETIRED` -- see `tests/test_library_scanner.py::
 test_scan_never_creates_a_job` and `tests/test_web_api.py::
 test_scan_never_creates_a_job_via_api`.
+
+**`RETIRED`** (`db.LIBRARY_ITEM_RETIRED`) is a row whose file has left the
+library -- the folder was removed, or the file was deleted -- and which
+cannot be dropped because a job references it (`jobs.library_item_id` has
+no `ON DELETE`, and Queue/History resolve their display names through
+it). It is a record, not content: every "what is in my library" read
+skips it (`services.library_rows_in_scope()`), every display-name lookup
+still finds it, and History is never touched. Its own status rather than
+`ERROR`, because `ERROR` means "look at this, something is wrong" and a
+retired row wants no attention at all.
+
+Removing **every** folder is allowed and is an ordinary configured state,
+told apart from a config that never named one: an explicit
+`source_dirs: []` makes `library_dirs()` return nothing, while the key
+being absent still falls back to `LIBRARY_DIR`. Only the first is a
+decision. A folder that is merely unreachable right now (an unplugged
+drive) is never retired -- its rows are backfilled into the "seen" set
+before anything is called missing.
+
+Two paths spelling the same file -- `D:\shared\Download` and
+`\\192.168.50.2\shared\Download`, a changed drive letter, a renamed
+parent -- are folded together rather than counted twice
+(`db.merge_relocated_library_items()`, keyed on size + mtime + filename,
+since indexing a package deliberately never hashes it). The surviving row
+is the one describing where the file is now, and jobs are repointed at it
+first, so nothing loses its history.
 
 Large files are never copied into a second location just to be indexed --
 `library_items.absolute_path` is a reference to the file where it already
