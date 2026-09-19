@@ -142,25 +142,24 @@
     // -- never throws, so callers can decide what to do next (retry, give
     // up) instead of only being able to report the failure.
     async function saveLibraryDirs(dirs, busyMessage) {
-      if (dirs.length === 0) {
-        // Never actually POST this -- LibraryDirRequest.path requires a
-        // non-empty string (schemas.py), so an empty `dirs` would 422 with
-        // FastAPI's structured (non-string) validation-error detail, not
-        // the friendly "Choose at least one folder" services.py raises
-        // for every OTHER empty-list case. Same rule, said once, client-side.
-        return "At least one folder is required -- add a replacement before removing the last one.";
-      }
+      // An empty list is a real request -- "stop looking at anything" --
+      // and posting it is the whole point: the server clears the config and
+      // the rescan it triggers retires the now-orphaned index. This used to
+      // be refused here, which left no way to stop SwitchAgent watching a
+      // folder without first finding another folder to offer it.
       libraryFeedback.textContent = busyMessage;
       try {
         const res = await fetch("/api/settings/library-dir", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ path: dirs[0], paths: dirs }),
+          body: JSON.stringify({ path: dirs[0] || "", paths: dirs }),
         });
         const body = await res.json();
         if (!res.ok) return body.detail || "Could not save.";
         renderLibraryDirs(body.library_dirs);
-        libraryFeedback.textContent = "Saved -- rescanning the library now.";
+        libraryFeedback.textContent = dirs.length
+          ? "Saved -- rescanning the library now."
+          : "All folders removed. SwitchAgent is no longer watching anything; your files are untouched.";
         return null;
       } catch (e) {
         return String(e.message || e);
