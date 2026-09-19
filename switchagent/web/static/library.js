@@ -640,8 +640,13 @@
           scanStatus.textContent = "Scan error: " + state.error;
         } else if (state.summary) {
           const s = state.summary;
+          // `relocated` is only ever mentioned when it happened: re-pointing a
+          // Library folder at the same files by another path (UNC, a new drive
+          // letter) silently folds the old rows into the new ones, and a scan
+          // reporting "0 new, 0 updated, 0 removed" would hide that entirely.
           scanStatus.textContent =
-            "Scan complete: " + s.new + " new, " + s.updated + " updated, " + s.removed + " removed.";
+            "Scan complete: " + s.new + " new, " + s.updated + " updated, " + s.removed + " removed" +
+            (s.relocated ? ", " + s.relocated + " matched to a new path" : "") + ".";
           setTimeout(() => window.location.reload(), 1000);
         }
       }

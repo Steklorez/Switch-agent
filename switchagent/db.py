@@ -1170,6 +1170,95 @@ def delete_library_items_missing_from(conn: sqlite3.Connection, present_absolute
     return len(deletable_ids)
 
 
+def _relocation_identity(row: sqlite3.Row):
+    """What makes two library_items rows the SAME physical thing seen under
+    two different path spellings. Deliberately cheap: indexing a package
+    never hashes it (scanner._classify_package_file(hash_content=False) --
+    reading gigabytes per scan pass is exactly what that avoids), so
+    content_hash is None for the files this has to work on and cannot be
+    the identity here.
+
+    size + mtime + filename instead. mtime is a float carrying sub-
+    microsecond precision and survives an SMB round trip byte-for-byte
+    (verified against the real duplicated rows this fixes), so a collision
+    between two genuinely unrelated files is not a practical concern. A
+    mod folder has no single file to name and IS always hashed
+    (scanner.hash_mod_folder), so it uses that hash directly.
+
+    None means "no usable identity" -- never merged, in either direction."""
+    if row["item_type"] == "MOD_FOLDER":
+        return ("MOD_FOLDER", row["content_hash"]) if row["content_hash"] else None
+    return ("FILE", row["size"], row["mtime"], Path(row["absolute_path"]).name.lower())
+
+
+def merge_relocated_library_items(
+    conn: sqlite3.Connection, present_absolute_paths: set[str], *, skip_roots=(),
+) -> list[str]:
+    """Folds a row whose path this scan did NOT visit into the row for the
+    same physical file that it DID -- the file did not disappear, it is
+    simply reached by a different path now.
+
+    Why this exists: absolute_path is the library's identity key, so
+    pointing a Library folder at the same directory by another spelling
+    (D:\\shared\\Download -> \\\\192.168.50.2\\shared\\Download, a drive
+    letter change, a renamed parent folder) re-indexed every file in it as
+    a brand new item, while the old rows stayed behind marked ERROR
+    "source file no longer found on disk" -- they cannot be deleted once a
+    job references them (see delete_library_items_missing_from). One file
+    then counted as two everywhere that counts library rows: Game Details
+    said "Base game: present (2 copies)" and "Updates: 2" for a game with
+    one of each.
+
+    The old row is merged INTO the new one rather than the other way
+    round, so the surviving row is the one describing where the file
+    actually is now; jobs.library_item_id (the only FK into this table --
+    install_history hangs off jobs(id) and keeps its own display_name
+    snapshot regardless) is repointed first, so nothing loses its history.
+    The earlier first_seen_at wins: the library did not learn about this
+    file today just because the path changed.
+
+    Strictly conservative -- merges only when exactly ONE visited row
+    matches. Two live copies of the same file in two watched folders are a
+    genuine duplicate, not a relocation (SKIP_DUPLICATE's job), and rows
+    under `skip_roots` -- library folders that are currently unreachable,
+    e.g. an unplugged drive -- are never merged away on the strength of
+    something that only LOOKS like them.
+
+    Returns the absolute_path of each surviving row, one entry per merge,
+    so the caller can tell a genuinely new file from one it had already
+    indexed under its old name (scan_library_once reports them
+    separately -- "1 new" for a file that was only ever moved is a lie)."""
+    rows = conn.execute("SELECT * FROM library_items").fetchall()
+    live: dict = {}
+    stale = []
+    for row in rows:
+        if row["absolute_path"] in present_absolute_paths:
+            identity = _relocation_identity(row)
+            if identity is not None:
+                live.setdefault(identity, []).append(row)
+        elif not any(Path(row["absolute_path"]).is_relative_to(root) for root in skip_roots):
+            stale.append(row)
+
+    merged: list[str] = []
+    for row in stale:
+        twins = live.get(_relocation_identity(row), [])
+        if len(twins) != 1:
+            continue
+        keeper = twins[0]
+        conn.execute(
+            "UPDATE jobs SET library_item_id = ? WHERE library_item_id = ?", (keeper["id"], row["id"]),
+        )
+        conn.execute(
+            "UPDATE library_items SET first_seen_at = ? WHERE id = ? AND first_seen_at > ?",
+            (row["first_seen_at"], keeper["id"], row["first_seen_at"]),
+        )
+        conn.execute("DELETE FROM library_items WHERE id = ?", (row["id"],))
+        merged.append(keeper["absolute_path"])
+    if merged:
+        conn.commit()
+    return merged
+
+
 def find_other_library_item_with_hash(
     conn: sqlite3.Connection, content_hash: str, exclude_absolute_path: str,
 ) -> Optional[sqlite3.Row]:

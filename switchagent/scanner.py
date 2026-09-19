@@ -397,10 +397,14 @@ def scan_library_once(conn, *, on_file: Optional[Callable[[str], None]] = None) 
     if len(missing) == len(library_dirs):
         return dict(
             new=0, updated=0, unchanged=0, skipped_unstable=0, duplicates=0, errors=0, removed=0,
-            error=f"library directories do not exist: {missing}",
+            relocated=0, error=f"library directories do not exist: {missing}",
         )
 
     seen_absolute_paths: set[str] = set()
+    # Which of those were inserted, not just refreshed -- see the
+    # relocation pass at the bottom for why that has to be tracked by path
+    # and not just counted.
+    newly_indexed_paths: set[str] = set()
     new_count = 0
     updated_count = 0
     unchanged_count = 0
@@ -445,6 +449,7 @@ def scan_library_once(conn, *, on_file: Optional[Callable[[str], None]] = None) 
         )
         if existing is None:
             new_count += 1
+            newly_indexed_paths.add(abs_path)
         else:
             updated_count += 1
 
@@ -530,8 +535,29 @@ def scan_library_once(conn, *, on_file: Optional[Callable[[str], None]] = None) 
         )
         if existing is None:
             new_count += 1
+            newly_indexed_paths.add(abs_path)
         else:
             updated_count += 1
+
+    # Before anything is called stale: a row this pass never visited may be
+    # the very file it DID visit under another path spelling (a Library
+    # folder re-pointed at the same directory over UNC, a drive letter
+    # change, a renamed parent). Fold those together rather than leaving
+    # one file counted as two. Runs against the paths genuinely walked
+    # above -- deliberately BEFORE the unplugged-drive backfill below, so
+    # an offline root's rows can never become a merge target.
+    relocated_paths = db.merge_relocated_library_items(
+        conn, seen_absolute_paths, skip_roots=missing,
+    )
+    # A row that turns out to be an already-known file under a new path was
+    # never new, however it looked a moment ago -- reporting "1 new" for a
+    # file the library has had all along is exactly the confusion this pass
+    # exists to remove. (The keeper may equally be a row from an EARLIER
+    # scan, e.g. a library already carrying both spellings before this
+    # existed; then there is no `new` to take back and the sets simply do
+    # not intersect.)
+    new_count -= len(newly_indexed_paths & set(relocated_paths))
+    relocated_count = len(relocated_paths)
 
     # An unplugged drive must not erase its existing index.
     for row in db.list_library_items(conn):
@@ -542,5 +568,5 @@ def scan_library_once(conn, *, on_file: Optional[Callable[[str], None]] = None) 
     return dict(
         new=new_count, updated=updated_count, unchanged=unchanged_count,
         skipped_unstable=skipped_unstable, duplicates=duplicate_count,
-        errors=errors, removed=removed_count,
+        errors=errors, removed=removed_count, relocated=relocated_count,
     )
