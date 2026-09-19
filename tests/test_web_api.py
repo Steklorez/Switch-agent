@@ -12,6 +12,8 @@ invariants.
 
 from __future__ import annotations
 
+import re
+
 import pytest
 from fastapi.testclient import TestClient
 
@@ -2871,3 +2873,49 @@ def test_stab001_stall_flag_never_applies_once_a_job_leaves_running(client, web_
     queue_after = {j["id"]: j for j in client.get("/api/queue").json()}
     assert queue_after[job_id]["possibly_stalled"] is False
     assert queue_after[job_id]["stall_seconds"] is None
+
+
+# ---------------------------------------------------------------------------
+# Static asset cache-busting. Hand-maintained `?v=N` numbers cost this
+# project two shipped-but-invisible changes in one sitting: app.js carried
+# no version at all, and settings.js kept serving the previous build's
+# "At least one folder is required" long after that rule was gone from it.
+# ---------------------------------------------------------------------------
+
+def _static_refs(html: str) -> list[str]:
+    return re.findall(r'(?:src|href)="(/static/[^"]+)"', html)
+
+
+@pytest.mark.parametrize("path", ["/", "/queue", "/history", "/devices", "/settings"])
+def test_every_static_asset_is_cache_busted(client, path):
+    refs = _static_refs(client.get(path).text)
+    assert refs, f"{path} loads no static assets at all -- did the markup change?"
+    unversioned = [r for r in refs if "?v=" not in r]
+    assert not unversioned, f"{path} would serve these from a stale cache forever: {unversioned}"
+
+
+def test_the_cache_key_changes_when_the_file_does(client, tmp_path, monkeypatch):
+    """A version that does not move when the file moves is worse than
+    none: it reads as protection while providing none."""
+    from switchagent.web import app as app_mod
+
+    before = _static_refs(client.get("/").text)
+    assert before == _static_refs(client.get("/").text), "the same bytes must keep the same URL"
+
+    static_dir = app_mod._WEB_DIR / "static"
+    original = (static_dir / "app.js").read_bytes()
+    try:
+        (static_dir / "app.js").write_bytes(original + b"\n// touched\n")
+        after = _static_refs(client.get("/").text)
+    finally:
+        (static_dir / "app.js").write_bytes(original)
+
+    changed = set(after) - set(before)
+    assert any("app.js" in ref for ref in changed), "editing app.js must change its URL"
+
+
+def test_a_missing_static_file_does_not_break_the_page(client):
+    """A 404 in the network tab beats a page that will not render."""
+    from switchagent.web import app as app_mod
+
+    assert app_mod._static_url("no-such-file.js") == "/static/no-such-file.js"

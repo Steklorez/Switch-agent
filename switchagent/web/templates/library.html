@@ -1,6 +1,6 @@
 {% extends "base.html" %}
 {% block title %}Library — SwitchAgent{% endblock %}
-{% block styles %}<link rel="stylesheet" href="/static/card_motion.css?v=8">{% endblock %}
+{% block styles %}<link rel="stylesheet" href="{{ static_url('card_motion.css') }}">{% endblock %}
 
 {# confirmed_on_device (DBI's own report) and the job-status pill
    (SwitchAgent's own copy record) can both be true at once for the exact
@@ -212,9 +212,9 @@
 {% include "_install_selection.html" %}
 {% endblock %}
 {% block scripts %}
-<script src="/static/library.js?v=3"></script>
-<script src="/static/covers.js?v=3"></script>
-<script src="/static/library_activity.js?v=3"></script>
-<script src="/static/card_motion.js?v=3"></script>
-<script src="/static/library_live.js"></script>
+<script src="{{ static_url('library.js') }}"></script>
+<script src="{{ static_url('covers.js') }}"></script>
+<script src="{{ static_url('library_activity.js') }}"></script>
+<script src="{{ static_url('card_motion.js') }}"></script>
+<script src="{{ static_url('library_live.js') }}"></script>
 {% endblock %}

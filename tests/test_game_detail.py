@@ -354,7 +354,17 @@ def test_install_selection_markup_matches_the_library_pages_contract(web_ctx):
     single_client = TestClient(create_app(single_device_ctx))
     html = single_client.get(f"/games/{BASE_TITLE_ID}").text
 
-    assert '<script src="/static/library.js"></script>' in html
+    # The same file AND the same URL as the Library page -- this used to
+    # assert the bare `<script src="/static/library.js">`, which was itself
+    # the bug it was meant to guard: Library asked for `?v=3` and this page
+    # asked for no version at all, so one file occupied two cache entries
+    # and either page could be running a stale copy of the other's script.
+    library_src = re.search(r'src="(/static/library\.js[^"]*)"', html)
+    assert library_src is not None, "Game Details must load library.js"
+    library_page_src = re.search(
+        r'src="(/static/library\.js[^"]*)"', single_client.get("/").text,
+    )
+    assert library_src.group(1) == library_page_src.group(1)
     for element_id in ("selection-bar", "install-selected-btn", "confirm-modal",
                        "confirm-install-btn", "confirm-list", "target-device"):
         assert f'id="{element_id}"' in html, element_id
