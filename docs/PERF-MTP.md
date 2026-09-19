@@ -145,6 +145,42 @@ written.
 `SWITCHAGENT_TRANSPORT=shell` forces the old path on an installed copy
 without a rebuild.
 
+## The ~63s after a large install: three dead ends, and what it actually is
+
+Large `.nsz` installs still cost about a minute after the last byte. Three
+different ways around it were built and measured on real hardware; all three
+failed, and the third explains why none of them could work.
+
+| attempt | where the wait landed |
+|---|---|
+| commit and wait (shipped behaviour) | `IStream::Commit` — 63.03s |
+| skip the commit, just release the stream | the stream's `Release` — 63.03s |
+| `IPortableDeviceDataStream::Cancel` first | the stream's `Release` — 63.08s |
+| release on a background thread | the NEXT call to the device — 63.03s |
+
+The last one is the answer: the device answers *nothing* until the
+transaction resolves, so this is not a call of ours that can be avoided,
+rearranged or backgrounded. A two-file batch took 182.9s either way.
+
+Three further facts, each measured rather than reasoned:
+
+- **63.03s is the WPD stack's response timeout, not measured device work.**
+  We stop waiting at 63s and never learn how long DBI actually took.
+- **It is console-specific.** Identical file, code, cable and PC: one
+  console releases in 63.03s, the other in 1.60s — 95.94s against 36.33s in
+  total. Both stream the bytes at the same 11-12 MB/s, so it is not the SD
+  card's write speed and not the decompression.
+- **It is not `dbi.config`.** Reduced to the same 33-byte default config as
+  the fast console, the slow one still took 63.04s. Airplane mode is on
+  there, so it is not a network timeout either.
+- **It is not proportional to the file.** 388 MiB and 547 MiB both hit
+  exactly 63.03s, while a 5.8 MiB `.nsp` released in 0.92s and a 123 MiB
+  `.nsp` committed in 2.69s. Big installs push DBI past the timeout; small
+  ones never reach it.
+
+Anything further has to start on the console: watch DBI's own screen during
+that minute. Nothing on the PC side can see what it is doing.
+
 ## Things worth knowing that came out of this
 
 - **DBI leaves a phantom placeholder.** After an install completes, the
