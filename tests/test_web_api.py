@@ -1608,11 +1608,65 @@ def test_legacy_batch_id_null_job_still_renders_as_its_own_group(client, web_ctx
             conn, library_item_id=item_id, action="INSTALL_VIA_DBI",
             target_storage="SD_INSTALL", target_device_id="mock-switch-parent",
         )
+        # create_job() leaves a job PENDING_CONFIRM, which Queue no longer
+        # draws at all (services._not_yet_queued) -- incidental to what this
+        # test is actually about, so move it on to real queued work.
+        # update_job_status() rather than confirm_job(): the latter insists
+        # on a frozen manifest, which a deliberately bare create_job() (the
+        # whole point of this test) has none of.
+        db.update_job_status(conn, job_id, "CONFIRMED")
 
     groups = client.get("/api/queue/grouped").json()
     assert any(g["batch_id"] is None and g["jobs"][0]["id"] == job_id for g in groups)
     html = client.get("/queue").text
     assert f'data-job-id="{job_id}"' in html
+
+
+def test_a_staged_but_unconfirmed_job_is_not_drawn_as_a_queue_row(client, web_ctx):
+    """web/preparation.py stages the NEXT item while the current one is
+    still transferring, and only records that item's job_ids once its own
+    turn arrives. In between, its PENDING_CONFIRM jobs belonged to no
+    preparation item, so queue.js's `represented` filter could not
+    suppress them and the very same file was drawn TWICE -- once as a
+    "Waiting" preparation row, and again as a whole separate batch group
+    underneath it, for as long as the previous file took to copy."""
+    item_id = _seed_library_item(web_ctx)
+    with db.open_db(web_ctx.db_path) as conn:
+        batch_id = db.create_installation_batch(conn, target_device_id="mock-switch-parent")
+        job_id = db.create_job(
+            conn, library_item_id=item_id, action="INSTALL_VIA_DBI",
+            target_storage="SD_INSTALL", target_device_id="mock-switch-parent", batch_id=batch_id,
+        )
+        assert db.get_job(conn, job_id)["status"] == "PENDING_CONFIRM"
+
+    assert client.get("/api/queue/grouped").json() == []
+    assert client.get("/api/queue").json() == []
+    assert f'data-job-id="{job_id}"' not in client.get("/queue").text
+
+    # ...and the instant its turn comes, it is ordinary queued work again.
+    with db.open_db(web_ctx.db_path) as conn:
+        db.update_job_status(conn, job_id, "CONFIRMED")
+    assert f'data-job-id="{job_id}"' in client.get("/queue").text
+
+
+def test_an_unconfirmed_job_still_counts_as_unfinished_work(client, web_ctx):
+    """_not_yet_queued() is display-only and must never leak into
+    _not_settled(): a staged job holds a real payload and a real claim on
+    its Switch, so forget_device()'s "unfinished job(s) still target this
+    device" guard has to keep counting it even while Queue draws nothing
+    for it."""
+    from switchagent.web import services
+
+    item_id = _seed_library_item(web_ctx)
+    with db.open_db(web_ctx.db_path) as conn:
+        db.create_job(
+            conn, library_item_id=item_id, action="INSTALL_VIA_DBI",
+            target_storage="SD_INSTALL", target_device_id="mock-switch-parent",
+        )
+        rows = db.list_jobs(conn)
+
+    assert [services._not_yet_queued(r) for r in rows] == [True]
+    assert [services._not_settled(rows, r) for r in rows] == [True]
 
 
 def test_retry_creates_its_own_new_single_job_batch_not_the_old_one(client, web_ctx):
