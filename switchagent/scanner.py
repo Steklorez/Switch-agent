@@ -188,14 +188,24 @@ def hash_mod_folder(folder: Path) -> tuple[str, int, float]:
     return h.hexdigest(), total_size, max_mtime
 
 
-def find_mod_folders(inbox_dir: Path) -> list[Path]:
+def find_mod_folders(inbox_dir: Path, *, should_stop: Optional[Callable[[], bool]] = None) -> list[Path]:
     """Finds every atmosphere/contents/<TITLE_ID> directory placed directly
     in inbox/ (not inside an archive -- that case is handled by
     extractor.list_archive_entries + classify_entries). Matched by regex on
     the TITLE_ID directory name, not a fixed depth, so 'atmosphere' can be
-    nested wherever the user happened to drop it."""
+    nested wherever the user happened to drop it.
+
+    `should_stop`, if given, is polled while walking the tree and makes
+    this return whatever it has found so far. A Library folder pointed at
+    something like a real Downloads directory can take minutes just to
+    enumerate, and a scan the user has asked to stop must not have to
+    finish walking it first (see scan_library_once)."""
     result = []
-    atmosphere_dirs = list(inbox_dir.rglob("atmosphere"))
+    atmosphere_dirs = []
+    for candidate in inbox_dir.rglob("atmosphere"):
+        if should_stop is not None and should_stop():
+            return result
+        atmosphere_dirs.append(candidate)
     if inbox_dir.name.lower() == "atmosphere":
         atmosphere_dirs.insert(0, inbox_dir)
     for atmosphere_dir in atmosphere_dirs:
@@ -375,7 +385,10 @@ def scan_once(conn) -> dict:
 # docs/WEB-UI.md for the "separate table, minimal overlap" rationale.
 # ---------------------------------------------------------------------------
 
-def scan_library_once(conn, *, on_file: Optional[Callable[[str], None]] = None) -> dict:
+def scan_library_once(
+    conn, *, on_file: Optional[Callable[[str], None]] = None,
+    should_stop: Optional[Callable[[], bool]] = None,
+) -> dict:
     """One full pass over config.LIBRARY_DIR. Safe to call repeatedly --
     items unchanged since the last pass (by size+mtime for files, or the
     folder fingerprint for mod folders) are recognized and skipped without
@@ -391,16 +404,47 @@ def scan_library_once(conn, *, on_file: Optional[Callable[[str], None]] = None) 
     progress signal, not just "currently indexing new content". Purely a
     UI progress hook (see switchagent/web/context.py's
     run_scan_in_background); scan_library_once() itself has no other use
-    for it and works identically with or without one."""
+    for it and works identically with or without one.
+
+    `should_stop`, if given, is polled at every step -- while enumerating
+    the tree as well as per item -- and makes this return early with
+    cancelled=True. Everything already indexed in this pass is kept (each
+    item is committed as it is read), but the two whole-library passes at
+    the bottom are deliberately SKIPPED: both reason from
+    seen_absolute_paths as if it were the complete picture, so running
+    either on a half-finished walk would merge or delete rows for files
+    this pass simply never got to. A cancelled scan therefore only ever
+    adds knowledge, never removes it."""
     library_dirs = config.library_dirs()
+    if not library_dirs:
+        # The user removed their last Library folder. Not a failure and not
+        # "the drive is unplugged" (the branch below): nothing is part of
+        # the collection any more, so nothing should still be indexed as
+        # if it were. delete_library_items_missing_from() is the same pass
+        # that already retires a single deleted file, with the same rule
+        # for a row some job still references -- flagged ERROR and kept,
+        # never hard-deleted, so Queue/History keep their display names.
+        removed_count = db.delete_library_items_missing_from(conn, set())
+        return dict(
+            new=0, updated=0, unchanged=0, skipped_unstable=0, duplicates=0,
+            errors=0, removed=removed_count, relocated=0,
+        )
+
     missing = [p for p in library_dirs if not p.is_dir()]
     if len(missing) == len(library_dirs):
         return dict(
             new=0, updated=0, unchanged=0, skipped_unstable=0, duplicates=0, errors=0, removed=0,
-            error=f"library directories do not exist: {missing}",
+            relocated=0, error=f"library directories do not exist: {missing}",
         )
 
+    def _stopped() -> bool:
+        return should_stop is not None and should_stop()
+
     seen_absolute_paths: set[str] = set()
+    # Which of those were inserted, not just refreshed -- see the
+    # relocation pass at the bottom for why that has to be tracked by path
+    # and not just counted.
+    newly_indexed_paths: set[str] = set()
     new_count = 0
     updated_count = 0
     unchanged_count = 0
@@ -408,8 +452,22 @@ def scan_library_once(conn, *, on_file: Optional[Callable[[str], None]] = None) 
     duplicate_count = 0
     errors = 0
 
-    mod_folders = list(dict.fromkeys(folder for root in library_dirs if root.is_dir() for folder in find_mod_folders(root)))
+    def _cancelled() -> dict:
+        return dict(
+            new=new_count, updated=updated_count, unchanged=unchanged_count,
+            skipped_unstable=skipped_unstable, duplicates=duplicate_count,
+            errors=errors, removed=0, relocated=0, cancelled=True,
+        )
+
+    mod_folders = list(dict.fromkeys(
+        folder for root in library_dirs if root.is_dir()
+        for folder in find_mod_folders(root, should_stop=should_stop)
+    ))
+    if _stopped():
+        return _cancelled()
     for folder in mod_folders:
+        if _stopped():
+            return _cancelled()
         abs_path = str(folder)
         seen_absolute_paths.add(abs_path)
         if on_file is not None:
@@ -418,7 +476,18 @@ def scan_library_once(conn, *, on_file: Optional[Callable[[str], None]] = None) 
         existing = db.get_library_item(conn, abs_path)
         content_hash, total_size, max_mtime = hash_mod_folder(folder)
 
-        if existing is not None and existing["content_hash"] == content_hash:
+        # "Unchanged" has to mean "its CONTENT is unchanged", never "its
+        # membership is unchanged". A row this pass has just walked to is, by
+        # definition, in the library again -- and a retired one (see
+        # db.LIBRARY_ITEM_RETIRED) says the opposite, so it must not take the
+        # shortcut past re-indexing. Remove a Library folder and add it straight
+        # back and every file is byte-identical, which is exactly when this
+        # fires: 19 of one real library's 48 rows stayed retired, and therefore
+        # invisible, through any number of rescans. Re-classifying them costs
+        # one pass over files that have just rejoined the library, and only
+        # ever on that pass.
+        if (existing is not None and existing["status"] != db.LIBRARY_ITEM_RETIRED
+                and existing["content_hash"] == content_hash):
             db.touch_library_item_scanned(conn, existing["id"])
             unchanged_count += 1
             continue
@@ -445,17 +514,30 @@ def scan_library_once(conn, *, on_file: Optional[Callable[[str], None]] = None) 
         )
         if existing is None:
             new_count += 1
+            newly_indexed_paths.add(abs_path)
         else:
             updated_count += 1
 
-    candidate_files = list(dict.fromkeys(
-        p for root in library_dirs if root.is_dir() for p in root.rglob("*")
-        if p.is_file()
-        and p.suffix.lower() in config.ALL_TRACKED_EXTENSIONS
-        and not path_is_inside_any(p, mod_folders)
-    ))
+    # Materialised with an explicit loop rather than a comprehension purely
+    # so the walk itself can be interrupted: on a folder the size of a real
+    # Downloads directory this enumeration alone is most of the wait, and a
+    # cancel that only took effect afterwards would not feel like a cancel.
+    candidate_files: list[Path] = []
+    for root in library_dirs:
+        if not root.is_dir():
+            continue
+        for candidate in root.rglob("*"):
+            if _stopped():
+                return _cancelled()
+            if (candidate.is_file()
+                    and candidate.suffix.lower() in config.ALL_TRACKED_EXTENSIONS
+                    and not path_is_inside_any(candidate, mod_folders)):
+                candidate_files.append(candidate)
+    candidate_files = list(dict.fromkeys(candidate_files))
 
     for abs_path_obj in candidate_files:
+        if _stopped():
+            return _cancelled()
         abs_path = str(abs_path_obj)
         seen_absolute_paths.add(abs_path)
         if on_file is not None:
@@ -468,7 +550,10 @@ def scan_library_once(conn, *, on_file: Optional[Callable[[str], None]] = None) 
             continue
 
         existing = db.get_library_item(conn, abs_path)
-        if existing is not None and existing["size"] == st.st_size and existing["mtime"] == st.st_mtime:
+        # Same rule as the mod-folder loop above: a retired row must be
+        # re-indexed rather than recognised as unchanged.
+        if (existing is not None and existing["status"] != db.LIBRARY_ITEM_RETIRED
+                and existing["size"] == st.st_size and existing["mtime"] == st.st_mtime):
             db.touch_library_item_scanned(conn, existing["id"])
             unchanged_count += 1
             continue
@@ -530,8 +615,29 @@ def scan_library_once(conn, *, on_file: Optional[Callable[[str], None]] = None) 
         )
         if existing is None:
             new_count += 1
+            newly_indexed_paths.add(abs_path)
         else:
             updated_count += 1
+
+    # Before anything is called stale: a row this pass never visited may be
+    # the very file it DID visit under another path spelling (a Library
+    # folder re-pointed at the same directory over UNC, a drive letter
+    # change, a renamed parent). Fold those together rather than leaving
+    # one file counted as two. Runs against the paths genuinely walked
+    # above -- deliberately BEFORE the unplugged-drive backfill below, so
+    # an offline root's rows can never become a merge target.
+    relocated_paths = db.merge_relocated_library_items(
+        conn, seen_absolute_paths, skip_roots=missing,
+    )
+    # A row that turns out to be an already-known file under a new path was
+    # never new, however it looked a moment ago -- reporting "1 new" for a
+    # file the library has had all along is exactly the confusion this pass
+    # exists to remove. (The keeper may equally be a row from an EARLIER
+    # scan, e.g. a library already carrying both spellings before this
+    # existed; then there is no `new` to take back and the sets simply do
+    # not intersect.)
+    new_count -= len(newly_indexed_paths & set(relocated_paths))
+    relocated_count = len(relocated_paths)
 
     # An unplugged drive must not erase its existing index.
     for row in db.list_library_items(conn):
@@ -542,5 +648,5 @@ def scan_library_once(conn, *, on_file: Optional[Callable[[str], None]] = None) 
     return dict(
         new=new_count, updated=updated_count, unchanged=unchanged_count,
         skipped_unstable=skipped_unstable, duplicates=duplicate_count,
-        errors=errors, removed=removed_count,
+        errors=errors, removed=removed_count, relocated=relocated_count,
     )

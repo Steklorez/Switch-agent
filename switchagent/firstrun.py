@@ -51,9 +51,21 @@ library:
 {library_section}
 """
 
+# Deliberately COMMENTED OUT, not active. Auto-detecting the Downloads
+# folder is a helpful suggestion to prefill Settings with; silently
+# adopting it as the Library folder is not. It is mostly unrelated junk, a
+# full pass over it takes minutes (see scanner.is_file_stable's deliberate
+# per-archive wait), and the user never asked for any of it -- yet writing
+# source_dir here made the app treat it as a chosen folder and start
+# watching and re-walking it from the very first launch. Left unchosen,
+# config.load_library_dir() still falls back to this same path to prefill
+# Settings, and onboarding's "Choose Library Folder" banner asks for a
+# real answer first.
 _LIBRARY_SECTION_DETECTED = (
-    "  # Auto-detected Windows Downloads folder.\n"
-    '  source_dir: "{escaped_path}"\n'
+    "  # Auto-detected Windows Downloads folder. Uncomment to use it as your\n"
+    "  # library, or pick a folder in Settings -- SwitchAgent scans nothing\n"
+    "  # until you choose one.\n"
+    '  # source_dir: "{escaped_path}"\n'
 )
 
 _LIBRARY_SECTION_UNDETECTED = (

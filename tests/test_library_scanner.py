@@ -142,3 +142,374 @@ def test_scan_reports_error_if_library_dir_missing(tmp_path, monkeypatch):
         summary = scanner.scan_library_once(conn)
     assert summary["new"] == 0
     assert "error" in summary
+
+
+# ---------------------------------------------------------------------------
+# Relocation: the same file reached by a different path spelling. A Library
+# folder re-pointed at the SAME directory over UNC (D:\shared\Download ->
+# \192.168.50.2\shared\Download), a changed drive letter, a renamed parent --
+# absolute_path is the identity key here, so every one of those used to
+# re-index the whole folder as brand new items while the old rows stayed
+# behind as ERROR "source file no longer found on disk" (they cannot be
+# deleted once a job references them). One file then counted as two:
+# Game Details said "Base game: present (2 copies)" for a single base game.
+# ---------------------------------------------------------------------------
+
+def _relocate(library_dir, monkeypatch, tmp_path, name="library-elsewhere"):
+    """Copies LIBRARY_DIR to a second directory byte-for-byte, mtimes
+    included (SMB preserves them exactly -- verified against the real
+    duplicated rows this fixes), and points config at the copy. The
+    original files are deliberately left on disk: in the case this is
+    about, nothing was deleted, the folder is simply reached another way."""
+    import os
+    import shutil
+
+    other = tmp_path / name
+    shutil.copytree(library_dir, other)
+    for source in library_dir.rglob("*"):
+        st = source.stat()
+        os.utime(other / source.relative_to(library_dir), ns=(st.st_atime_ns, st.st_mtime_ns))
+    monkeypatch.setattr(config, "LIBRARY_DIR", other)
+    return other
+
+
+def test_the_same_file_reached_by_a_new_path_is_not_indexed_twice(isolated_db, monkeypatch, tmp_path):
+    conn, _inbox_dir = isolated_db
+    library_dir = config.LIBRARY_DIR
+    (library_dir / "Game [0100000000010000][v0].nsp").write_bytes(b"nsp bytes")
+    scanner.scan_library_once(conn)
+    original = db.list_library_items(conn)[0]
+
+    other = _relocate(library_dir, monkeypatch, tmp_path)
+    summary = scanner.scan_library_once(conn)
+
+    assert summary["relocated"] == 1
+    assert summary["new"] == 0
+    rows = db.list_library_items(conn)
+    assert len(rows) == 1, "one file must not count as two just because the path changed"
+    assert rows[0]["absolute_path"] == str(other / "Game [0100000000010000][v0].nsp")
+    assert rows[0]["status"] == "AVAILABLE"
+    # The library did not learn about this file today.
+    assert rows[0]["first_seen_at"] == original["first_seen_at"]
+
+
+def test_a_relocated_file_keeps_the_job_history_pointing_at_it(isolated_db, monkeypatch, tmp_path):
+    """The whole reason the old row could not simply be deleted: a job
+    references it. The surviving row is the one describing where the file
+    actually is now, so jobs are repointed at it rather than left dangling
+    (or blocking the merge)."""
+    conn, _inbox_dir = isolated_db
+    library_dir = config.LIBRARY_DIR
+    (library_dir / "Game [0100000000010000][v0].nsp").write_bytes(b"nsp bytes")
+    scanner.scan_library_once(conn)
+    item_id = db.list_library_items(conn)[0]["id"]
+    job_id = db.create_job(
+        conn, library_item_id=item_id, action="INSTALL_VIA_DBI",
+        target_storage="SD_INSTALL", target_device_id="mock-switch-parent",
+    )
+
+    _relocate(library_dir, monkeypatch, tmp_path)
+    assert scanner.scan_library_once(conn)["relocated"] == 1
+
+    rows = db.list_library_items(conn)
+    assert len(rows) == 1
+    assert db.get_job(conn, job_id)["library_item_id"] == rows[0]["id"]
+
+
+def test_a_relocated_mod_folder_is_merged_by_its_own_fingerprint(isolated_db, monkeypatch, tmp_path):
+    conn, _inbox_dir = isolated_db
+    library_dir = config.LIBRARY_DIR
+    mod_dir = library_dir / "SomeMod" / "atmosphere" / "contents" / "0100000000010000" / "romfs"
+    mod_dir.mkdir(parents=True)
+    (mod_dir / "asset.bin").write_bytes(b"asset data")
+    scanner.scan_library_once(conn)
+    assert len(db.list_library_items(conn)) == 1
+
+    _relocate(library_dir, monkeypatch, tmp_path)
+    assert scanner.scan_library_once(conn)["relocated"] == 1
+    assert len(db.list_library_items(conn)) == 1
+
+
+def test_two_live_copies_of_one_file_are_still_two_items(isolated_db, monkeypatch, tmp_path):
+    """A relocation is "the row I did not visit IS the row I did". Two
+    copies sitting in two watched folders are both visited, so neither is
+    stale and nothing is merged -- that is SKIP_DUPLICATE's job, not this
+    one, and collapsing them would silently lose a real file."""
+    import os
+    import shutil
+
+    conn, _inbox_dir = isolated_db
+    library_dir = config.LIBRARY_DIR
+    source = library_dir / "Game [0100000000010000][v0].nsp"
+    source.write_bytes(b"nsp bytes")
+    (library_dir / "second").mkdir()
+    copy = library_dir / "second" / "Game [0100000000010000][v0].nsp"
+    shutil.copy2(source, copy)
+    st = source.stat()
+    os.utime(copy, ns=(st.st_atime_ns, st.st_mtime_ns))
+
+    summary = scanner.scan_library_once(conn)
+    assert summary["relocated"] == 0
+    assert len(db.list_library_items(conn)) == 2
+
+
+def test_an_unreachable_library_folder_is_never_merged_away(isolated_db, monkeypatch, tmp_path):
+    """An unplugged drive already keeps its index (test above). It must not
+    lose it to a file that merely looks identical under a folder that IS
+    reachable -- the offline copy is not a stale spelling of it."""
+    conn, _inbox_dir = isolated_db
+    offline = tmp_path / "offline-drive"
+    offline.mkdir()
+    (offline / "Game [0100000000010000][v0].nsp").write_bytes(b"nsp bytes")
+    monkeypatch.setattr(config, "LIBRARY_DIR", offline)
+    scanner.scan_library_once(conn)
+    assert len(db.list_library_items(conn)) == 1
+
+    online = _relocate(offline, monkeypatch, tmp_path, name="still-plugged-in")
+    shutil_rmtree_offline = offline
+    import shutil
+    shutil.rmtree(shutil_rmtree_offline)  # the drive is gone, its rows must stay
+    monkeypatch.setattr(config, "library_dirs", lambda: (online, offline))
+
+    summary = scanner.scan_library_once(conn)
+    assert summary["relocated"] == 0
+    assert len(db.list_library_items(conn)) == 2
+
+
+# ---------------------------------------------------------------------------
+# Cancellation. A Library folder pointed at something the size of a real
+# Downloads directory takes minutes per pass, and until this existed there
+# was no way out of one: ScanState had no stop flag, scan_library_once() had
+# no cancellation hook, and set_library_dir() refused to change the folder
+# list while a scan ran -- so the one action that would end an unwanted scan
+# was the one action blocked by it.
+# ---------------------------------------------------------------------------
+
+def test_a_scan_stops_when_asked_and_keeps_what_it_already_indexed(isolated_db):
+    conn, _inbox_dir = isolated_db
+    for n in range(6):
+        (config.LIBRARY_DIR / f"Game {n} [010000000001{n:04}][v0].nsp").write_bytes(b"nsp bytes")
+
+    seen = []
+
+    def stop_after_two():
+        return len(seen) >= 2
+
+    summary = scanner.scan_library_once(conn, on_file=seen.append, should_stop=stop_after_two)
+
+    assert summary["cancelled"] is True
+    indexed = db.list_library_items(conn)
+    assert 0 < len(indexed) < 6, "a cancelled pass keeps its partial work, and stops early"
+
+
+def test_a_cancelled_scan_never_deletes_what_it_did_not_reach(isolated_db):
+    """The two whole-library passes at the bottom of scan_library_once()
+    both reason from seen_absolute_paths as if it were complete. Running
+    either after a half-finished walk would delete (or merge away) rows for
+    files the pass simply never got to -- a "stop" that silently emptied
+    the library would be far worse than the wait it saved."""
+    conn, _inbox_dir = isolated_db
+    for n in range(4):
+        (config.LIBRARY_DIR / f"Game {n} [010000000001{n:04}][v0].nsp").write_bytes(b"nsp bytes")
+    scanner.scan_library_once(conn)
+    assert len(db.list_library_items(conn)) == 4
+
+    summary = scanner.scan_library_once(conn, should_stop=lambda: True)
+
+    assert summary["cancelled"] is True
+    assert summary["removed"] == 0 and summary["relocated"] == 0
+    assert len(db.list_library_items(conn)) == 4, "nothing may be dropped on the strength of a partial walk"
+
+
+def test_stopping_before_anything_is_walked_is_still_a_clean_cancel(isolated_db):
+    conn, _inbox_dir = isolated_db
+    (config.LIBRARY_DIR / "Game [0100000000010000][v0].nsp").write_bytes(b"nsp bytes")
+
+    summary = scanner.scan_library_once(conn, should_stop=lambda: True)
+
+    assert summary["cancelled"] is True
+    assert summary["new"] == 0
+    assert db.list_library_items(conn) == []
+
+
+# ---------------------------------------------------------------------------
+# Removing the LAST Library folder. Refused outright before ("At least one
+# folder is required -- add a replacement before removing the last one"),
+# which left no way to stop SwitchAgent looking at a folder without first
+# finding some other folder to hand it.
+# ---------------------------------------------------------------------------
+
+def test_no_configured_folder_retires_the_whole_index(isolated_db, monkeypatch):
+    conn, _inbox_dir = isolated_db
+    for n in range(3):
+        (config.LIBRARY_DIR / f"Game {n} [010000000001{n:04}][v0].nsp").write_bytes(b"nsp bytes")
+    scanner.scan_library_once(conn)
+    assert len(db.list_library_items(conn)) == 3
+
+    monkeypatch.setattr(config, "library_dirs", tuple)  # the user removed every folder
+    summary = scanner.scan_library_once(conn)
+
+    assert "error" not in summary, "no folders is a choice, not a failure"
+    assert summary["removed"] == 3
+    assert db.list_library_items(conn) == []
+
+
+def test_retiring_the_index_still_keeps_a_row_some_job_references(isolated_db, monkeypatch):
+    """Same rule the single-deleted-file path already follows: a row a job
+    points at is flagged ERROR and kept, never hard-deleted, so Queue and
+    History keep their display names (see
+    db.delete_library_items_missing_from)."""
+    conn, _inbox_dir = isolated_db
+    (config.LIBRARY_DIR / "Game [0100000000010000][v0].nsp").write_bytes(b"nsp bytes")
+    scanner.scan_library_once(conn)
+    item_id = db.list_library_items(conn)[0]["id"]
+    db.create_job(
+        conn, library_item_id=item_id, action="INSTALL_VIA_DBI",
+        target_storage="SD_INSTALL", target_device_id="mock-switch-parent",
+    )
+
+    monkeypatch.setattr(config, "library_dirs", tuple)
+    summary = scanner.scan_library_once(conn)
+
+    assert summary["removed"] == 0  # nothing was actually deleted
+    rows = db.list_library_items(conn)
+    assert len(rows) == 1 and rows[0]["status"] == db.LIBRARY_ITEM_RETIRED
+
+
+def test_an_empty_folder_list_is_told_apart_from_one_never_configured(isolated_db):
+    """`source_dirs: []` is a decision; the key being absent is a default.
+    Only the first empties library_dirs() -- otherwise a fresh install with
+    no config.yaml would look exactly like "the user removed everything"
+    and retire an index it had every reason to keep."""
+    conn, _inbox_dir = isolated_db
+    assert config.library_dirs() == (config.LIBRARY_DIR,)  # nothing configured -> the default
+
+    config.set_library_source_dirs([config.LIBRARY_DIR])
+    assert config.library_dirs() == (config.LIBRARY_DIR,)
+
+    config.set_library_source_dirs([])
+    assert config.library_dirs() == ()
+    # The legacy single-folder key must not be left pointing at a folder
+    # the user just removed, or library_dir_info() keeps calling it chosen.
+    assert config.library_dir_info(config.CONFIG_YAML_PATH).configured is False
+
+
+# ---------------------------------------------------------------------------
+# What the Library page counts as "mine". A row whose file has left the
+# library is KEPT (jobs.library_item_id has no ON DELETE, and Queue/History
+# resolve display names through it) -- but it is a record, not content.
+# Removing the last folder retired the index down to exactly those rows and
+# the page went on rendering all of them as games.
+# ---------------------------------------------------------------------------
+
+def test_rows_kept_only_as_a_record_are_not_shown_as_library_content(isolated_db, monkeypatch):
+    from switchagent.web import services
+
+    conn, _inbox_dir = isolated_db
+    (config.LIBRARY_DIR / "Game [0100000000010000][v0].nsp").write_bytes(b"nsp bytes")
+    scanner.scan_library_once(conn)
+    item_id = db.list_library_items(conn)[0]["id"]
+    db.create_job(  # this is what makes the row undeletable below
+        conn, library_item_id=item_id, action="INSTALL_VIA_DBI",
+        target_storage="SD_INSTALL", target_device_id="mock-switch-parent",
+    )
+    assert len(services.list_library_view(conn)["games"]) == 1
+
+    monkeypatch.setattr(config, "library_dirs", tuple)  # every folder removed
+    scanner.scan_library_once(conn)
+
+    assert len(db.list_library_items(conn)) == 1, "the record itself must survive"
+    assert services.list_library_view(conn)["games"] == [], "but it is not library content"
+    assert services.list_library(conn) == []
+    # ...and the name it exists to provide still resolves for Queue/History.
+    from switchagent import queue_worker
+    row = db.get_library_item_by_id(conn, item_id)
+    assert queue_worker.resolve_library_item_display_name(conn, row)
+
+
+def test_one_deleted_file_retires_the_same_way_a_removed_folder_does(isolated_db):
+    """Deliberately ONE rule, not two: a file that has left the library is
+    retired and stops being listed, whether it left because it was deleted
+    or because the folder around it was removed. Either way it cannot be
+    installed and there is nothing to review about it -- and either way the
+    record survives for Queue/History (test above)."""
+    from switchagent.web import services
+
+    conn, _inbox_dir = isolated_db
+    path = config.LIBRARY_DIR / "Game [0100000000010000][v0].nsp"
+    path.write_bytes(b"nsp bytes")
+    scanner.scan_library_once(conn)
+    db.create_job(
+        conn, library_item_id=db.list_library_items(conn)[0]["id"], action="INSTALL_VIA_DBI",
+        target_storage="SD_INSTALL", target_device_id="mock-switch-parent",
+    )
+
+    path.unlink()
+    scanner.scan_library_once(conn)
+
+    rows = db.list_library_items(conn)
+    assert len(rows) == 1 and rows[0]["status"] == db.LIBRARY_ITEM_RETIRED
+    assert services.list_library_view(conn)["games"] == []
+
+
+def test_an_unplugged_drive_keeps_its_games_listed(isolated_db, monkeypatch):
+    """The one case that must NOT retire. A folder that is merely
+    unreachable right now is still a folder the user chose, and its rows
+    are never even considered stale (scan_library_once backfills them into
+    seen_absolute_paths first) -- losing a whole drive's library from the
+    page every time it is unplugged would be its own bug."""
+    from switchagent.web import services
+
+    conn, _inbox_dir = isolated_db
+    (config.LIBRARY_DIR / "Game [0100000000010000][v0].nsp").write_bytes(b"nsp bytes")
+    scanner.scan_library_once(conn)
+    assert len(services.list_library_view(conn)["games"]) == 1
+
+    monkeypatch.setattr(config, "library_dirs", lambda: (config.LIBRARY_DIR / "unplugged",))
+    scanner.scan_library_once(conn)
+
+    assert len(services.list_library_view(conn)["games"]) == 1
+
+
+def test_re_adding_a_folder_brings_its_games_back(isolated_db, monkeypatch):
+    """Remove a Library folder and add it straight back. Every file is
+    byte-identical, so the size+mtime "unchanged" shortcut fires on every
+    one of them -- and used to skip past re-indexing while the rows still
+    said RETIRED, leaving them permanently invisible no matter how many
+    times the user pressed Rescan. Found on a real library: 19 of its 48
+    rows, 7 games showing where there should have been 15.
+
+    "Unchanged" means its CONTENT is unchanged. A row this pass has just
+    walked to is in the library again whatever it said a moment ago."""
+    from switchagent.web import services
+
+    conn, _inbox_dir = isolated_db
+    for n in range(3):
+        (config.LIBRARY_DIR / f"Game {n} [010000000001{n:04}][v0].nsp").write_bytes(b"nsp bytes")
+    mod = config.LIBRARY_DIR / "SomeMod" / "atmosphere" / "contents" / "0100000000010000"
+    (mod / "romfs").mkdir(parents=True)
+    (mod / "romfs" / "asset.bin").write_bytes(b"asset")
+    scanner.scan_library_once(conn)
+    before = len(services.list_library_view(conn)["games"])
+    assert before
+
+    # Folder removed -- every row retires (jobs or not; unreferenced rows
+    # would simply be deleted, so keep one referenced to prove the point).
+    db.create_job(
+        conn, library_item_id=db.list_library_items(conn)[0]["id"], action="INSTALL_VIA_DBI",
+        target_storage="SD_INSTALL", target_device_id="mock-switch-parent",
+    )
+    library_dir = config.LIBRARY_DIR
+    monkeypatch.setattr(config, "library_dirs", tuple)
+    scanner.scan_library_once(conn)
+    assert services.list_library_view(conn)["games"] == []
+
+    # ...and added straight back, without a single byte having changed.
+    # (Re-pointed rather than monkeypatch.undo(), which would also roll
+    # back the fixture's own LIBRARY_DIR/INBOX_DIR isolation.)
+    monkeypatch.setattr(config, "library_dirs", lambda: (library_dir,))
+    summary = scanner.scan_library_once(conn)
+
+    assert summary["unchanged"] == 0, "a retired row must not be recognised as unchanged"
+    assert not any(r["status"] == db.LIBRARY_ITEM_RETIRED for r in db.list_library_items(conn))
+    assert len(services.list_library_view(conn)["games"]) == before

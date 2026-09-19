@@ -609,7 +609,31 @@
   // sharing the single #scan-status readout below.
 
   const rescanBtns = document.querySelectorAll(".rescan-trigger");
-  const scanStatus = document.getElementById("scan-status");
+  const scanStatusBox = document.getElementById("scan-status");
+  // The readout is a <span> inside the box now, so the Stop button sitting
+  // next to it does not get wiped by every status write.
+  const scanStatus = document.getElementById("scan-status-text") || scanStatusBox;
+  const scanCancelBtn = document.getElementById("scan-cancel-btn");
+
+  if (scanCancelBtn) {
+    scanCancelBtn.addEventListener("click", async () => {
+      scanCancelBtn.disabled = true;
+      scanCancelBtn.textContent = "Stopping…";
+      // Cooperative: the scan unwinds at its next checkpoint, so the button
+      // reports "asked" and the poll below is what confirms it stopped.
+      await fetch("/api/scan/cancel", { method: "POST" });
+    });
+  }
+
+  function setScanCancelVisible(visible) {
+    if (!scanCancelBtn) return;
+    scanCancelBtn.hidden = !visible;
+    if (visible && !scanCancelBtn.disabled) scanCancelBtn.textContent = "Stop scanning";
+    if (!visible) {
+      scanCancelBtn.disabled = false;
+      scanCancelBtn.textContent = "Stop scanning";
+    }
+  }
 
   function setRescanButtonsDisabled(disabled) {
     rescanBtns.forEach((btn) => { btn.disabled = disabled; });
@@ -624,24 +648,37 @@
   });
 
   async function pollScanStatus(statusUrl) {
-    scanStatus.hidden = false;
+    scanStatusBox.hidden = false;
     try {
       const res = await fetch(statusUrl);
       const state = await res.json();
       if (state.running) {
         const elapsed = state.elapsed_seconds != null ? ` (${Math.round(state.elapsed_seconds)}s)` : "";
+        const verb = state.cancel_requested ? "Stopping" : "Scanning";
         scanStatus.textContent = state.current_filename
-          ? `Scanning… ${state.current_filename}${elapsed}`
-          : `Scanning…${elapsed}`;
+          ? `${verb}… ${state.current_filename}${elapsed}`
+          : `${verb}…${elapsed}`;
+        setScanCancelVisible(true);
         setTimeout(() => pollScanStatus(statusUrl), 1000);
       } else {
         setRescanButtonsDisabled(false);
-        if (state.error) {
+        setScanCancelVisible(false);
+        if (state.cancelled) {
+          // Deliberately NOT reloading the page: a cancelled pass indexed
+          // only part of the folder, and snapping the list to that
+          // half-finished view is not what "stop" asked for.
+          scanStatus.textContent = "Scan stopped. What it had already indexed was kept.";
+        } else if (state.error) {
           scanStatus.textContent = "Scan error: " + state.error;
         } else if (state.summary) {
           const s = state.summary;
+          // `relocated` is only ever mentioned when it happened: re-pointing a
+          // Library folder at the same files by another path (UNC, a new drive
+          // letter) silently folds the old rows into the new ones, and a scan
+          // reporting "0 new, 0 updated, 0 removed" would hide that entirely.
           scanStatus.textContent =
-            "Scan complete: " + s.new + " new, " + s.updated + " updated, " + s.removed + " removed.";
+            "Scan complete: " + s.new + " new, " + s.updated + " updated, " + s.removed + " removed" +
+            (s.relocated ? ", " + s.relocated + " matched to a new path" : "") + ".";
           setTimeout(() => window.location.reload(), 1000);
         }
       }

@@ -12,6 +12,8 @@ invariants.
 
 from __future__ import annotations
 
+import re
+
 import pytest
 from fastapi.testclient import TestClient
 
@@ -19,7 +21,7 @@ from switchagent import config, db, known_folders, queue_worker
 from switchagent.web.app import create_app
 from switchagent.web.context import build_mock_context
 
-from .conftest import build_zip
+from .conftest import build_zip, choose_library_folder
 
 
 @pytest.fixture
@@ -485,7 +487,107 @@ def test_library_watcher_does_not_start_automatically(web_ctx):
     assert web_ctx.library_watcher_running is False
 
 
+def test_watcher_does_not_run_against_a_folder_nobody_chose(web_ctx):
+    """config.LIBRARY_DIR falls back to the Windows Downloads folder when
+    config.yaml names none -- a fine suggestion to prefill Settings with,
+    and a terrible thing to start walking and re-walking unasked: it is
+    mostly junk, takes minutes per pass, and none of it is Switch content.
+    The app already knows the difference (an unchosen folder is exactly
+    what raises onboarding's "Choose Library Folder" banner), so the
+    watcher waits for the answer instead of guessing."""
+    web_ctx.start_library_watcher()
+    try:
+        assert web_ctx.library_watcher_running is False
+    finally:
+        web_ctx.stop_library_watcher()
+
+    choose_library_folder()
+    web_ctx.start_library_watcher()
+    try:
+        assert web_ctx.library_watcher_running is True
+    finally:
+        web_ctx.stop_library_watcher()
+
+
+def test_cancelling_a_scan_reports_whether_there_was_one(client, web_ctx):
+    assert client.post("/api/scan/cancel").json()["cancelled"] is False  # nothing running
+    assert client.get("/api/scan/status").json()["cancel_requested"] is False
+
+
+def test_library_folders_can_be_changed_while_a_scan_is_running(client, web_ctx, tmp_path):
+    """The deadlock this replaces: saving the folder list used to fail
+    outright with "Wait for the current scan to finish" -- so the one
+    action that ends an unwanted scan was the one action that scan
+    blocked, and since every save starts a scan of its own, adding a
+    second folder immediately re-armed the refusal against removing the
+    first."""
+    import threading
+
+    started, release = threading.Event(), threading.Event()
+
+    def _slow_scan(conn, *, on_file=None, should_stop=None):
+        started.set()
+        # Behaves like the real thing: polls for the stop flag rather than
+        # running to completion, so "cancel" is what actually ends it.
+        while not release.wait(0.02):
+            if should_stop is not None and should_stop():
+                return dict(new=0, updated=0, unchanged=0, skipped_unstable=0,
+                            duplicates=0, errors=0, removed=0, relocated=0, cancelled=True)
+        return dict(new=0, updated=0, unchanged=0, skipped_unstable=0,
+                    duplicates=0, errors=0, removed=0, relocated=0)
+
+    # _run() imports scanner lazily, so the module attribute is the seam.
+    from switchagent import scanner as scanner_mod
+
+    original = scanner_mod.scan_library_once
+    scanner_mod.scan_library_once = _slow_scan
+    try:
+        assert web_ctx.run_scan_in_background() is True
+        assert started.wait(5.0)
+
+        second = tmp_path / "second-library"
+        second.mkdir()
+        res = client.post("/api/settings/library-dir", json={"path": str(second), "paths": [str(second)]})
+        assert res.status_code == 200, res.text
+        assert res.json()["library_dirs"] == [str(second)]
+    finally:
+        release.set()
+        scanner_mod.scan_library_once = original
+        web_ctx.stop_library_watcher()
+
+
+def test_the_last_library_folder_can_be_removed(client, web_ctx, tmp_path):
+    """Refused outright before ("At least one folder is required -- add a
+    replacement before removing the last one"), so there was no way to stop
+    SwitchAgent looking at a folder without first finding another folder to
+    hand it. Removing everything is now a legitimate configured state, and
+    the rescan it triggers is what retires the orphaned index."""
+    folder = tmp_path / "some-library"
+    folder.mkdir()
+    _add_game(folder, name="Game [0100000000090000][v0].nsp")
+    assert client.post(
+        "/api/settings/library-dir", json={"path": str(folder), "paths": [str(folder)]},
+    ).status_code == 200
+
+    res = client.post("/api/settings/library-dir", json={"path": "", "paths": []})
+
+    assert res.status_code == 200, res.text
+    assert res.json()["library_dirs"] == []
+    assert res.json()["library_dir_configured"] is False
+    web_ctx.stop_library_watcher()
+
+
+def test_sending_no_path_at_all_is_still_an_error(client, web_ctx):
+    """"I chose nothing" (paths: []) and "I sent nothing" (no paths, empty
+    path) are different requests -- only the first is a decision."""
+    res = client.post("/api/settings/library-dir", json={"path": ""})
+
+    assert res.status_code == 400
+    assert "folder path is required" in res.json()["detail"]
+
+
 def test_start_stop_library_watcher_is_idempotent_and_clean(web_ctx):
+    choose_library_folder()
     web_ctx.start_library_watcher()
     try:
         assert web_ctx.library_watcher_running is True
@@ -498,6 +600,7 @@ def test_start_stop_library_watcher_is_idempotent_and_clean(web_ctx):
 
 
 def test_library_watcher_triggers_a_scan_after_a_debounced_file_change(client, web_ctx):
+    choose_library_folder()
     web_ctx.library_watch_debounce_seconds = 0.3  # fast enough for a test; production default is 5.0s
     web_ctx.start_library_watcher()
     try:
@@ -522,6 +625,7 @@ def test_library_watcher_never_creates_a_job(client, web_ctx):
     job-free as a manual one (already proven by
     test_scan_never_creates_a_job_via_api for the manual path -- this is
     the same invariant via the watcher's own trigger path)."""
+    choose_library_folder()
     web_ctx.library_watch_debounce_seconds = 0.3
     web_ctx.start_library_watcher()
     try:
@@ -1608,11 +1712,65 @@ def test_legacy_batch_id_null_job_still_renders_as_its_own_group(client, web_ctx
             conn, library_item_id=item_id, action="INSTALL_VIA_DBI",
             target_storage="SD_INSTALL", target_device_id="mock-switch-parent",
         )
+        # create_job() leaves a job PENDING_CONFIRM, which Queue no longer
+        # draws at all (services._not_yet_queued) -- incidental to what this
+        # test is actually about, so move it on to real queued work.
+        # update_job_status() rather than confirm_job(): the latter insists
+        # on a frozen manifest, which a deliberately bare create_job() (the
+        # whole point of this test) has none of.
+        db.update_job_status(conn, job_id, "CONFIRMED")
 
     groups = client.get("/api/queue/grouped").json()
     assert any(g["batch_id"] is None and g["jobs"][0]["id"] == job_id for g in groups)
     html = client.get("/queue").text
     assert f'data-job-id="{job_id}"' in html
+
+
+def test_a_staged_but_unconfirmed_job_is_not_drawn_as_a_queue_row(client, web_ctx):
+    """web/preparation.py stages the NEXT item while the current one is
+    still transferring, and only records that item's job_ids once its own
+    turn arrives. In between, its PENDING_CONFIRM jobs belonged to no
+    preparation item, so queue.js's `represented` filter could not
+    suppress them and the very same file was drawn TWICE -- once as a
+    "Waiting" preparation row, and again as a whole separate batch group
+    underneath it, for as long as the previous file took to copy."""
+    item_id = _seed_library_item(web_ctx)
+    with db.open_db(web_ctx.db_path) as conn:
+        batch_id = db.create_installation_batch(conn, target_device_id="mock-switch-parent")
+        job_id = db.create_job(
+            conn, library_item_id=item_id, action="INSTALL_VIA_DBI",
+            target_storage="SD_INSTALL", target_device_id="mock-switch-parent", batch_id=batch_id,
+        )
+        assert db.get_job(conn, job_id)["status"] == "PENDING_CONFIRM"
+
+    assert client.get("/api/queue/grouped").json() == []
+    assert client.get("/api/queue").json() == []
+    assert f'data-job-id="{job_id}"' not in client.get("/queue").text
+
+    # ...and the instant its turn comes, it is ordinary queued work again.
+    with db.open_db(web_ctx.db_path) as conn:
+        db.update_job_status(conn, job_id, "CONFIRMED")
+    assert f'data-job-id="{job_id}"' in client.get("/queue").text
+
+
+def test_an_unconfirmed_job_still_counts_as_unfinished_work(client, web_ctx):
+    """_not_yet_queued() is display-only and must never leak into
+    _not_settled(): a staged job holds a real payload and a real claim on
+    its Switch, so forget_device()'s "unfinished job(s) still target this
+    device" guard has to keep counting it even while Queue draws nothing
+    for it."""
+    from switchagent.web import services
+
+    item_id = _seed_library_item(web_ctx)
+    with db.open_db(web_ctx.db_path) as conn:
+        db.create_job(
+            conn, library_item_id=item_id, action="INSTALL_VIA_DBI",
+            target_storage="SD_INSTALL", target_device_id="mock-switch-parent",
+        )
+        rows = db.list_jobs(conn)
+
+    assert [services._not_yet_queued(r) for r in rows] == [True]
+    assert [services._not_settled(rows, r) for r in rows] == [True]
 
 
 def test_retry_creates_its_own_new_single_job_batch_not_the_old_one(client, web_ctx):
@@ -2715,3 +2873,49 @@ def test_stab001_stall_flag_never_applies_once_a_job_leaves_running(client, web_
     queue_after = {j["id"]: j for j in client.get("/api/queue").json()}
     assert queue_after[job_id]["possibly_stalled"] is False
     assert queue_after[job_id]["stall_seconds"] is None
+
+
+# ---------------------------------------------------------------------------
+# Static asset cache-busting. Hand-maintained `?v=N` numbers cost this
+# project two shipped-but-invisible changes in one sitting: app.js carried
+# no version at all, and settings.js kept serving the previous build's
+# "At least one folder is required" long after that rule was gone from it.
+# ---------------------------------------------------------------------------
+
+def _static_refs(html: str) -> list[str]:
+    return re.findall(r'(?:src|href)="(/static/[^"]+)"', html)
+
+
+@pytest.mark.parametrize("path", ["/", "/queue", "/history", "/devices", "/settings"])
+def test_every_static_asset_is_cache_busted(client, path):
+    refs = _static_refs(client.get(path).text)
+    assert refs, f"{path} loads no static assets at all -- did the markup change?"
+    unversioned = [r for r in refs if "?v=" not in r]
+    assert not unversioned, f"{path} would serve these from a stale cache forever: {unversioned}"
+
+
+def test_the_cache_key_changes_when_the_file_does(client, tmp_path, monkeypatch):
+    """A version that does not move when the file moves is worse than
+    none: it reads as protection while providing none."""
+    from switchagent.web import app as app_mod
+
+    before = _static_refs(client.get("/").text)
+    assert before == _static_refs(client.get("/").text), "the same bytes must keep the same URL"
+
+    static_dir = app_mod._WEB_DIR / "static"
+    original = (static_dir / "app.js").read_bytes()
+    try:
+        (static_dir / "app.js").write_bytes(original + b"\n// touched\n")
+        after = _static_refs(client.get("/").text)
+    finally:
+        (static_dir / "app.js").write_bytes(original)
+
+    changed = set(after) - set(before)
+    assert any("app.js" in ref for ref in changed), "editing app.js must change its URL"
+
+
+def test_a_missing_static_file_does_not_break_the_page(client):
+    """A 404 in the network tab beats a page that will not render."""
+    from switchagent.web import app as app_mod
+
+    assert app_mod._static_url("no-such-file.js") == "/static/no-such-file.js"

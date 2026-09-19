@@ -162,5 +162,5 @@
 {% block scripts %}
 {# The SAME script the Library page uses -- identical selection cascade,
    identical confirmation modal, identical POST /api/jobs batch call. #}
-<script src="/static/library.js"></script>
+<script src="{{ static_url('library.js') }}"></script>
 {% endblock %}

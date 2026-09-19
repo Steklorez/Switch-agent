@@ -49,9 +49,15 @@ class DeviceStorageMappingClearRequest(BaseModel):
 
 class LibraryDirRequest(BaseModel):
     """W3-002: raw user text-input path, further validated in services.py
-    (exists / is a directory / readable / resolved to a canonical path) --
-    this schema only enforces "non-empty string"."""
-    path: str = Field(min_length=1)
+    (exists / is a directory / readable / resolved to a canonical path).
+
+    `path` is deliberately NOT constrained to a non-empty string here.
+    `paths: []` is a meaningful request -- "remove my last Library folder"
+    -- and it has no sensible primary path to carry alongside it; rejecting
+    it at the schema would produce FastAPI's structured 422 rather than a
+    sentence anyone can read. services.py still refuses an empty path when
+    `paths` is absent, with its own "a folder path is required"."""
+    path: str = ""
     paths: list[str] | None = None
 
 

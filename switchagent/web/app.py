@@ -61,9 +61,38 @@ def _format_mtime(epoch_seconds) -> str:
     return _dt.datetime.fromtimestamp(epoch_seconds).strftime("%Y-%m-%d %H:%M")
 
 
+def _static_url(name: str) -> str:
+    """`/static/<name>?v=<token>`, where the token changes whenever the
+    file does. Templates call this instead of writing the path by hand.
+
+    Why it exists: the `?v=N` numbers were maintained by hand, one per
+    `<script>`/`<link>` tag, and a browser holding a cached copy has no
+    other reason to re-fetch. Two changes shipped in this session never
+    reached the page for exactly that -- app.js carried no version at all,
+    and settings.js still served the previous build's "At least one folder
+    is required" long after that rule had been removed from it. library.js
+    had it both ways at once: `?v=3` on Library and bare on Game Details,
+    i.e. two cache entries for one file, either of which could be stale.
+    Hand-maintained cache keys are a thing to stop having, not to keep
+    remembering.
+
+    The token is the file's size and mtime, not a content hash: this is
+    a local, single-user app serving a handful of small files per page,
+    and re-reading them all on every render to hash them would be work
+    spent to tell apart cases that cannot occur here. A missing file
+    yields no token rather than raising -- a 404 in the network tab is a
+    far better failure than a page that will not render at all."""
+    try:
+        stat = (_WEB_DIR / "static" / name).stat()
+    except OSError:
+        return f"/static/{name}"
+    return f"/static/{name}?v={int(stat.st_mtime)}-{stat.st_size}"
+
+
 _TEMPLATES.env.filters["filesize"] = _format_size
 _TEMPLATES.env.filters["mtime"] = _format_mtime
 _TEMPLATES.env.globals["app_version"] = __version__
+_TEMPLATES.env.globals["static_url"] = _static_url
 _TEMPLATES.env.filters["game_name"] = title_id_mod.strip_release_tags
 
 
@@ -82,7 +111,10 @@ def _library_onboarding_message(conn) -> Optional[onboarding.OnboardingMessage]:
     from .. import config as config_mod
 
     library_info = config_mod.library_dir_info(config_mod.CONFIG_YAML_PATH)
-    item_count = len(db.list_library_items(conn))
+    # Rows retained only as a record for Queue/History do not make the
+    # library non-empty -- otherwise removing every folder left onboarding
+    # insisting there was content to look at (see library_rows_in_scope).
+    item_count = len(services.library_rows_in_scope(conn)[1])
     return onboarding.compute_library_message(
         library_dir_configured=library_info.configured,
         library_dir_exists=library_info.exists,
@@ -397,6 +429,14 @@ def create_app(ctx: WebContext) -> FastAPI:
     def api_trigger_scan(ctx: WebContext = Depends(get_ctx)):
         started = ctx.run_scan_in_background()
         return {"started": started}
+
+    @app.post("/api/scan/cancel")
+    def api_cancel_scan(ctx: WebContext = Depends(get_ctx)):
+        """Cooperative stop -- see WebContext.cancel_scan(). Returns
+        immediately with whether there was a scan to stop; the scan itself
+        unwinds on its own thread, and /api/scan/status is what says when
+        it actually has."""
+        return {"cancelled": ctx.cancel_scan(), **ctx.scan_status_snapshot()}
 
     @app.get("/api/scan/status")
     def api_scan_status(ctx: WebContext = Depends(get_ctx)):

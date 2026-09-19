@@ -361,6 +361,37 @@ _SORT_KEYS = {
 }
 
 
+def library_rows_in_scope(conn) -> tuple[list, list]:
+    """(every library_items row, the subset that is actually part of the
+    library right now).
+
+    Not the same question. A row is KEPT after its file leaves the library
+    -- marked db.LIBRARY_ITEM_RETIRED rather than deleted, because
+    jobs.library_item_id has no ON DELETE and Queue/History still resolve
+    their display names through it (see
+    db.delete_library_items_missing_from). Those rows are records, not
+    content, and every "what is in my library" read has to say so: after
+    removing the last Library folder the index was correctly retired down
+    to exactly these rows, and the Library page went on rendering all 19 of
+    them as games, which is not what "I removed that folder" looks like.
+
+    Retired-ness is a status and not, as a first cut had it, "the path sits
+    under no configured folder". Both are true in production, but the
+    second also quietly answers "no" for any row whose path is not a real
+    location -- which is most of the test corpus, and reasonably so, since
+    a test about sorting or filtering has no business owning a filesystem.
+    A status says the thing directly and cannot be wrong about it.
+
+    Callers that resolve DISPLAY NAMES (queue_worker, device detail) keep
+    reading db.list_library_items() directly -- for them the records are
+    the entire point. Which is also why the full list is still handed to
+    _library_entry_view below: a family's name can legitimately come from a
+    sibling that is itself retired."""
+    all_items = db.list_library_items(conn)
+    in_scope = [row for row in all_items if row["status"] != db.LIBRARY_ITEM_RETIRED]
+    return all_items, in_scope
+
+
 def list_library(
     conn, *, search: Optional[str] = None, status_filter: str = "all",
     format_filter: Optional[str] = None, sort: str = "date_added", reverse: bool = True,
@@ -378,13 +409,13 @@ def list_library(
     information available", not "nothing is installed" (see
     _library_entry_view's own docstring on that distinction)."""
     latest_jobs = _latest_job_by_library_item(conn)
-    all_items = db.list_library_items(conn)
+    all_items, in_scope = library_rows_in_scope(conn)
     entries = [
         _library_entry_view(
             conn, row, latest_jobs.get(row["id"]), library_items=all_items,
             installed_on_device_base_ids=installed_on_device_base_ids,
         )
-        for row in all_items
+        for row in in_scope
     ]
 
     predicate = _FILTER_PREDICATES.get(status_filter, _FILTER_PREDICATES["all"])
@@ -528,13 +559,13 @@ def list_library_view(
     (the default) means "no information available", never "nothing is
     installed"."""
     latest_jobs = _latest_job_by_library_item(conn)
-    all_items = db.list_library_items(conn)
+    all_items, in_scope = library_rows_in_scope(conn)
     all_entries = [
         _library_entry_view(
             conn, row, latest_jobs.get(row["id"]), library_items=all_items,
             installed_on_device_base_ids=installed_on_device_base_ids,
         )
-        for row in all_items
+        for row in in_scope
     ]
 
     if format_filter:
@@ -1085,9 +1116,36 @@ def _not_settled(rows: list, row) -> bool:
     return not any(r["retry_of_job_id"] == row["id"] for r in rows)
 
 
+def _not_yet_queued(row) -> bool:
+    """A job the worker cannot see yet, and which therefore has no business
+    being drawn as a Queue row: PENDING_CONFIRM means "created and staged,
+    but deliberately not confirmed" (see create_and_confirm_jobs' own
+    confirm=False path).
+
+    Why this is separate from _not_settled() rather than folded into it:
+    _not_settled() also answers "is there unfinished work against this
+    device" for forget_device(), where a staged-but-unconfirmed job very
+    much still counts. This predicate is display-only.
+
+    What it fixes: web/preparation.py prepares the NEXT item while the
+    current one is still transferring, and records that item's job_ids
+    only when its own turn actually arrives (_install_sequentially). In
+    between, those PENDING_CONFIRM rows belonged to no preparation item,
+    so queue.js's `represented` filter could not suppress them and the
+    same file was drawn TWICE -- once as a "Waiting" preparation row and
+    again as a separate batch group below it, for the whole duration of
+    the previous file's transfer. The same window exists, more briefly,
+    on the ordinary non-lookahead path (jobs are created before the
+    batch is confirmed) and permanently for any job orphaned in
+    PENDING_CONFIRM by a process that died mid-preparation -- the
+    in-memory PreparationQueue that owned it does not survive a restart
+    (db.abandon_unconfirmed_jobs cleans those up at startup)."""
+    return row["status"] == "PENDING_CONFIRM"
+
+
 def list_queue(conn) -> list[dict]:
     all_rows = db.list_jobs(conn)
-    rows = [r for r in all_rows if _not_settled(all_rows, r)]
+    rows = [r for r in all_rows if not _not_yet_queued(r) and _not_settled(all_rows, r)]
     return [_job_view(conn, r) for r in rows]
 
 
@@ -1183,7 +1241,9 @@ def list_queue_grouped(conn) -> list[dict]:
     History instead, see list_history_grouped(). Legacy batch_id=NULL jobs
     (created before this feature existed, or anything that predates it in
     an upgraded DB) each render as their own single-job group, exactly
-    matching list_queue()'s own filtering."""
+    matching list_queue()'s own filtering. Staged-but-unconfirmed jobs are
+    excluded from both, per job and then per batch -- see _not_yet_queued()
+    for the duplicated-row bug that is about."""
     all_rows = db.list_jobs(conn)
     by_batch: dict[Optional[int], list] = {}
     for row in all_rows:
@@ -1191,11 +1251,19 @@ def list_queue_grouped(conn) -> list[dict]:
 
     groups = []
     for row in by_batch.pop(None, []):
-        if not _not_settled(all_rows, row):
+        if _not_yet_queued(row) or not _not_settled(all_rows, row):
             continue
         groups.append(_batch_group_view(conn, None, [row]))
 
     for batch_id, rows in by_batch.items():
+        # Unconfirmed rows are dropped from the group BEFORE the keep/drop
+        # decision below, so a batch that is nothing but staged-ahead work
+        # disappears wholesale rather than rendering as a phantom duplicate
+        # of a file the preparation panel is already showing. Settled rows
+        # are deliberately NOT dropped here -- a DONE base still belongs in
+        # its batch's "N / M finished" while its DLC waits (see this
+        # function's own docstring).
+        rows = [r for r in rows if not _not_yet_queued(r)]
         if not any(_not_settled(all_rows, r) for r in rows):
             continue
         groups.append(_batch_group_view(conn, batch_id, rows))
@@ -1847,20 +1915,48 @@ def set_library_dir(conn, ctx: WebContext, raw_path: str, raw_paths: list[str] |
     and "scanning never creates a job" already holds here for free).
     Raises ValueError (surfaced by the caller as a 4xx, never a 500) on
     any validation failure -- the old config/watcher state is left
-    completely untouched in that case."""
+    completely untouched in that case. Validation happens BEFORE the
+    running scan is cancelled, so a rejected path costs nothing.
+
+    An empty `raw_paths` removes every folder -- allowed, and the scan it
+    triggers is what clears the now-orphaned index. `raw_paths=None` with
+    an empty `raw_path` is still an error ("a folder path is required"):
+    "I chose nothing" and "I sent nothing" are different requests."""
     from .. import config as config_mod
 
-    candidates = list(dict.fromkeys(_validate_library_dir_candidate(p) for p in (raw_paths if raw_paths is not None else [raw_path])))
-    if not candidates:
-        raise ValueError("Choose at least one folder")
-    if ctx.scan_status_snapshot()["running"]:
-        raise ValueError("Wait for the current scan to finish, then save the folders again")
+    # `paths: []` is a real request -- "remove my last Library folder" --
+    # and used to be refused outright ("At least one folder is required"),
+    # which left no way to stop SwitchAgent looking at a folder without
+    # first finding some other folder to offer it. An empty list is now a
+    # legitimate configured state; see config.library_dirs() for how it is
+    # told apart from a config that simply never named one.
+    candidates = list(dict.fromkeys(
+        _validate_library_dir_candidate(p)
+        for p in (raw_paths if raw_paths is not None else [raw_path])
+    ))
+
+    # A running scan used to make this fail outright ("Wait for the current
+    # scan to finish, then save the folders again"), which turned the one
+    # thing a user needs in order to STOP an unwanted scan into the one
+    # thing they could not do while it ran -- and, because every save below
+    # kicks off a scan of its own, adding a second folder immediately
+    # re-armed that refusal against removing the first. Nothing about the
+    # old scan is worth protecting here: it is walking folders the user is
+    # in the middle of replacing. Stop it and wait for it to notice, so the
+    # rescan started below is the only one running against the new list.
+    ctx.cancel_scan(wait_seconds=10.0)
 
     config_mod.set_library_source_dirs(candidates)
-    config_mod.LIBRARY_DIR = candidates[0]
+    if candidates:
+        config_mod.LIBRARY_DIR = candidates[0]
 
     ctx.stop_library_watcher()  # safe no-op if it wasn't running yet
+    # A no-op while no folder is configured -- which, after removing the
+    # last one, is exactly the point: nothing left to watch.
     ctx.start_library_watcher()  # re-reads config.LIBRARY_DIR (just updated above)
+    # Still a scan even with no folders left: that pass is what retires the
+    # rows for files that are no longer part of the collection (see
+    # scan_library_once's own zero-folder branch).
     ctx.run_scan_in_background()
 
     return get_settings(conn, ctx)

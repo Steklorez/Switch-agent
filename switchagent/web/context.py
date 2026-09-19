@@ -72,6 +72,10 @@ class ScanState:
     started_at: Optional[str] = None
     finished_at: Optional[str] = None
     current_filename: Optional[str] = None
+    # Set the moment a stop is asked for, and kept afterwards so the
+    # finished state reads "Cancelled" rather than an ordinary
+    # "Completed" with suspiciously small numbers.
+    cancel_requested: bool = False
 
 
 class WebContext:
@@ -117,6 +121,9 @@ class WebContext:
         # above, so constructing a WebContext (e.g. the test suite's
         # web_ctx fixture) never has a side effect of watching the
         # filesystem; only cli.py's `switch-agent web` command turns it on.
+        # Set for the lifetime of one background scan; see cancel_scan().
+        self._scan_cancel: Optional[threading.Event] = None
+
         self._watcher_observer = None
         self._watcher_stop_event: Optional[threading.Event] = None
         self._watcher_thread: Optional[threading.Thread] = None
@@ -383,6 +390,20 @@ class WebContext:
         recovered = db.recover_stale_running_jobs(conn)
         if recovered:
             log.info("worker startup: recovered %d stale RUNNING job(s) -> INTERRUPTED", recovered)
+        # Staged but never confirmed, and now unconfirmable -- the in-memory
+        # preparation that owned these did not survive the restart. Their
+        # batches' staging is released here the same way preparation.py's
+        # own _abandon_prepared() does it.
+        unconfirmed = conn.execute(
+            "SELECT DISTINCT batch_id FROM jobs WHERE status = 'PENDING_CONFIRM'"
+        ).fetchall()
+        abandoned = db.abandon_unconfirmed_jobs(conn)
+        if abandoned:
+            from ..work_cleanup import cleanup_batch_if_all_done
+
+            log.info("worker startup: abandoned %d unconfirmed job(s) -> FAILED", abandoned)
+            for row in unconfirmed:
+                cleanup_batch_if_all_done(conn, row["batch_id"])
         try:
             while not self._stop_event.is_set():
                 if self._worker_restart_requested.is_set():
@@ -416,6 +437,10 @@ class WebContext:
             if self.scan_state.running:
                 return False
             self.scan_state = ScanState(running=True, started_at=db.now_iso())
+            # One event per scan, never reused: a stop asked for during the
+            # previous pass must not silently abort the next one.
+            cancel = threading.Event()
+            self._scan_cancel = cancel
 
         def _on_file(path: str) -> None:
             with self.scan_lock:
@@ -427,7 +452,9 @@ class WebContext:
                 conn = db.get_connection(self.db_path)
                 db.init_db(conn)
                 try:
-                    summary = scanner.scan_library_once(conn, on_file=_on_file)
+                    summary = scanner.scan_library_once(
+                        conn, on_file=_on_file, should_stop=cancel.is_set,
+                    )
                 finally:
                     conn.close()
                 with self.scan_lock:
@@ -442,8 +469,40 @@ class WebContext:
                     self.scan_state.running = False
                     self.scan_state.finished_at = db.now_iso()
                     self.scan_state.current_filename = None
+                    self._scan_cancel = None
 
         threading.Thread(target=_run, name="switchagent-scan", daemon=True).start()
+        return True
+
+    def cancel_scan(self, *, wait_seconds: float = 0.0) -> bool:
+        """Asks a running scan to stop and returns whether there was one.
+
+        Cooperative, not a kill: the flag is polled by scan_library_once()
+        at every step of its walk, so the scan unwinds at a point where
+        the database is consistent and whatever it had already indexed is
+        kept (see that function on why the whole-library merge/delete
+        passes are skipped on a cancelled pass). `wait_seconds` blocks
+        until the scan thread has actually noticed -- set_library_dir()
+        uses it so "remove this folder" cannot race the very scan of that
+        folder it is meant to stop.
+
+        A stop can outlive one poll interval on a slow share: the flag is
+        checked between filesystem calls, and a single stat()/rglob step
+        over an unresponsive SMB mount can block for as long as the OS
+        takes. It always stops; it is not always instant."""
+        with self.scan_lock:
+            if not self.scan_state.running or self._scan_cancel is None:
+                return False
+            cancel = self._scan_cancel
+            self.scan_state.cancel_requested = True
+        cancel.set()
+        if wait_seconds:
+            deadline = time.monotonic() + wait_seconds
+            while time.monotonic() < deadline:
+                with self.scan_lock:
+                    if not self.scan_state.running:
+                        break
+                time.sleep(0.05)
         return True
 
     def scan_status_snapshot(self) -> dict:
@@ -461,13 +520,20 @@ class WebContext:
             running, error = state.running, state.error
             started_at, finished_at = state.started_at, state.finished_at
             summary, current_filename = state.summary, state.current_filename
+            cancel_requested = state.cancel_requested
 
+        cancelled = bool(summary and summary.get("cancelled"))
         if started_at is None:
             status = "idle"
         elif running:
             status = "running"
         elif error:
             status = "failed"
+        elif cancelled:
+            # Not "completed": a cancelled pass stopped partway, and
+            # reporting its smaller numbers as a finished scan would read
+            # as "your library shrank" rather than "you stopped it".
+            status = "cancelled"
         else:
             status = "completed"
 
@@ -481,6 +547,7 @@ class WebContext:
             "status": status, "running": running, "summary": summary, "error": error,
             "started_at": started_at, "finished_at": finished_at,
             "current_filename": current_filename, "elapsed_seconds": elapsed_seconds,
+            "cancel_requested": cancel_requested, "cancelled": cancelled,
         }
 
     # -- library filesystem watcher (point 12) ------------------------------
@@ -510,11 +577,25 @@ class WebContext:
         (mirrors scan_library_once()'s own tolerance of a missing
         directory -- watchdog's Observer.schedule() itself has no such
         tolerance and would raise, so this must check first rather than
-        let that surprise a server startup)."""
+        let that surprise a server startup).
+
+        Also a no-op while no Library folder has actually been CHOSEN.
+        config.LIBRARY_DIR falls back to the Windows Downloads folder when
+        config.yaml names none (config.load_library_dir), which is a fine
+        suggestion to prefill Settings with and a terrible thing to start
+        walking and re-walking unasked: a real Downloads directory is
+        mostly junk, takes minutes per pass, and none of it is Switch
+        content. The app already distinguishes the two cases -- an
+        unconfigured folder is exactly what raises onboarding's "Choose
+        Library Folder" banner -- so nothing here needs to guess; it just
+        waits for the answer."""
         if self._watcher_observer is not None:
             return
         from .. import preferences
         if not preferences.load()["auto_scan"]:
+            return
+        if not config.library_dir_info(config.CONFIG_YAML_PATH).configured:
+            log.info("library watcher: no Library folder chosen yet, not watching anything")
             return
         roots = [root for root in config.library_dirs() if root.is_dir()]
         if not roots:
@@ -558,7 +639,10 @@ class WebContext:
         if self._watcher_observer is not None:
             self._watcher_observer.stop()
             self._watcher_observer.join()
-            self._watcher_observer = None
+            # Set for the lifetime of one background scan; see cancel_scan().
+        self._scan_cancel: Optional[threading.Event] = None
+
+        self._watcher_observer = None
         if self._watcher_stop_event is not None:
             self._watcher_stop_event.set()
         if self._watcher_thread is not None:

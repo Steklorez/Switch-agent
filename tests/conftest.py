@@ -42,6 +42,28 @@ def build_7z(path: Path, entries: dict[str, bytes]) -> Path:
     return path
 
 
+def choose_library_folder(path=None):
+    """Makes config.LIBRARY_DIR a folder the user has actually CHOSEN, by
+    writing the config.yaml key that says so.
+
+    The watcher deliberately refuses to run against an unchosen folder --
+    with no config.yaml, config.LIBRARY_DIR falls back to the Windows
+    Downloads folder, and walking that unasked is the whole problem that
+    guard exists for (see WebContext.start_library_watcher). Test fixtures
+    set config.LIBRARY_DIR directly, which is not the same thing, so any
+    test that wants a live watcher has to say so explicitly -- exactly as a
+    real user does by picking a folder in Settings."""
+    from switchagent import config as config_mod
+
+    target = path or config_mod.LIBRARY_DIR
+    escaped = str(target).replace("\\", "\\\\").replace('"', '\\"')
+    config_mod.CONFIG_YAML_PATH.parent.mkdir(parents=True, exist_ok=True)
+    config_mod.CONFIG_YAML_PATH.write_text(
+        'library:\n  source_dir: "' + escaped + '"\n', encoding="utf-8",
+    )
+    return target
+
+
 @pytest.fixture
 def isolated_db(tmp_path, monkeypatch):
     """A real sqlite db in a tmp dir, with config.INBOX_DIR/WORK_DIR/

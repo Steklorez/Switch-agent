@@ -110,18 +110,37 @@ LIBRARY_DIR = _fallback_library_dir()
 
 
 def library_dirs() -> tuple[Path, ...]:
-    """Current primary folder plus configured additional folders."""
+    """Current primary folder plus configured additional folders.
+
+    An explicit empty `source_dirs: []` means the user removed every
+    folder, and is answered with an empty tuple -- "which folders has the
+    user chosen? none". That is deliberately NOT the same as the key being
+    absent (a config that never named any), which keeps falling back to
+    LIBRARY_DIR: only the first is a decision, the second is a default.
+    Callers treat the empty case as a legitimate state, not a failure --
+    the scanner purges the index (see scan_library_once), the watcher
+    stops, and a job whose library folder is gone fails with a clear
+    "source library folder is no longer configured" (see manifest.py)."""
     import yaml
     data = yaml.safe_load(CONFIG_YAML_PATH.read_text(encoding="utf-8")) if CONFIG_YAML_PATH.exists() else {}
-    extra = (data or {}).get("library", {}).get("source_dirs", []) or []
-    return tuple(dict.fromkeys([LIBRARY_DIR, *(Path(p) for p in extra)]))
+    # See load_library_dir(): a comments-only `library:` section is None.
+    extra = ((data or {}).get("library") or {}).get("source_dirs")
+    if extra == []:
+        return ()
+    return tuple(dict.fromkeys([LIBRARY_DIR, *(Path(p) for p in (extra or []))]))
 
 
 def set_library_source_dirs(new_paths: list[Path]) -> None:
-    """Preserve unrelated config lines and the legacy primary-folder key."""
+    """Preserve unrelated config lines and the legacy primary-folder key.
+
+    An empty list is allowed and means exactly what it says: no folder is
+    configured any more. The legacy single-folder key is REMOVED in that
+    case rather than left pointing at a folder the user just deleted from
+    the list -- otherwise library_dir_info() would keep reporting that
+    stale path as the chosen one."""
     import json
     import re
-    set_library_source_dir(new_paths[0], CONFIG_YAML_PATH)
+    set_library_source_dir(new_paths[0] if new_paths else None, CONFIG_YAML_PATH)
     lines = CONFIG_YAML_PATH.read_text(encoding="utf-8").splitlines(keepends=True)
     start = next(i for i, line in enumerate(lines) if re.match(r"^library:\s*$", line))
     end = next((i for i in range(start + 1, len(lines)) if re.match(r"^[^\s#]", lines[i])), len(lines))
@@ -197,7 +216,12 @@ def library_dir_info(yaml_path: Path = CONFIG_YAML_PATH) -> "LibraryDirInfo":
 
         with yaml_path.open("r", encoding="utf-8") as f:
             data = yaml.safe_load(f) or {}
-        configured_value = data.get("library", {}).get("source_dir")
+        # `or {}` and not just a default: a `library:` section holding
+        # nothing but comments parses as None, not as an empty mapping, and
+        # that is now the ordinary shape of a fresh config.yaml (firstrun
+        # writes the detected Downloads folder commented out rather than
+        # adopting it). `.get` straight off that None crashed every caller.
+        configured_value = (data.get("library") or {}).get("source_dir")
 
     if configured_value:
         path = Path(configured_value)
@@ -242,6 +266,12 @@ def set_library_source_dir(new_path: Path, yaml_path: Path = CONFIG_YAML_PATH) -
                 source_dir_line_idx = i
             elif re.match(r"^\S", line):  # dedented -- left the library: section
                 break
+
+    if new_path is None:
+        if source_dir_line_idx is not None:
+            del lines[source_dir_line_idx]
+            yaml_path.write_text("".join(lines), encoding="utf-8")
+        return
 
     new_line = f'  source_dir: "{_yaml_escape(str(new_path))}"\n'
     if source_dir_line_idx is not None:

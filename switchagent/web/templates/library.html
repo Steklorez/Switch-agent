@@ -1,6 +1,6 @@
 {% extends "base.html" %}
 {% block title %}Library — SwitchAgent{% endblock %}
-{% block styles %}<link rel="stylesheet" href="/static/card_motion.css?v=8">{% endblock %}
+{% block styles %}<link rel="stylesheet" href="{{ static_url('card_motion.css') }}">{% endblock %}
 
 {# confirmed_on_device (DBI's own report) and the job-status pill
    (SwitchAgent's own copy record) can both be true at once for the exact
@@ -140,7 +140,13 @@
     Rescan
   </button>
 </div>
-<div id="scan-status" class="scan-status" hidden></div>
+<div id="scan-status" class="scan-status" hidden>
+  <span id="scan-status-text"></span>
+  {# Shown only while a scan is actually running -- see library.js. A big
+     Library folder can take minutes per pass, and until this existed the
+     only way out was to wait it out. #}
+  <button id="scan-cancel-btn" class="btn btn-small" type="button" hidden>Stop scanning</button>
+</div>
 <div id="cover-status" class="scan-status" role="status" aria-live="polite">
   <span id="cover-status-text">Checking covers…</span>
   <button id="cover-retry" class="btn btn-small" type="button" hidden>Retry covers</button>
@@ -206,9 +212,9 @@
 {% include "_install_selection.html" %}
 {% endblock %}
 {% block scripts %}
-<script src="/static/library.js?v=3"></script>
-<script src="/static/covers.js?v=3"></script>
-<script src="/static/library_activity.js?v=3"></script>
-<script src="/static/card_motion.js?v=3"></script>
-<script src="/static/library_live.js"></script>
+<script src="{{ static_url('library.js') }}"></script>
+<script src="{{ static_url('covers.js') }}"></script>
+<script src="{{ static_url('library_activity.js') }}"></script>
+<script src="{{ static_url('card_motion.js') }}"></script>
+<script src="{{ static_url('library_live.js') }}"></script>
 {% endblock %}
