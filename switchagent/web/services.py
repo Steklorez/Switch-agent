@@ -361,6 +361,37 @@ _SORT_KEYS = {
 }
 
 
+def library_rows_in_scope(conn) -> tuple[list, list]:
+    """(every library_items row, the subset that is actually part of the
+    library right now).
+
+    Not the same question. A row is KEPT after its file leaves the library
+    -- marked db.LIBRARY_ITEM_RETIRED rather than deleted, because
+    jobs.library_item_id has no ON DELETE and Queue/History still resolve
+    their display names through it (see
+    db.delete_library_items_missing_from). Those rows are records, not
+    content, and every "what is in my library" read has to say so: after
+    removing the last Library folder the index was correctly retired down
+    to exactly these rows, and the Library page went on rendering all 19 of
+    them as games, which is not what "I removed that folder" looks like.
+
+    Retired-ness is a status and not, as a first cut had it, "the path sits
+    under no configured folder". Both are true in production, but the
+    second also quietly answers "no" for any row whose path is not a real
+    location -- which is most of the test corpus, and reasonably so, since
+    a test about sorting or filtering has no business owning a filesystem.
+    A status says the thing directly and cannot be wrong about it.
+
+    Callers that resolve DISPLAY NAMES (queue_worker, device detail) keep
+    reading db.list_library_items() directly -- for them the records are
+    the entire point. Which is also why the full list is still handed to
+    _library_entry_view below: a family's name can legitimately come from a
+    sibling that is itself retired."""
+    all_items = db.list_library_items(conn)
+    in_scope = [row for row in all_items if row["status"] != db.LIBRARY_ITEM_RETIRED]
+    return all_items, in_scope
+
+
 def list_library(
     conn, *, search: Optional[str] = None, status_filter: str = "all",
     format_filter: Optional[str] = None, sort: str = "date_added", reverse: bool = True,
@@ -378,13 +409,13 @@ def list_library(
     information available", not "nothing is installed" (see
     _library_entry_view's own docstring on that distinction)."""
     latest_jobs = _latest_job_by_library_item(conn)
-    all_items = db.list_library_items(conn)
+    all_items, in_scope = library_rows_in_scope(conn)
     entries = [
         _library_entry_view(
             conn, row, latest_jobs.get(row["id"]), library_items=all_items,
             installed_on_device_base_ids=installed_on_device_base_ids,
         )
-        for row in all_items
+        for row in in_scope
     ]
 
     predicate = _FILTER_PREDICATES.get(status_filter, _FILTER_PREDICATES["all"])
@@ -528,13 +559,13 @@ def list_library_view(
     (the default) means "no information available", never "nothing is
     installed"."""
     latest_jobs = _latest_job_by_library_item(conn)
-    all_items = db.list_library_items(conn)
+    all_items, in_scope = library_rows_in_scope(conn)
     all_entries = [
         _library_entry_view(
             conn, row, latest_jobs.get(row["id"]), library_items=all_items,
             installed_on_device_base_ids=installed_on_device_base_ids,
         )
-        for row in all_items
+        for row in in_scope
     ]
 
     if format_filter:

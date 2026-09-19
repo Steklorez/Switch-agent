@@ -373,7 +373,7 @@ def test_retiring_the_index_still_keeps_a_row_some_job_references(isolated_db, m
 
     assert summary["removed"] == 0  # nothing was actually deleted
     rows = db.list_library_items(conn)
-    assert len(rows) == 1 and rows[0]["status"] == "ERROR"
+    assert len(rows) == 1 and rows[0]["status"] == db.LIBRARY_ITEM_RETIRED
 
 
 def test_an_empty_folder_list_is_told_apart_from_one_never_configured(isolated_db):
@@ -392,3 +392,80 @@ def test_an_empty_folder_list_is_told_apart_from_one_never_configured(isolated_d
     # The legacy single-folder key must not be left pointing at a folder
     # the user just removed, or library_dir_info() keeps calling it chosen.
     assert config.library_dir_info(config.CONFIG_YAML_PATH).configured is False
+
+
+# ---------------------------------------------------------------------------
+# What the Library page counts as "mine". A row whose file has left the
+# library is KEPT (jobs.library_item_id has no ON DELETE, and Queue/History
+# resolve display names through it) -- but it is a record, not content.
+# Removing the last folder retired the index down to exactly those rows and
+# the page went on rendering all of them as games.
+# ---------------------------------------------------------------------------
+
+def test_rows_kept_only_as_a_record_are_not_shown_as_library_content(isolated_db, monkeypatch):
+    from switchagent.web import services
+
+    conn, _inbox_dir = isolated_db
+    (config.LIBRARY_DIR / "Game [0100000000010000][v0].nsp").write_bytes(b"nsp bytes")
+    scanner.scan_library_once(conn)
+    item_id = db.list_library_items(conn)[0]["id"]
+    db.create_job(  # this is what makes the row undeletable below
+        conn, library_item_id=item_id, action="INSTALL_VIA_DBI",
+        target_storage="SD_INSTALL", target_device_id="mock-switch-parent",
+    )
+    assert len(services.list_library_view(conn)["games"]) == 1
+
+    monkeypatch.setattr(config, "library_dirs", tuple)  # every folder removed
+    scanner.scan_library_once(conn)
+
+    assert len(db.list_library_items(conn)) == 1, "the record itself must survive"
+    assert services.list_library_view(conn)["games"] == [], "but it is not library content"
+    assert services.list_library(conn) == []
+    # ...and the name it exists to provide still resolves for Queue/History.
+    from switchagent import queue_worker
+    row = db.get_library_item_by_id(conn, item_id)
+    assert queue_worker.resolve_library_item_display_name(conn, row)
+
+
+def test_one_deleted_file_retires_the_same_way_a_removed_folder_does(isolated_db):
+    """Deliberately ONE rule, not two: a file that has left the library is
+    retired and stops being listed, whether it left because it was deleted
+    or because the folder around it was removed. Either way it cannot be
+    installed and there is nothing to review about it -- and either way the
+    record survives for Queue/History (test above)."""
+    from switchagent.web import services
+
+    conn, _inbox_dir = isolated_db
+    path = config.LIBRARY_DIR / "Game [0100000000010000][v0].nsp"
+    path.write_bytes(b"nsp bytes")
+    scanner.scan_library_once(conn)
+    db.create_job(
+        conn, library_item_id=db.list_library_items(conn)[0]["id"], action="INSTALL_VIA_DBI",
+        target_storage="SD_INSTALL", target_device_id="mock-switch-parent",
+    )
+
+    path.unlink()
+    scanner.scan_library_once(conn)
+
+    rows = db.list_library_items(conn)
+    assert len(rows) == 1 and rows[0]["status"] == db.LIBRARY_ITEM_RETIRED
+    assert services.list_library_view(conn)["games"] == []
+
+
+def test_an_unplugged_drive_keeps_its_games_listed(isolated_db, monkeypatch):
+    """The one case that must NOT retire. A folder that is merely
+    unreachable right now is still a folder the user chose, and its rows
+    are never even considered stale (scan_library_once backfills them into
+    seen_absolute_paths first) -- losing a whole drive's library from the
+    page every time it is unplugged would be its own bug."""
+    from switchagent.web import services
+
+    conn, _inbox_dir = isolated_db
+    (config.LIBRARY_DIR / "Game [0100000000010000][v0].nsp").write_bytes(b"nsp bytes")
+    scanner.scan_library_once(conn)
+    assert len(services.list_library_view(conn)["games"]) == 1
+
+    monkeypatch.setattr(config, "library_dirs", lambda: (config.LIBRARY_DIR / "unplugged",))
+    scanner.scan_library_once(conn)
+
+    assert len(services.list_library_view(conn)["games"]) == 1

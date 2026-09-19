@@ -66,7 +66,7 @@ def test_delete_missing_library_item_referenced_by_a_job_does_not_crash(isolated
     sqlite3.IntegrityError, crashing every Rescan after a previously-
     installed game's file was removed from the Library folder, forever
     (the stale row could never be cleaned up). Fixed: such a row is now
-    marked ERROR instead of deleted -- kept (for Queue/History
+    marked RETIRED instead of deleted -- kept (for Queue/History
     display-name lookups) but no longer AVAILABLE/installable."""
     conn, _inbox_dir = isolated_db
     item_id = _add_library_item(conn, r"D:\shared\Download\A.nsp", content_hash="ha")
@@ -78,7 +78,7 @@ def test_delete_missing_library_item_referenced_by_a_job_does_not_crash(isolated
 
     row = db.get_library_item_by_id(conn, item_id)
     assert row is not None  # kept, not hard-deleted
-    assert row["status"] == "ERROR"
+    assert row["status"] == db.LIBRARY_ITEM_RETIRED
     assert "no longer found on disk" in row["error"]
 
 
@@ -97,7 +97,7 @@ def test_delete_missing_library_items_mixed_referenced_and_unreferenced(isolated
 
     assert db.get_library_item_by_id(conn, unreferenced_id) is None  # gone
     kept = db.get_library_item_by_id(conn, referenced_id)
-    assert kept is not None and kept["status"] == "ERROR"  # kept, flagged
+    assert kept is not None and kept["status"] == db.LIBRARY_ITEM_RETIRED  # kept, as a record
 
 
 def test_find_other_library_item_with_hash_detects_duplicate(isolated_db):

@@ -1147,6 +1147,18 @@ def list_library_items(conn: sqlite3.Connection) -> list[sqlite3.Row]:
     return conn.execute("SELECT * FROM library_items ORDER BY first_seen_at DESC").fetchall()
 
 
+# A library_items row whose file has left the library, kept ONLY as a
+# record: jobs.library_item_id has no ON DELETE clause, and Queue/History
+# still resolve their display names through it. Its own status rather than
+# ERROR, because the two mean different things to a reader and to the UI --
+# ERROR is "look at this, something is wrong with it", and these need no
+# attention at all: the file is simply not in the library any more, usually
+# because the user removed the folder on purpose. Every "what is in my
+# library" read skips them (see web/services.library_rows_in_scope), while
+# every display-name lookup still finds them.
+LIBRARY_ITEM_RETIRED = "RETIRED"
+
+
 def delete_library_items_missing_from(conn: sqlite3.Connection, present_absolute_paths: set[str]) -> int:
     """Mirrors delete_inbox_items_missing_from() -- drops rows for files no
     longer present under config.LIBRARY_DIR. Does not touch jobs/history:
@@ -1160,7 +1172,7 @@ def delete_library_items_missing_from(conn: sqlite3.Connection, present_absolute
     regression: every Rescan after a previously-installed game's file was
     removed from the Library folder used to crash here, and kept crashing
     on every subsequent Rescan since the stale row could never be cleaned
-    up -- see tests/test_web_db.py). Such rows are marked ERROR instead --
+    up -- see tests/test_web_db.py). Such rows are marked RETIRED instead --
     visibly flagged (they already surface under the Library page's
     existing NEEDS_REVIEW/ERROR filter) and no longer retryable/
     installable (retry_job() and create_and_confirm_jobs() both already
@@ -1188,7 +1200,8 @@ def delete_library_items_missing_from(conn: sqlite3.Connection, present_absolute
     if orphaned_but_referenced_ids:
         ts = now_iso()
         conn.executemany(
-            "UPDATE library_items SET status = 'ERROR', error = ?, last_scanned_at = ? WHERE id = ?",
+            f"UPDATE library_items SET status = '{LIBRARY_ITEM_RETIRED}', error = ?, "
+            "last_scanned_at = ? WHERE id = ?",
             [
                 ("source file no longer found on disk (kept: referenced by an existing job/history entry)", ts, i)
                 for i in orphaned_but_referenced_ids

@@ -111,7 +111,10 @@ def _library_onboarding_message(conn) -> Optional[onboarding.OnboardingMessage]:
     from .. import config as config_mod
 
     library_info = config_mod.library_dir_info(config_mod.CONFIG_YAML_PATH)
-    item_count = len(db.list_library_items(conn))
+    # Rows retained only as a record for Queue/History do not make the
+    # library non-empty -- otherwise removing every folder left onboarding
+    # insisting there was content to look at (see library_rows_in_scope).
+    item_count = len(services.library_rows_in_scope(conn)[1])
     return onboarding.compute_library_message(
         library_dir_configured=library_info.configured,
         library_dir_exists=library_info.exists,
