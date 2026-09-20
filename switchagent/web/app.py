@@ -338,14 +338,9 @@ def create_app(ctx: WebContext) -> FastAPI:
     @app.get("/history", response_class=HTMLResponse)
     def page_history(request: Request, conn=Depends(get_conn), ctx: WebContext = Depends(get_ctx)):
         return _TEMPLATES.TemplateResponse(request, "history.html", {
-            # One entry per title rather than per transfer -- see
-            # services.list_history_by_title(). The installed-title set is
-            # "no information" when empty (nothing connected, DBI's setting
-            # off), never "nothing is installed", and the template simply
-            # omits the line in that case.
-            "view": services.list_history_by_title(
-                conn, installed_title_ids=ctx.get_known_installed_title_ids(),
-            ),
+            # One row per transfer, newest first -- the same list Queue
+            # shows, after the fact (services.list_history_entries).
+            "view": services.list_history_entries(conn),
             "devices": services.list_devices(conn, ctx),
             "active_page": "history",
         })

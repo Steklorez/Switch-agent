@@ -1820,11 +1820,10 @@ def test_retry_failing_after_a_job_row_was_already_inserted_does_not_500(client,
         assert db.get_installation_batch(conn, rows[0]["batch_id"]) is not None
 
 
-def test_history_is_one_row_per_title_not_per_transfer(client, web_ctx):
-    """The unit a person thinks in. A worker that retried the same mod 18
-    times is one fact, not eighteen -- a real library reached 86 rows for
-    19 things, and the 21 that had actually gone wrong were invisible in
-    the middle of them."""
+def test_history_keeps_every_transfer_in_the_order_it_happened(client, web_ctx):
+    """One row per transfer, not per title. How many times something was
+    sent is not the question -- what was sent, and in what order, is, and
+    that stays true when the same thing was sent three times."""
     item_id = _seed_library_item(web_ctx)
     res = client.post("/api/jobs", json={"library_item_ids": [item_id], "target_device_id": "mock-switch-parent"})
     job_id = res.json()["created"][0]["job_id"]
@@ -1837,29 +1836,38 @@ def test_history_is_one_row_per_title_not_per_transfer(client, web_ctx):
             )
 
     html = client.get("/history").text
-    assert html.count('class="hist-row') == 1, "three transfers of one title are one row"
-    assert ">3</b> transfer" in html and ">1</b> title" in html
+    assert html.count('class="job-row history-row') == 3
+    assert "×3" not in html, "a repeat counter answers a question nobody asked"
 
 
-def test_history_shows_what_repeated_attempts_actually_did(client, web_ctx):
-    """A row states its LATEST outcome, which is right: a mod that was
-    refused twice and then landed is not a problem any more. Saying only
-    that would hide the refusals -- the older complaint (conflicts shown
-    with no outcome) wearing a new hat."""
-    item_id = _seed_library_item(web_ctx)
+def test_history_carries_the_same_badge_queue_puts_on_the_same_item(client, web_ctx):
+    """It is the same list, after the fact. An Update reads as an Update in
+    both places, from the same source (services._history_role)."""
+    item_id = _seed_library_item(web_ctx, name="Some Game [0100000000010800][v65536].nsp")
     res = client.post("/api/jobs", json={"library_item_ids": [item_id], "target_device_id": "mock-switch-parent"})
     job_id = res.json()["created"][0]["job_id"]
     with db.open_db(web_ctx.db_path) as conn:
-        for outcome in ("DESTINATION_CONFLICT", "DESTINATION_CONFLICT", "DONE"):
-            db.record_install_history(
-                conn, job_id=job_id, title_id="0100000000010000", display_name="Some Game.nsp",
-                target_device_id="mock-switch-parent", target_storage="SD_CARD",
-                outcome=outcome, bytes_total=1000,
-            )
+        db.record_install_history(
+            conn, job_id=job_id, title_id="0100000000010800",
+            display_name="Some Game [0100000000010800][v65536].nsp",
+            target_device_id="mock-switch-parent", target_storage="SD_INSTALL",
+            outcome="DONE_UNVERIFIED", bytes_total=1000,
+        )
 
     html = client.get("/history").text
-    assert "Installed" in html  # where it ended up
-    assert "2 refused, already on the card" in html  # and what it took
+    assert 'class="job-tag job-tag-update">[Update]' in html
+
+
+def test_history_says_nothing_it_did_not_observe(client, web_ctx):
+    """No summary line. It counted transfers and totalled bytes, which is
+    arithmetic about the log rather than anything a reader came for, and it
+    led with what had NOT happened today."""
+    _job_id, _history_id = _seed_done_unverified_history(web_ctx)
+    html = client.get("/history").text
+
+    assert "sent in total" not in html
+    assert "Nothing was sent today" not in html
+    assert "transfers ·" not in html
 
 
 # ---------------------------------------------------------------------------
@@ -1955,7 +1963,7 @@ def test_history_asks_for_nothing_and_changes_nothing(client, web_ctx):
     assert "Installed successfully" not in html and "Installation failed" not in html
     assert "<form" not in html
     assert 'class="btn' not in html, "a journal has no controls at all"
-    assert "Accepted by the Switch" in html  # it still says what happened
+    assert ">Sent<" in html  # it still says what happened
 
 
 def test_history_still_answers_where_a_stuck_thing_is_decided(client, web_ctx):
@@ -1993,7 +2001,7 @@ def test_history_page_never_shows_verification_ui_for_verified_outcomes(client, 
     verification prompt -- it only applies to DONE_UNVERIFIED."""
     _job_id, _history_id = _seed_done_unverified_history(web_ctx, outcome="DONE")
     html = client.get("/history").text
-    assert "Accepted by the Switch" not in html
+    assert ">Sent<" not in html
     assert "data-verify-action" not in html  # nothing renders this any more
 
 
@@ -2037,10 +2045,10 @@ def test_done_unverified_is_visually_and_textually_distinct_from_done_in_history
     # No longer a raw enum pill: "DONE UNVERIFIED" told a reader nothing.
     # The claim is spelled out now, and the distinction it has to preserve
     # is that this row never reads as a completed install.
-    assert "Accepted by the Switch" in html
+    assert ">Sent<" in html
     assert "DONE UNVERIFIED" not in html
-    assert "transfer verified" not in html
-    assert "hist-soft" in html and "hist-ok" not in html
+    assert ">Installed<" not in html
+    assert "history-soft" in html and "history-ok" not in html
 
 
 def test_blocked_by_dependency_appears_in_history_page_via_http(client, web_ctx):

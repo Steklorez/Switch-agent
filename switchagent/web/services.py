@@ -1766,36 +1766,36 @@ def cancel_job(conn, job_id: int) -> None:
 
 # ---------------------------------------------------------------------------
 # History as a JOURNAL. Deliberately read-only: nothing on that page changes
-# anything, by explicit product decision -- see CLAUDE.md. It answers two
-# questions and is not asked to do more:
-#   "I pressed Install -- did it arrive?"  (most visits, minutes old)
-#   "Why is this game not on the Switch?"  (the stuck ones)
-# One row per TITLE rather than per transfer: a worker that retried the same
-# mod 18 times is one fact to a person, not eighteen. Everything below is
-# derived from rows list_history() already returns.
+# anything, by explicit product decision -- see CLAUDE.md.
+#
+# It is the SAME list Queue shows, after the fact: one row per transfer, in
+# the order they happened, carrying the same Game/Update/DLC/Mod badge and a
+# marker of how each one ended. Deliberately NOT aggregated per title -- how
+# many times something was sent is not the question; what was sent, in what
+# order, is, and that stays true when the same thing was sent twice.
 # ---------------------------------------------------------------------------
 
 _STORAGE_LABELS = {"SD_CARD": "SD card", "SD_INSTALL": "SD install"}
 
 # The SAME claims as _ACTIVITY_LABELS, said shorter. Not a second vocabulary:
-# the kinds are still classify_activity()'s, and nothing here states more than
+# the kinds are still classify_activity()'s and nothing here states more than
 # the long form does. History can afford the short one because it explains the
-# caveat once, in its own footnote, instead of repeating it on all 19 rows --
-# where it wrapped to two lines each and buried the name it belonged to.
+# caveat once, in its own footnote, instead of on every row -- where the long
+# form wrapped to two lines and buried the name it belonged to.
 _ACTIVITY_LABELS_SHORT = {
-    "TRANSPORT_VERIFIED": "Installed — transfer verified",
-    "CONSOLE_CONFIRMED_SUCCESS": "Installed — you confirmed it on the console",
-    "CONSOLE_CONFIRMED_FAILED": "Accepted, but you reported it did not work",
-    "TRANSPORT_UNVERIFIED": "Accepted by the Switch",
+    "TRANSPORT_VERIFIED": "Installed",
+    "CONSOLE_CONFIRMED_SUCCESS": "Installed",
+    "CONSOLE_CONFIRMED_FAILED": "Did not work",
+    "TRANSPORT_UNVERIFIED": "Sent",
     "FAILED": "Failed",
     "INTERRUPTED": "Interrupted",
-    "DESTINATION_CONFLICT": "Blocked — already on the card, nothing overwritten",
-    "SOURCE_CHANGED": "Skipped — the source file had changed",
+    "DESTINATION_CONFLICT": "Blocked",
+    "SOURCE_CHANGED": "Skipped",
 }
 
-# Which colour a title's latest outcome flies. "soft" is the honest middle:
-# the Switch took the bytes and DBI's result is unknowable over MTP, so it is
-# neither a success claim nor a warning.
+# Which colour a row flies. "soft" is the honest middle: the Switch took the
+# bytes and DBI's result is unknowable over MTP, so it is neither a success
+# claim nor a warning.
 _ACTIVITY_FLAGS = {
     "TRANSPORT_VERIFIED": "ok",
     "CONSOLE_CONFIRMED_SUCCESS": "ok",
@@ -1806,6 +1806,8 @@ _ACTIVITY_FLAGS = {
     "SOURCE_CHANGED": "failed",
     "DESTINATION_CONFLICT": "conflict",
 }
+
+_ROLE_LABELS = {"base": "Game", "update": "Update", "dlc": "DLC", "mod": "Mod"}
 
 
 def _local(created_at: str) -> Optional[datetime]:
@@ -1827,156 +1829,94 @@ def _day_label(moment: datetime, today) -> str:
     if days == 0:
         return "Today"
     if days == 1:
-        return "Yest."
+        return "Yesterday"
     return moment.strftime("%d %b").lstrip("0")
 
 
 def history_title_name(display_name: str) -> str:
-    """The same name Library shows, reached the same way: drop the
-    extension (Library's names come from Path.stem) then the bracketed
-    release tags (the global `game_name` filter). History rendered the raw
-    filename instead, so one object read as two different things depending
-    on which page you were on. Deliberately NOT cleaner than Library -- a
-    "(0.41 GB)" the two pages disagree about would be the same bug again.
-    A mod's " -- Mod" suffix survives: it is what tells two rows for the
-    same game apart."""
-    base, sep, suffix = display_name.partition(" — ")
-    stem = Path(base).stem if Path(base).suffix.lower() in config_ext() else base
-    cleaned = title_id_mod.strip_release_tags(stem)
-    return f"{cleaned} — {suffix}" if sep else cleaned
-
-
-def config_ext() -> set:
+    """The same name Library shows, reached the same way: drop the extension
+    (Library's names come from Path.stem) then the bracketed release tags
+    (the global `game_name` filter). History rendered the raw filename
+    instead, so one object read as two different things depending on which
+    page you were on. Deliberately NOT cleaner than Library -- a "(0.41 GB)"
+    the two pages disagree about would be the same bug again. A mod's
+    " -- Mod" suffix is dropped here because the row carries a [Mod] badge,
+    exactly as Queue does."""
     from .. import config as config_mod
 
-    return config_mod.ALL_TRACKED_EXTENSIONS
+    base = display_name.partition(" \u2014 ")[0]
+    stem = Path(base).stem if Path(base).suffix.lower() in config_mod.ALL_TRACKED_EXTENSIONS else base
+    return title_id_mod.strip_release_tags(stem)
 
 
-# How a title's repeated attempts read as one sentence. The page shows the
-# LATEST outcome per title, which is right -- a mod that failed nine times
-# and then landed is not a problem any more. But saying only that would
-# hide the nine, which is the older complaint ("conflicts shown with no
-# outcome") wearing a new hat. So the row carries both: the state now, and
-# what it took to get there.
-_ATTEMPT_WORDS = {
-    "TRANSPORT_VERIFIED": "accepted",
-    "CONSOLE_CONFIRMED_SUCCESS": "accepted",
-    "TRANSPORT_UNVERIFIED": "accepted",
-    "CONSOLE_CONFIRMED_FAILED": "reported broken on the console",
-    "FAILED": "failed",
-    "INTERRUPTED": "interrupted",
-    "SOURCE_CHANGED": "skipped, the source had changed",
-    "DESTINATION_CONFLICT": "refused, already on the card",
-}
-
-
-def _attempts_note(rows: list) -> Optional[str]:
-    if len(rows) < 2:
+def _history_role(conn, row) -> Optional[str]:
+    """The same Game/Update/DLC/Mod badge Queue puts on the very same item.
+    Reads the job's frozen manifest first (_job_variant_role -- identical
+    answer to Queue's by construction), and falls back to the title_id the
+    history row stored itself: manifests are cleaned up when a batch
+    finishes, and history outlives them by design."""
+    job_row = db.get_job(conn, row["job_id"])
+    if job_row is not None:
+        role = _job_variant_role(job_row)
+        if role is not None:
+            return role
+    if " \u2014 Mod" in (row["display_name"] or ""):
+        return "mod"
+    if not row["title_id"]:
         return None
-    counts: dict = {}
-    for row in rows:
-        kind = classify_activity(row)["kind"]
-        counts[kind] = counts.get(kind, 0) + 1
-    if len(counts) == 1:
-        kind, total = next(iter(counts.items()))
-        return f"sent {total} times, every one {_ATTEMPT_WORDS.get(kind, 'the same')}"
-    parts = [f"{n} {_ATTEMPT_WORDS.get(k, 'other')}"
-             for k, n in sorted(counts.items(), key=lambda kv: -kv[1])]
-    return f"{len(rows)} sends — " + ", ".join(parts)
+    try:
+        variant, _base = title_id_mod.classify_title_variant(row["title_id"])
+    except (ValueError, TypeError):
+        return None
+    return _TITLE_VARIANT_TO_ROLE.get(variant)
 
 
-def list_history_by_title(conn, *, limit: int = 200, installed_title_ids=None) -> dict:
-    """The History page's whole payload: one entry per title, newest first,
-    plus the summary sentence above it. `installed_title_ids` is
-    WebContext.get_known_installed_title_ids() -- an empty/None set means
-    "no information", never "nothing is installed", so the cross-check line
-    is simply omitted rather than reported as zero."""
+def list_history_entries(conn, *, limit: int = 200) -> dict:
+    """The History page's whole payload: one entry per transfer, newest
+    first. No aggregation and no summary -- the page is a list of what was
+    sent, in the order it was sent, and says nothing it did not observe."""
     entries = list_history(conn, limit=limit)
-    unsettled = _unsettled_library_item_ids(conn)
-
-    by_name: dict[str, list] = {}
-    for entry in entries:
-        by_name.setdefault(entry["display_name"], []).append(entry)
-
+    unsettled = _unsettled_job_ids(conn)
     today = datetime.now().astimezone().date()
-    titles = []
-    for display_name, rows in by_name.items():
-        # id breaks the tie: created_at has one-second granularity, and a
-        # batch of retries lands inside the same second often enough that
-        # "the latest attempt" would otherwise be whichever the sort
-        # happened to keep -- which decides the row's whole state.
-        rows.sort(key=lambda r: (r["created_at"], r["id"]), reverse=True)
-        latest = rows[0]
-        activity = classify_activity(latest)
-        moment = _local(latest["created_at"])
-        kinds = {classify_activity(r)["kind"] for r in rows}
-        titles.append({
-            "name": history_title_name(display_name),
-            "raw_name": display_name,
-            "is_mod": " — Mod" in display_name,
+
+    rows = []
+    previous_day = None
+    for entry in entries:
+        activity = classify_activity(entry)
+        moment = _local(entry["created_at"])
+        day = _day_label(moment, today) if moment else ""
+        role = _history_role(conn, entry)
+        rows.append({
+            "id": entry["id"],
+            "name": history_title_name(entry["display_name"]),
+            "raw_name": entry["display_name"],
+            "role": role,
+            "role_label": _ROLE_LABELS.get(role),
             "kind": activity["kind"],
             "label": _ACTIVITY_LABELS_SHORT.get(activity["kind"], activity["label"]),
             "long_label": activity["label"],
             "flag": _ACTIVITY_FLAGS.get(activity["kind"], "soft"),
-            "device_label": latest["target_device_label"],
-            "storage_label": _STORAGE_LABELS.get(latest["target_storage"], latest["target_storage"]),
-            "bytes_total": latest["bytes_total"],
-            "error": latest["error"],
-            "at": moment,
-            "day_label": _day_label(moment, today) if moment else "",
+            "device_label": entry["target_device_label"],
+            "storage_label": _STORAGE_LABELS.get(entry["target_storage"], entry["target_storage"]),
+            "bytes_total": entry["bytes_total"],
+            "error": entry["error"],
+            "day_label": day,
+            # Only the first row of each day carries its heading, so a run of
+            # transfers from one sitting reads as one block.
+            "day_heading": day if day != previous_day else None,
             "time_label": moment.strftime("%H:%M") if moment else "",
-            "count": len(rows),
-            "all_alike": len(kinds) == 1,
-            "attempts_note": _attempts_note(rows),
-            "attempts": [
-                {"day": a.strftime("%d %b").lstrip("0"), "time": a.strftime("%H:%M")}
-                for a in (_local(r["created_at"]) for r in rows) if a is not None
-            ],
-            "in_queue": any(r["job_id"] in unsettled for r in rows),
-            "confirmed_on_device": bool(
-                installed_title_ids and latest["title_id"]
-                and family_base_title_id(latest["title_id"]) in installed_title_ids
-            ),
+            "in_queue": entry["job_id"] in unsettled,
         })
+        previous_day = day
 
-    titles.sort(key=lambda t: t["at"] or datetime.min.replace(tzinfo=timezone.utc), reverse=True)
-    return {
-        "titles": titles,
-        "summary": _history_summary(titles, entries, today),
-        "total_transfers": len(entries),
-        "total_titles": len(titles),
-        "total_bytes": sum(e["bytes_total"] or 0 for e in entries),
-        "truncated": len(entries) >= limit,
-        "limit": limit,
-    }
+    return {"rows": rows, "truncated": len(entries) >= limit, "limit": limit}
 
 
-def _unsettled_library_item_ids(conn) -> set:
-    """job_ids still awaiting a decision in Queue. Drives the one text link
-    a journal is allowed: an address for a stuck row, never a control."""
+def _unsettled_job_ids(conn) -> set:
+    """job_ids still awaiting a decision in Queue. Drives the one text link a
+    journal is allowed: an address for a stuck row, never a control."""
     all_rows = db.list_jobs(conn)
     return {r["id"] for r in all_rows if _not_settled(all_rows, r)}
-
-
-def _history_summary(titles: list, entries: list, today) -> dict:
-    """The sentence the reader leaves with. Never claims an install: `today`
-    counts what the Switch ACCEPTED, which is the most SwitchAgent can see
-    (docs/ARCHITECTURE.md's transport-vs-install line)."""
-    todays = [e for e in entries if (m := _local(e["created_at"])) and m.date() == today]
-    arrived = [e for e in todays if classify_activity(e)["kind"] in
-               ("TRANSPORT_VERIFIED", "CONSOLE_CONFIRMED_SUCCESS", "TRANSPORT_UNVERIFIED")]
-    latest_today = max((_local(e["created_at"]) for e in todays), default=None)
-    stuck = [t for t in titles if t["flag"] in ("conflict", "failed")]
-    return {
-        "today_count": len(todays),
-        "today_arrived": len(arrived),
-        "today_all_arrived": bool(todays) and len(arrived) == len(todays),
-        "today_bytes": sum(e["bytes_total"] or 0 for e in arrived),
-        "today_device": arrived[0]["target_device_label"] if arrived else None,
-        "today_at": latest_today.strftime("%H:%M") if latest_today else None,
-        "stuck": stuck[:1],
-        "stuck_count": len(stuck),
-    }
 
 
 def list_history(conn, *, limit: int = 200) -> list[dict]:
