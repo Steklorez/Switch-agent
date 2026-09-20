@@ -8,6 +8,14 @@
   --accent: #4f8ef7;
   --accent-text: #ffffff;
   --danger: #e5484d;
+  /* --danger is a fine BACKGROUND, but only 4.3:1 as text on --surface --
+     below AA. This lightened pair reaches 6.8:1, for failure wording that
+     is meant to be read rather than just noticed (see .hist-state-failed). */
+  --danger-text: #ff7b7f;
+  /* A destination conflict is the user's own decision pending, not a
+     failure -- it gets amber-orange of its own rather than borrowing
+     --danger's red or --warn's caution yellow. */
+  --conflict: #ff8a00;
   --ok: #35c46f;
   /* A distinct, still-positive teal for "transport accepted, unverified"
      (DONE_UNVERIFIED/INSTALLED_UNVERIFIED) -- reads as success (matches
@@ -866,3 +874,45 @@ a { color: var(--accent); text-decoration: none; }
 #preparation-list details { font-size: .75rem; color: var(--text-dim); margin: 8px 0; }
 .batch-jobs { padding-left: 0; list-style: none; }
 @media (max-width: 640px) { .library-rows .card-name { flex-basis: 100%; } .library-rows .card-title-id { display: none; } }
+
+/* --- History: the same list Queue shows, after the fact -----------------
+   Reuses .job-row / .job-name / .job-tag / .job-meta wholesale, so one item
+   looks the same in the queue that ran it and in the record of it. Only the
+   pieces Queue has no use for live here: a day heading, the outcome pill's
+   colours, and a 3px flag down the left so 21 real problems do not read the
+   same as 65 routine transfers (which is what the old full-weight cards
+   did). No controls of any kind by design -- see CLAUDE.md. */
+.page-sub { margin: 0 0 16px; color: var(--text-dim); font-size: .8rem; }
+
+.history-day {
+  list-style: none; margin: 18px 0 6px; font-size: .73rem; letter-spacing: .07em;
+  text-transform: uppercase; color: var(--text-dim);
+}
+.history-day:first-child { margin-top: 0; }
+
+.history-row { position: relative; }
+.history-row::before {
+  content: ""; position: absolute; left: 0; top: 10px; bottom: 10px; width: 3px;
+  border-radius: 999px; background: var(--hist-flag, transparent);
+}
+.history-ok { --hist-flag: var(--ok); }
+.history-soft { --hist-flag: var(--ok-soft); }
+.history-conflict { --hist-flag: var(--conflict); }
+.history-failed { --hist-flag: var(--danger); }
+
+.status-hist-ok { color: var(--ok); background: rgba(53, 196, 111, .15); }
+.status-hist-soft { color: var(--ok-soft); background: rgba(45, 212, 191, .15); }
+.status-hist-conflict { color: var(--conflict); background: rgba(255, 138, 0, .15); }
+/* Not --danger: at 4.3:1 on this surface it fails AA as text. */
+.status-hist-failed { color: var(--danger-text); background: rgba(229, 72, 77, .15); }
+
+/* Deliberately a link and not a .btn -- it is an address, not a control. */
+.history-where {
+  display: inline-block; margin-top: 5px; padding: 5px 0; min-height: 26px;
+  font-size: .78rem; border-bottom: 1px solid rgba(79, 142, 247, .35);
+}
+.history-tail { margin: 14px 0 0; font-size: .78rem; color: var(--text-dim); }
+.history-footnote {
+  margin: 14px 0 0; padding-top: 12px; border-top: 1px solid var(--border);
+  font-size: .74rem; color: var(--text-dim); line-height: 1.6;
+}

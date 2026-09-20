@@ -1,50 +1,63 @@
 {% extends "base.html" %}
 {% block title %}History — SwitchAgent{% endblock %}
 {% block content %}
+{#- The same list Queue shows, after the fact: one row per transfer, in the
+    order they happened, same markup and same Game/Update/DLC/Mod badge.
+    Deliberately read-only -- no install confirmation, no Override/Skip/Send
+    again. Decisions live in Queue, which the one text link below points at
+    without acting. See CLAUDE.md. -#}
 <h2>History</h2>
-{% if not groups %}
+<p class="page-sub">A record of what was sent. Nothing here can be changed from here.</p>
+
+{% if not view.rows %}
 <p class="empty-state">No installs recorded yet.</p>
-{% endif %}
-<ul class="history-list">
-  {% for g in groups %}
-  <li class="batch-group" data-batch-id="{{ g.batch_id if g.batch_id is not none else '' }}">
-    {% if g.entries|length > 1 %}
-    <div class="batch-header">
-      <span class="batch-title">{{ g.entries|length }} items</span>
+{% else %}
+<ol class="job-list history-list">
+  {% for h in view.rows %}
+  {% if h.day_heading %}
+  <li class="history-day">{{ h.day_heading }}</li>
+  {% endif %}
+  <li class="job-row history-row history-{{ h.flag }}" data-history-id="{{ h.id }}">
+    <div class="job-main">
+      <div class="job-name">
+        <span class="job-name-text" title="{{ h.raw_name }}">{{ h.name }}</span>
+        {%- if h.role_label %}
+        {#- Same badge, same colours, same source as Queue's own row for
+            this very item (services._history_role). Omitted entirely when
+            it cannot be told: no badge beats a guessed one. -#}
+        <span class="job-tag job-tag-{{ h.role }}">[{{ h.role_label }}]</span>
+        {%- endif %}
+      </div>
+      <div class="job-meta">
+        {{ h.time_label }} · {{ h.device_label }} · {{ h.storage_label }}
+        {%- if h.bytes_total %} · {{ h.bytes_total|filesize }}{% endif %}
+      </div>
+      {% if h.error and h.flag in ("failed", "conflict") %}
+      <div class="job-error" title="{{ h.error }}">{{ h.error }}</div>
+      {% endif %}
+      {# An address, not a control: it says where this is decided, and shows
+         only while there is actually something in Queue to decide. #}
+      {% if h.in_queue %}
+      <a class="history-where" href="/queue">Still waiting in Queue →</a>
+      {% endif %}
     </div>
-    {% endif %}
-    <ul class="batch-jobs history-list">
-      {% for h in g.entries %}
-      <li class="history-row" data-history-id="{{ h.id }}">
-        <div class="history-name">{{ h.display_name }}</div>
-        <div class="history-meta">
-          <span class="status-pill status-{{ h.outcome|lower }}">{{ h.outcome.replace("_", " ") }}</span>
-          {{ h.target_device_label }}{% if h.target_storage %} · {{ h.target_storage }}{% endif %}
-          · {{ h.created_at }}
-        </div>
-        {% if h.error %}<div class="history-error" title="{{ h.error }}">{{ h.error }}</div>{% endif %}
-        {% if h.outcome == "DONE_UNVERIFIED" %}
-        <div class="history-verification">
-          {% if h.user_verified_outcome == "SUCCESS" %}
-          <span class="verification-note verification-success">Console: Confirmed successful by user</span>
-          <button class="btn btn-small" data-verify-action="clear" data-history-id="{{ h.id }}">Clear</button>
-          {% elif h.user_verified_outcome == "FAILED" %}
-          <span class="verification-note verification-failed">Console: Confirmed failed by user</span>
-          <button class="btn btn-small" data-verify-action="clear" data-history-id="{{ h.id }}">Clear</button>
-          {% else %}
-          <span class="verification-note">Transport accepted · Console result not confirmed</span>
-          <button class="btn btn-small" data-verify-action="SUCCESS" data-history-id="{{ h.id }}">Installed successfully</button>
-          <button class="btn btn-small btn-danger" data-verify-action="FAILED" data-history-id="{{ h.id }}">Installation failed</button>
-          {% endif %}
-        </div>
-        {% endif %}
-      </li>
-      {% endfor %}
-    </ul>
+    <div class="job-status">
+      <span class="status-pill status-hist-{{ h.flag }}" title="{{ h.long_label }}">{{ h.label }}</span>
+    </div>
   </li>
   {% endfor %}
-</ul>
-{% endblock %}
-{% block scripts %}
-<script src="{{ static_url('history.js') }}"></script>
+</ol>
+
+{% if view.truncated %}
+<p class="history-tail">This page holds the last {{ view.limit }} transfers.
+  Anything older stays on each game's own page.</p>
+{% endif %}
+
+<p class="history-footnote">
+  Times are local. “Sent” means the Switch took the file — SwitchAgent cannot
+  see what DBI does with it afterwards, so it does not claim to.<br>
+  Anything that still needs deciding lives in <a href="/queue">Queue</a>;
+  what is on each console lives in <a href="/devices">Devices</a>.
+</p>
+{% endif %}
 {% endblock %}

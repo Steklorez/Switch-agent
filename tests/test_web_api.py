@@ -1820,29 +1820,54 @@ def test_retry_failing_after_a_job_row_was_already_inserted_does_not_500(client,
         assert db.get_installation_batch(conn, rows[0]["batch_id"]) is not None
 
 
-def test_history_groups_entries_from_the_same_batch(client, web_ctx):
-    item_ids = _seed_four_items(web_ctx)
-    res = client.post("/api/jobs", json={"library_item_ids": item_ids, "target_device_id": "mock-switch-parent"})
-    assert len(res.json()["created"]) == 4
-
-    with db.open_db(web_ctx.db_path) as conn:
-        for _ in range(4):
-            queue_worker.run_worker_once(conn, web_ctx.registry)
-
-    html = client.get("/history").text
-    assert "batch-header" in html
-    assert "4 items" in html
-
-
-def test_history_legacy_batch_id_null_entry_renders_individually(client, web_ctx):
+def test_history_keeps_every_transfer_in_the_order_it_happened(client, web_ctx):
+    """One row per transfer, not per title. How many times something was
+    sent is not the question -- what was sent, and in what order, is, and
+    that stays true when the same thing was sent three times."""
     item_id = _seed_library_item(web_ctx)
     res = client.post("/api/jobs", json={"library_item_ids": [item_id], "target_device_id": "mock-switch-parent"})
     job_id = res.json()["created"][0]["job_id"]
     with db.open_db(web_ctx.db_path) as conn:
-        queue_worker.run_worker_once(conn, web_ctx.registry)
+        for _ in range(3):
+            db.record_install_history(
+                conn, job_id=job_id, title_id="0100000000010000", display_name="Some Game.nsp",
+                target_device_id="mock-switch-parent", target_storage="SD_INSTALL",
+                outcome="DONE_UNVERIFIED", bytes_total=1000,
+            )
 
     html = client.get("/history").text
-    assert "batch-header" not in html
+    assert html.count('class="job-row history-row') == 3
+    assert "×3" not in html, "a repeat counter answers a question nobody asked"
+
+
+def test_history_carries_the_same_badge_queue_puts_on_the_same_item(client, web_ctx):
+    """It is the same list, after the fact. An Update reads as an Update in
+    both places, from the same source (services._history_role)."""
+    item_id = _seed_library_item(web_ctx, name="Some Game [0100000000010800][v65536].nsp")
+    res = client.post("/api/jobs", json={"library_item_ids": [item_id], "target_device_id": "mock-switch-parent"})
+    job_id = res.json()["created"][0]["job_id"]
+    with db.open_db(web_ctx.db_path) as conn:
+        db.record_install_history(
+            conn, job_id=job_id, title_id="0100000000010800",
+            display_name="Some Game [0100000000010800][v65536].nsp",
+            target_device_id="mock-switch-parent", target_storage="SD_INSTALL",
+            outcome="DONE_UNVERIFIED", bytes_total=1000,
+        )
+
+    html = client.get("/history").text
+    assert 'class="job-tag job-tag-update">[Update]' in html
+
+
+def test_history_says_nothing_it_did_not_observe(client, web_ctx):
+    """No summary line. It counted transfers and totalled bytes, which is
+    arithmetic about the log rather than anything a reader came for, and it
+    led with what had NOT happened today."""
+    _job_id, _history_id = _seed_done_unverified_history(web_ctx)
+    html = client.get("/history").text
+
+    assert "sent in total" not in html
+    assert "Nothing was sent today" not in html
+    assert "transfers ·" not in html
 
 
 # ---------------------------------------------------------------------------
@@ -1926,23 +1951,48 @@ def test_history_verification_never_touches_transport_outcome_at_the_db_layer(cl
     assert row["user_verified_outcome"] == "FAILED"
 
 
-def test_history_page_shows_verification_buttons_for_unconfirmed_done_unverified(client, web_ctx):
-    _job_id, history_id = _seed_done_unverified_history(web_ctx)
+def test_history_asks_for_nothing_and_changes_nothing(client, web_ctx):
+    """By explicit product decision the page is a journal, not a pulpit.
+    The prompt this replaces was shown 55 times in one real library and
+    answered 0 times -- a question whose answer lives on another device,
+    costs a walk to the console, and buys nothing once given."""
+    _job_id, _history_id = _seed_done_unverified_history(web_ctx)
     html = client.get("/history").text
-    assert "Transport accepted" in html
-    assert "Console result not confirmed" in html
-    assert f'data-verify-action="SUCCESS" data-history-id="{history_id}"' in html
-    assert f'data-verify-action="FAILED" data-history-id="{history_id}"' in html
+
+    assert "data-verify-action" not in html
+    assert "Installed successfully" not in html and "Installation failed" not in html
+    assert "<form" not in html
+    assert 'class="btn' not in html, "a journal has no controls at all"
+    assert ">Sent<" in html  # it still says what happened
 
 
-def test_history_page_shows_confirmed_state_after_verification(client, web_ctx):
-    _job_id, history_id = _seed_done_unverified_history(web_ctx)
-    client.post(f"/api/history/{history_id}/verification", json={"outcome": "SUCCESS"})
+def test_history_still_answers_where_a_stuck_thing_is_decided(client, web_ctx):
+    """The one link a read-only journal is allowed: an address, not a
+    control. Reporting a problem and staying silent about where it gets
+    resolved would be worse than not reporting it."""
+    item_id = _seed_library_item(web_ctx)
+    res = client.post("/api/jobs", json={"library_item_ids": [item_id], "target_device_id": "mock-switch-parent"})
+    job_id = res.json()["created"][0]["job_id"]
+    with db.open_db(web_ctx.db_path) as conn:
+        db.update_job_status(conn, job_id, "DESTINATION_CONFLICT", error="already there")
+        db.record_install_history(
+            conn, job_id=job_id, title_id="0100000000010000", display_name="Some Game.nsp",
+            target_device_id="mock-switch-parent", target_storage="SD_CARD",
+            outcome="DESTINATION_CONFLICT", bytes_total=1000,
+        )
 
     html = client.get("/history").text
-    assert "Confirmed successful by user" in html
-    assert f'data-verify-action="SUCCESS" data-history-id="{history_id}"' not in html  # buttons replaced by the note
-    assert f'data-verify-action="clear" data-history-id="{history_id}"' in html
+    assert 'href="/queue"' in html
+    assert "Still waiting in Queue" in html
+    assert 'class="btn' not in html, "an address, never a control"
+
+
+def test_the_verification_api_is_untouched_by_the_page_dropping_it(client, web_ctx):
+    """Removing the page's call to it was a UI decision, not a data one:
+    the endpoint and its column stay correct and callable."""
+    _job_id, history_id = _seed_done_unverified_history(web_ctx)
+    res = client.post(f"/api/history/{history_id}/verification", json={"outcome": "SUCCESS"})
+    assert res.status_code == 200 and res.json()["ok"] is True
 
 
 def test_history_page_never_shows_verification_ui_for_verified_outcomes(client, web_ctx):
@@ -1951,8 +2001,8 @@ def test_history_page_never_shows_verification_ui_for_verified_outcomes(client, 
     verification prompt -- it only applies to DONE_UNVERIFIED."""
     _job_id, _history_id = _seed_done_unverified_history(web_ctx, outcome="DONE")
     html = client.get("/history").text
-    assert "Transport accepted" not in html
-    assert "data-verify-action" not in html  # only DONE_UNVERIFIED entries ever render this
+    assert ">Sent<" not in html
+    assert "data-verify-action" not in html  # nothing renders this any more
 
 
 # ---------------------------------------------------------------------------
@@ -1992,12 +2042,13 @@ def test_done_unverified_is_visually_and_textually_distinct_from_done_in_history
             outcome="DONE_UNVERIFIED", bytes_total=1000,
         )
     html = client.get("/history").text
-    assert 'class="status-pill status-done_unverified"' in html
-    assert "DONE UNVERIFIED" in html
-    # never rendered with the plain DONE pill/class for this row -- exact
-    # class match, since "status-done_unverified" contains "status-done"
-    # as a substring and a naive `in` check would false-pass.
-    assert 'class="status-pill status-done"' not in html
+    # No longer a raw enum pill: "DONE UNVERIFIED" told a reader nothing.
+    # The claim is spelled out now, and the distinction it has to preserve
+    # is that this row never reads as a completed install.
+    assert ">Sent<" in html
+    assert "DONE UNVERIFIED" not in html
+    assert ">Installed<" not in html
+    assert "history-soft" in html and "history-ok" not in html
 
 
 def test_blocked_by_dependency_appears_in_history_page_via_http(client, web_ctx):

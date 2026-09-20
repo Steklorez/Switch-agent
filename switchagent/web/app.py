@@ -338,7 +338,10 @@ def create_app(ctx: WebContext) -> FastAPI:
     @app.get("/history", response_class=HTMLResponse)
     def page_history(request: Request, conn=Depends(get_conn), ctx: WebContext = Depends(get_ctx)):
         return _TEMPLATES.TemplateResponse(request, "history.html", {
-            "groups": services.list_history_grouped(conn), "devices": services.list_devices(conn, ctx),
+            # One row per transfer, newest first -- the same list Queue
+            # shows, after the fact (services.list_history_entries).
+            "view": services.list_history_entries(conn),
+            "devices": services.list_devices(conn, ctx),
             "active_page": "history",
         })
 

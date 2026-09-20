@@ -1764,6 +1764,161 @@ def cancel_job(conn, job_id: int) -> None:
 # History
 # ---------------------------------------------------------------------------
 
+# ---------------------------------------------------------------------------
+# History as a JOURNAL. Deliberately read-only: nothing on that page changes
+# anything, by explicit product decision -- see CLAUDE.md.
+#
+# It is the SAME list Queue shows, after the fact: one row per transfer, in
+# the order they happened, carrying the same Game/Update/DLC/Mod badge and a
+# marker of how each one ended. Deliberately NOT aggregated per title -- how
+# many times something was sent is not the question; what was sent, in what
+# order, is, and that stays true when the same thing was sent twice.
+# ---------------------------------------------------------------------------
+
+_STORAGE_LABELS = {"SD_CARD": "SD card", "SD_INSTALL": "SD install"}
+
+# The SAME claims as _ACTIVITY_LABELS, said shorter. Not a second vocabulary:
+# the kinds are still classify_activity()'s and nothing here states more than
+# the long form does. History can afford the short one because it explains the
+# caveat once, in its own footnote, instead of on every row -- where the long
+# form wrapped to two lines and buried the name it belonged to.
+_ACTIVITY_LABELS_SHORT = {
+    "TRANSPORT_VERIFIED": "Installed",
+    "CONSOLE_CONFIRMED_SUCCESS": "Installed",
+    "CONSOLE_CONFIRMED_FAILED": "Did not work",
+    "TRANSPORT_UNVERIFIED": "Sent",
+    "FAILED": "Failed",
+    "INTERRUPTED": "Interrupted",
+    "DESTINATION_CONFLICT": "Blocked",
+    "SOURCE_CHANGED": "Skipped",
+}
+
+# Which colour a row flies. "soft" is the honest middle: the Switch took the
+# bytes and DBI's result is unknowable over MTP, so it is neither a success
+# claim nor a warning.
+_ACTIVITY_FLAGS = {
+    "TRANSPORT_VERIFIED": "ok",
+    "CONSOLE_CONFIRMED_SUCCESS": "ok",
+    "TRANSPORT_UNVERIFIED": "soft",
+    "CONSOLE_CONFIRMED_FAILED": "failed",
+    "FAILED": "failed",
+    "INTERRUPTED": "failed",
+    "SOURCE_CHANGED": "failed",
+    "DESTINATION_CONFLICT": "conflict",
+}
+
+_ROLE_LABELS = {"base": "Game", "update": "Update", "dlc": "DLC", "mod": "Mod"}
+
+
+def _local(created_at: str) -> Optional[datetime]:
+    """UTC ISO out of the database -> this machine's local time. History used
+    to print the stored string as-is, so every time on the page was wrong by
+    the viewer's own UTC offset -- three hours, for the person this was
+    built for."""
+    try:
+        parsed = datetime.fromisoformat(created_at)
+    except (TypeError, ValueError):
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone()
+
+
+def _day_label(moment: datetime, today) -> str:
+    days = (today - moment.date()).days
+    if days == 0:
+        return "Today"
+    if days == 1:
+        return "Yesterday"
+    return moment.strftime("%d %b").lstrip("0")
+
+
+def history_title_name(display_name: str) -> str:
+    """The same name Library shows, reached the same way: drop the extension
+    (Library's names come from Path.stem) then the bracketed release tags
+    (the global `game_name` filter). History rendered the raw filename
+    instead, so one object read as two different things depending on which
+    page you were on. Deliberately NOT cleaner than Library -- a "(0.41 GB)"
+    the two pages disagree about would be the same bug again. A mod's
+    " -- Mod" suffix is dropped here because the row carries a [Mod] badge,
+    exactly as Queue does."""
+    from .. import config as config_mod
+
+    base = display_name.partition(" \u2014 ")[0]
+    stem = Path(base).stem if Path(base).suffix.lower() in config_mod.ALL_TRACKED_EXTENSIONS else base
+    return title_id_mod.strip_release_tags(stem)
+
+
+def _history_role(conn, row) -> Optional[str]:
+    """The same Game/Update/DLC/Mod badge Queue puts on the very same item.
+    Reads the job's frozen manifest first (_job_variant_role -- identical
+    answer to Queue's by construction), and falls back to the title_id the
+    history row stored itself: manifests are cleaned up when a batch
+    finishes, and history outlives them by design."""
+    job_row = db.get_job(conn, row["job_id"])
+    if job_row is not None:
+        role = _job_variant_role(job_row)
+        if role is not None:
+            return role
+    if " \u2014 Mod" in (row["display_name"] or ""):
+        return "mod"
+    if not row["title_id"]:
+        return None
+    try:
+        variant, _base = title_id_mod.classify_title_variant(row["title_id"])
+    except (ValueError, TypeError):
+        return None
+    return _TITLE_VARIANT_TO_ROLE.get(variant)
+
+
+def list_history_entries(conn, *, limit: int = 200) -> dict:
+    """The History page's whole payload: one entry per transfer, newest
+    first. No aggregation and no summary -- the page is a list of what was
+    sent, in the order it was sent, and says nothing it did not observe."""
+    entries = list_history(conn, limit=limit)
+    unsettled = _unsettled_job_ids(conn)
+    today = datetime.now().astimezone().date()
+
+    rows = []
+    previous_day = None
+    for entry in entries:
+        activity = classify_activity(entry)
+        moment = _local(entry["created_at"])
+        day = _day_label(moment, today) if moment else ""
+        role = _history_role(conn, entry)
+        rows.append({
+            "id": entry["id"],
+            "name": history_title_name(entry["display_name"]),
+            "raw_name": entry["display_name"],
+            "role": role,
+            "role_label": _ROLE_LABELS.get(role),
+            "kind": activity["kind"],
+            "label": _ACTIVITY_LABELS_SHORT.get(activity["kind"], activity["label"]),
+            "long_label": activity["label"],
+            "flag": _ACTIVITY_FLAGS.get(activity["kind"], "soft"),
+            "device_label": entry["target_device_label"],
+            "storage_label": _STORAGE_LABELS.get(entry["target_storage"], entry["target_storage"]),
+            "bytes_total": entry["bytes_total"],
+            "error": entry["error"],
+            "day_label": day,
+            # Only the first row of each day carries its heading, so a run of
+            # transfers from one sitting reads as one block.
+            "day_heading": day if day != previous_day else None,
+            "time_label": moment.strftime("%H:%M") if moment else "",
+            "in_queue": entry["job_id"] in unsettled,
+        })
+        previous_day = day
+
+    return {"rows": rows, "truncated": len(entries) >= limit, "limit": limit}
+
+
+def _unsettled_job_ids(conn) -> set:
+    """job_ids still awaiting a decision in Queue. Drives the one text link a
+    journal is allowed: an address for a stuck row, never a control."""
+    all_rows = db.list_jobs(conn)
+    return {r["id"] for r in all_rows if _not_settled(all_rows, r)}
+
+
 def list_history(conn, *, limit: int = 200) -> list[dict]:
     result = []
     for row in db.list_install_history(conn, limit=limit):

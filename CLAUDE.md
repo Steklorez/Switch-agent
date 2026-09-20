@@ -74,3 +74,50 @@ Claude or any other tool.
 Commit messages are the opposite of changelog entries: that is where the
 cause, the reasoning, the dead ends and the measurements go, at whatever
 length the change earns.
+
+## History is a journal, not a pulpit
+
+**Nothing on the History page changes anything.** No install confirmation, no
+Override / Skip / Send again, no dismiss-or-hide. Decisions live in Queue;
+what is on a console lives in Devices. This is a product decision, not an
+oversight — do not add a control there because it would be convenient.
+
+The line, when it is unclear: *the page may change what you are looking at;
+it may not change what happened, or what will.* Search, filters, day
+grouping, a `<details>` fold, pagination and links to another page are all
+fine. Anything that writes — including "mark as read" — is not: a journal
+you can edit stops being a record.
+
+The one link it is allowed is an **address, not a control**: a stuck row says
+`Still waiting in Queue →`, rendered as a text link rather than a `.btn`,
+worded as a state rather than an order, and shown only while there is
+actually something in Queue to decide. Reporting a problem and staying silent
+about where it gets resolved is worse than not reporting it.
+
+### Why the confirmation prompt was deleted
+
+It asked "did this install?" on every unverified row. In a real library that
+was 55 questions and **0 answers, ever**. The answer lives on another device,
+costs a walk to the console, and buys nothing once given — the row changes
+one caption for another. Eighteen retries of one mod asked eighteen times
+about one file. `POST /api/history/{id}/verification` and
+`set_history_verification()` are still correct and still tested; they simply
+have no caller in the UI.
+
+### What the page owes the reader
+
+Two questions, and it is not asked to do more:
+
+1. *"I pressed Install — did it arrive?"* — most visits, minutes old.
+2. *"Why is this game not on the Switch?"* — the stuck ones.
+
+One row per **title**, not per transfer: a worker that retried the same mod
+18 times is one fact to a person, not eighteen (86 rows for 19 things is what
+this replaced). A row states its latest outcome, and carries what it took to
+get there — dropping the earlier refusals would hide exactly what someone
+came to find out.
+
+Local time, never the stored UTC. Human wording from `classify_activity()`,
+never a raw enum. The same name Library shows, via the same
+`strip_release_tags` — one object must not read as two different things
+depending on which page you are on.
