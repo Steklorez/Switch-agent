@@ -35,3 +35,6 @@ promo/
 # Local-only promo/marketing working material, not part of the product
 promo/
 screenshots/Gemini_Generated_Image_*
+
+# Full-size screen recording; the committed demo is SwitchAgent-demo.gif
+screenshots/SwitchAgent.gif

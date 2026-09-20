@@ -10,7 +10,7 @@ Responder" mode.
 [![Platform](https://img.shields.io/badge/platform-Windows%2010%2F11%20x64-0078D6?logo=windows&logoColor=white)](../../releases/latest)
 [![License: MIT](https://img.shields.io/github/license/Steklorez/Switch-agent?color=blue)](LICENSE)
 
-![Library view](screenshots/library.webp)
+![SwitchAgent in action](screenshots/SwitchAgent-demo.gif)
 
 📺 **[Watch the Web UI in action](https://www.youtube.com/watch?v=xm-BTAGAqhU)**
 -- a short walkthrough of browsing the library and installing to a
