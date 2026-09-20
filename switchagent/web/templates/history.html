@@ -1,50 +1,97 @@
 {% extends "base.html" %}
 {% block title %}History — SwitchAgent{% endblock %}
 {% block content %}
+{#- A journal, deliberately read-only. Nothing on this page changes anything:
+    no install confirmation, no Override/Skip/Send again. Decisions live in
+    Queue, which the one text link below points at without acting. The only
+    interactive elements are <details> folds and that link -- both change what
+    you are looking at, never what happened or what will. See CLAUDE.md. -#}
 <h2>History</h2>
-{% if not groups %}
+<p class="page-sub">A record of what was sent. Nothing here can be changed from here.</p>
+
+{% if not view.titles %}
 <p class="empty-state">No installs recorded yet.</p>
-{% endif %}
-<ul class="history-list">
-  {% for g in groups %}
-  <li class="batch-group" data-batch-id="{{ g.batch_id if g.batch_id is not none else '' }}">
-    {% if g.entries|length > 1 %}
-    <div class="batch-header">
-      <span class="batch-title">{{ g.entries|length }} items</span>
+{% else %}
+
+{% set s = view.summary %}
+<section class="hist-lead{{ ' hist-lead-stuck' if s.stuck else '' }}" aria-label="Summary">
+  {% if s.today_count and s.today_all_arrived %}
+  <p>Everything you sent <b>today</b> reached the Switch — {{ s.today_count }}
+    item{{ "s" if s.today_count != 1 }}, <b>{{ s.today_bytes|filesize }}</b>,
+    to {{ s.today_device }} at {{ s.today_at }}.</p>
+  {% elif s.today_count %}
+  <p><b>{{ s.today_arrived }} of {{ s.today_count }}</b> item{{ "s" if s.today_count != 1 }}
+    you sent today reached the Switch.</p>
+  {% else %}
+  <p>Nothing was sent today. The most recent was
+    <b>{{ view.titles[0].name }}</b>, {{ view.titles[0].day_label|lower }} at
+    {{ view.titles[0].time_label }}.</p>
+  {% endif %}
+
+  {% if s.stuck %}
+  {% set st = s.stuck[0] %}
+  <p>{{ "One thing is" if s.stuck_count == 1 else s.stuck_count ~ " things are" }}
+    <span class="stuck">still not there</span>: <b>{{ st.name }}</b> —
+    {{ st.label|lower }}{% if st.count > 1 %}, {{ st.count }} times{% endif %}
+    on {{ st.device_label }}.</p>
+  {% endif %}
+
+  <div class="hist-lead-meta">
+    <b>{{ view.total_transfers }}</b> transfer{{ "s" if view.total_transfers != 1 }} ·
+    <b>{{ view.total_titles }}</b> title{{ "s" if view.total_titles != 1 }} ·
+    <b>{{ view.total_bytes|filesize }}</b> sent in total
+  </div>
+</section>
+
+<div class="hist-head"><span>Newest first</span><span>one line per title</span></div>
+
+<ol class="hist-feed">
+  {% for t in view.titles %}
+  <li class="hist-row hist-{{ t.flag }}">
+    <span class="hist-when"><b>{{ t.day_label }}</b>{{ t.time_label }}</span>
+    <div class="hist-body">
+      <div class="hist-title" title="{{ t.raw_name }}">{{ t.name }}
+        {%- if t.is_mod %}<span class="job-tag job-tag-mod">MOD</span>{% endif -%}
+        {%- if t.count > 1 %}<span class="hist-rep">×{{ t.count }}</span>{% endif -%}
+      </div>
+      <div class="hist-state hist-state-{{ t.flag }}" title="{{ t.long_label }}">{{ t.label }}</div>
+      <div class="hist-meta">
+        {{ t.device_label }} · {{ t.storage_label }}
+        {%- if t.bytes_total %} · {{ t.bytes_total|filesize }}{% endif %}
+        {%- if t.attempts_note %} · {{ t.attempts_note }}{% endif %}
+        {%- if t.confirmed_on_device %} · on {{ t.device_label }}'s own list{% endif %}
+      </div>
+      {% if t.error and t.flag in ("failed", "conflict") %}
+      <div class="hist-why" title="{{ t.error }}">{{ t.error }}</div>
+      {% endif %}
+      {# An address, not a control: it says where this is decided, and is
+         shown only while there is actually something there to decide. #}
+      {% if t.in_queue %}
+      <a class="hist-where" href="/queue">Still waiting in Queue →</a>
+      {% endif %}
+      {% if t.count > 1 %}
+      <details>
+        <summary>See all {{ t.count }} attempts</summary>
+        <div class="hist-attempts">
+          {% for a in t.attempts %}<span>{{ a.day }} {{ a.time }}</span>{% endfor %}
+        </div>
+      </details>
+      {% endif %}
     </div>
-    {% endif %}
-    <ul class="batch-jobs history-list">
-      {% for h in g.entries %}
-      <li class="history-row" data-history-id="{{ h.id }}">
-        <div class="history-name">{{ h.display_name }}</div>
-        <div class="history-meta">
-          <span class="status-pill status-{{ h.outcome|lower }}">{{ h.outcome.replace("_", " ") }}</span>
-          {{ h.target_device_label }}{% if h.target_storage %} · {{ h.target_storage }}{% endif %}
-          · {{ h.created_at }}
-        </div>
-        {% if h.error %}<div class="history-error" title="{{ h.error }}">{{ h.error }}</div>{% endif %}
-        {% if h.outcome == "DONE_UNVERIFIED" %}
-        <div class="history-verification">
-          {% if h.user_verified_outcome == "SUCCESS" %}
-          <span class="verification-note verification-success">Console: Confirmed successful by user</span>
-          <button class="btn btn-small" data-verify-action="clear" data-history-id="{{ h.id }}">Clear</button>
-          {% elif h.user_verified_outcome == "FAILED" %}
-          <span class="verification-note verification-failed">Console: Confirmed failed by user</span>
-          <button class="btn btn-small" data-verify-action="clear" data-history-id="{{ h.id }}">Clear</button>
-          {% else %}
-          <span class="verification-note">Transport accepted · Console result not confirmed</span>
-          <button class="btn btn-small" data-verify-action="SUCCESS" data-history-id="{{ h.id }}">Installed successfully</button>
-          <button class="btn btn-small btn-danger" data-verify-action="FAILED" data-history-id="{{ h.id }}">Installation failed</button>
-          {% endif %}
-        </div>
-        {% endif %}
-      </li>
-      {% endfor %}
-    </ul>
   </li>
   {% endfor %}
-</ul>
-{% endblock %}
-{% block scripts %}
-<script src="{{ static_url('history.js') }}"></script>
+</ol>
+
+{% if view.truncated %}
+<p class="hist-tail">This page holds the last {{ view.limit }} transfers. Anything
+  older stays on each game's own page.</p>
+{% endif %}
+
+<p class="hist-footnote">
+  Times are local. “Accepted” means the Switch took the file — SwitchAgent
+  cannot see what DBI does with it afterwards, so it does not claim to.<br>
+  Anything that still needs deciding lives in <a href="/queue">Queue</a>;
+  what is on each console lives in <a href="/devices">Devices</a>.
+</p>
+{% endif %}
 {% endblock %}

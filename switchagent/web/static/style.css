@@ -8,6 +8,14 @@
   --accent: #4f8ef7;
   --accent-text: #ffffff;
   --danger: #e5484d;
+  /* --danger is a fine BACKGROUND, but only 4.3:1 as text on --surface --
+     below AA. This lightened pair reaches 6.8:1, for failure wording that
+     is meant to be read rather than just noticed (see .hist-state-failed). */
+  --danger-text: #ff7b7f;
+  /* A destination conflict is the user's own decision pending, not a
+     failure -- it gets amber-orange of its own rather than borrowing
+     --danger's red or --warn's caution yellow. */
+  --conflict: #ff8a00;
   --ok: #35c46f;
   /* A distinct, still-positive teal for "transport accepted, unverified"
      (DONE_UNVERIFIED/INSTALLED_UNVERIFIED) -- reads as success (matches
@@ -866,3 +874,90 @@ a { color: var(--accent); text-decoration: none; }
 #preparation-list details { font-size: .75rem; color: var(--text-dim); margin: 8px 0; }
 .batch-jobs { padding-left: 0; list-style: none; }
 @media (max-width: 640px) { .library-rows .card-name { flex-basis: 100%; } .library-rows .card-title-id { display: none; } }
+
+/* --- History: a read-only journal, one row per title ---------------------
+   No cards and no buttons by design: the page is read, not operated (see
+   CLAUDE.md). Hairline rows with a 3px flag down the left carry the state,
+   which is what the old full-weight cards could not do -- 21 real problems
+   used to look exactly like 65 routine transfers. */
+.page-sub { margin: 0 0 16px; color: var(--text-dim); font-size: .8rem; }
+
+.hist-lead {
+  border: 1px solid var(--border); border-left: 4px solid var(--ok); border-radius: 12px;
+  background: var(--surface); padding: 14px 15px; margin-bottom: 18px;
+}
+.hist-lead.hist-lead-stuck { border-left-color: var(--warn); }
+.hist-lead p { margin: 0; font-size: .97rem; line-height: 1.5; }
+.hist-lead p + p { margin-top: 7px; }
+.hist-lead .stuck { color: var(--warn); font-weight: 700; }
+.hist-lead-meta {
+  margin-top: 9px; padding-top: 9px; border-top: 1px solid var(--border);
+  font-size: .77rem; color: var(--text-dim);
+}
+.hist-lead-meta b { color: var(--text); font-weight: 600; }
+
+.hist-head {
+  display: flex; align-items: baseline; justify-content: space-between; margin: 0 0 6px;
+  font-size: .73rem; letter-spacing: .07em; text-transform: uppercase; color: var(--text-dim);
+}
+.hist-feed { list-style: none; margin: 0; padding: 0; border-top: 1px solid var(--border); }
+.hist-row {
+  display: flex; gap: 11px; padding: 11px 0 11px 10px;
+  border-bottom: 1px solid var(--border); position: relative;
+}
+.hist-row::before {
+  content: ""; position: absolute; left: 0; top: 11px; bottom: 11px; width: 3px;
+  border-radius: 999px; background: var(--hist-flag, var(--border));
+}
+.hist-ok { --hist-flag: var(--ok); }
+.hist-soft { --hist-flag: var(--ok-soft); }
+.hist-conflict { --hist-flag: var(--conflict, var(--warn)); }
+.hist-failed { --hist-flag: var(--danger); }
+
+.hist-when {
+  flex: none; width: 52px; font-size: .73rem; color: var(--text-dim);
+  font-variant-numeric: tabular-nums; line-height: 1.35; padding-top: 1px;
+}
+.hist-when b { display: block; font-weight: 600; }
+.hist-body { flex: 1; min-width: 0; }
+.hist-title {
+  font-size: .91rem; font-weight: 600; line-height: 1.3;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.hist-state { font-size: .79rem; margin-top: 1px; }
+.hist-state-ok { color: var(--ok); }
+.hist-state-soft { color: var(--ok-soft); }
+.hist-state-conflict { color: var(--conflict, var(--warn)); font-weight: 600; }
+/* Not --danger: at 4.3:1 on this surface it fails AA as text. */
+.hist-state-failed { color: var(--danger-text); font-weight: 600; }
+.hist-meta, .hist-why { font-size: .74rem; color: var(--text-dim); margin-top: 1px; }
+.hist-why {
+  overflow: hidden; text-overflow: ellipsis; display: -webkit-box;
+  -webkit-line-clamp: 2; -webkit-box-orient: vertical;
+}
+.hist-rep {
+  display: inline-block; font-size: .67rem; color: var(--text-dim);
+  background: var(--surface-2); border-radius: 999px; padding: 1px 7px;
+  margin-left: 5px; vertical-align: 1px;
+}
+/* Deliberately a link and not a .btn -- it is an address, not a control. */
+.hist-where {
+  display: inline-block; margin-top: 5px; padding: 5px 0; min-height: 26px;
+  font-size: .78rem; border-bottom: 1px solid rgba(79, 142, 247, .35);
+}
+.hist-feed details { margin-top: 5px; }
+.hist-feed summary {
+  list-style: none; cursor: pointer; color: var(--accent); font-size: .76rem;
+  padding: 5px 0; min-height: 26px; display: inline-block;
+}
+.hist-feed summary::-webkit-details-marker { display: none; }
+.hist-attempts {
+  margin: 4px 0 2px; padding: 8px 10px; border-radius: 8px; background: var(--surface-2);
+  font-size: .73rem; color: var(--text-dim); font-variant-numeric: tabular-nums; line-height: 1.7;
+}
+.hist-attempts span { display: inline-block; margin-right: 10px; white-space: nowrap; }
+.hist-tail { margin: 14px 0 0; font-size: .78rem; color: var(--text-dim); }
+.hist-footnote {
+  margin: 14px 0 0; padding-top: 12px; border-top: 1px solid var(--border);
+  font-size: .74rem; color: var(--text-dim); line-height: 1.6;
+}

@@ -1764,6 +1764,221 @@ def cancel_job(conn, job_id: int) -> None:
 # History
 # ---------------------------------------------------------------------------
 
+# ---------------------------------------------------------------------------
+# History as a JOURNAL. Deliberately read-only: nothing on that page changes
+# anything, by explicit product decision -- see CLAUDE.md. It answers two
+# questions and is not asked to do more:
+#   "I pressed Install -- did it arrive?"  (most visits, minutes old)
+#   "Why is this game not on the Switch?"  (the stuck ones)
+# One row per TITLE rather than per transfer: a worker that retried the same
+# mod 18 times is one fact to a person, not eighteen. Everything below is
+# derived from rows list_history() already returns.
+# ---------------------------------------------------------------------------
+
+_STORAGE_LABELS = {"SD_CARD": "SD card", "SD_INSTALL": "SD install"}
+
+# The SAME claims as _ACTIVITY_LABELS, said shorter. Not a second vocabulary:
+# the kinds are still classify_activity()'s, and nothing here states more than
+# the long form does. History can afford the short one because it explains the
+# caveat once, in its own footnote, instead of repeating it on all 19 rows --
+# where it wrapped to two lines each and buried the name it belonged to.
+_ACTIVITY_LABELS_SHORT = {
+    "TRANSPORT_VERIFIED": "Installed — transfer verified",
+    "CONSOLE_CONFIRMED_SUCCESS": "Installed — you confirmed it on the console",
+    "CONSOLE_CONFIRMED_FAILED": "Accepted, but you reported it did not work",
+    "TRANSPORT_UNVERIFIED": "Accepted by the Switch",
+    "FAILED": "Failed",
+    "INTERRUPTED": "Interrupted",
+    "DESTINATION_CONFLICT": "Blocked — already on the card, nothing overwritten",
+    "SOURCE_CHANGED": "Skipped — the source file had changed",
+}
+
+# Which colour a title's latest outcome flies. "soft" is the honest middle:
+# the Switch took the bytes and DBI's result is unknowable over MTP, so it is
+# neither a success claim nor a warning.
+_ACTIVITY_FLAGS = {
+    "TRANSPORT_VERIFIED": "ok",
+    "CONSOLE_CONFIRMED_SUCCESS": "ok",
+    "TRANSPORT_UNVERIFIED": "soft",
+    "CONSOLE_CONFIRMED_FAILED": "failed",
+    "FAILED": "failed",
+    "INTERRUPTED": "failed",
+    "SOURCE_CHANGED": "failed",
+    "DESTINATION_CONFLICT": "conflict",
+}
+
+
+def _local(created_at: str) -> Optional[datetime]:
+    """UTC ISO out of the database -> this machine's local time. History used
+    to print the stored string as-is, so every time on the page was wrong by
+    the viewer's own UTC offset -- three hours, for the person this was
+    built for."""
+    try:
+        parsed = datetime.fromisoformat(created_at)
+    except (TypeError, ValueError):
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone()
+
+
+def _day_label(moment: datetime, today) -> str:
+    days = (today - moment.date()).days
+    if days == 0:
+        return "Today"
+    if days == 1:
+        return "Yest."
+    return moment.strftime("%d %b").lstrip("0")
+
+
+def history_title_name(display_name: str) -> str:
+    """The same name Library shows, reached the same way: drop the
+    extension (Library's names come from Path.stem) then the bracketed
+    release tags (the global `game_name` filter). History rendered the raw
+    filename instead, so one object read as two different things depending
+    on which page you were on. Deliberately NOT cleaner than Library -- a
+    "(0.41 GB)" the two pages disagree about would be the same bug again.
+    A mod's " -- Mod" suffix survives: it is what tells two rows for the
+    same game apart."""
+    base, sep, suffix = display_name.partition(" — ")
+    stem = Path(base).stem if Path(base).suffix.lower() in config_ext() else base
+    cleaned = title_id_mod.strip_release_tags(stem)
+    return f"{cleaned} — {suffix}" if sep else cleaned
+
+
+def config_ext() -> set:
+    from .. import config as config_mod
+
+    return config_mod.ALL_TRACKED_EXTENSIONS
+
+
+# How a title's repeated attempts read as one sentence. The page shows the
+# LATEST outcome per title, which is right -- a mod that failed nine times
+# and then landed is not a problem any more. But saying only that would
+# hide the nine, which is the older complaint ("conflicts shown with no
+# outcome") wearing a new hat. So the row carries both: the state now, and
+# what it took to get there.
+_ATTEMPT_WORDS = {
+    "TRANSPORT_VERIFIED": "accepted",
+    "CONSOLE_CONFIRMED_SUCCESS": "accepted",
+    "TRANSPORT_UNVERIFIED": "accepted",
+    "CONSOLE_CONFIRMED_FAILED": "reported broken on the console",
+    "FAILED": "failed",
+    "INTERRUPTED": "interrupted",
+    "SOURCE_CHANGED": "skipped, the source had changed",
+    "DESTINATION_CONFLICT": "refused, already on the card",
+}
+
+
+def _attempts_note(rows: list) -> Optional[str]:
+    if len(rows) < 2:
+        return None
+    counts: dict = {}
+    for row in rows:
+        kind = classify_activity(row)["kind"]
+        counts[kind] = counts.get(kind, 0) + 1
+    if len(counts) == 1:
+        kind, total = next(iter(counts.items()))
+        return f"sent {total} times, every one {_ATTEMPT_WORDS.get(kind, 'the same')}"
+    parts = [f"{n} {_ATTEMPT_WORDS.get(k, 'other')}"
+             for k, n in sorted(counts.items(), key=lambda kv: -kv[1])]
+    return f"{len(rows)} sends — " + ", ".join(parts)
+
+
+def list_history_by_title(conn, *, limit: int = 200, installed_title_ids=None) -> dict:
+    """The History page's whole payload: one entry per title, newest first,
+    plus the summary sentence above it. `installed_title_ids` is
+    WebContext.get_known_installed_title_ids() -- an empty/None set means
+    "no information", never "nothing is installed", so the cross-check line
+    is simply omitted rather than reported as zero."""
+    entries = list_history(conn, limit=limit)
+    unsettled = _unsettled_library_item_ids(conn)
+
+    by_name: dict[str, list] = {}
+    for entry in entries:
+        by_name.setdefault(entry["display_name"], []).append(entry)
+
+    today = datetime.now().astimezone().date()
+    titles = []
+    for display_name, rows in by_name.items():
+        # id breaks the tie: created_at has one-second granularity, and a
+        # batch of retries lands inside the same second often enough that
+        # "the latest attempt" would otherwise be whichever the sort
+        # happened to keep -- which decides the row's whole state.
+        rows.sort(key=lambda r: (r["created_at"], r["id"]), reverse=True)
+        latest = rows[0]
+        activity = classify_activity(latest)
+        moment = _local(latest["created_at"])
+        kinds = {classify_activity(r)["kind"] for r in rows}
+        titles.append({
+            "name": history_title_name(display_name),
+            "raw_name": display_name,
+            "is_mod": " — Mod" in display_name,
+            "kind": activity["kind"],
+            "label": _ACTIVITY_LABELS_SHORT.get(activity["kind"], activity["label"]),
+            "long_label": activity["label"],
+            "flag": _ACTIVITY_FLAGS.get(activity["kind"], "soft"),
+            "device_label": latest["target_device_label"],
+            "storage_label": _STORAGE_LABELS.get(latest["target_storage"], latest["target_storage"]),
+            "bytes_total": latest["bytes_total"],
+            "error": latest["error"],
+            "at": moment,
+            "day_label": _day_label(moment, today) if moment else "",
+            "time_label": moment.strftime("%H:%M") if moment else "",
+            "count": len(rows),
+            "all_alike": len(kinds) == 1,
+            "attempts_note": _attempts_note(rows),
+            "attempts": [
+                {"day": a.strftime("%d %b").lstrip("0"), "time": a.strftime("%H:%M")}
+                for a in (_local(r["created_at"]) for r in rows) if a is not None
+            ],
+            "in_queue": any(r["job_id"] in unsettled for r in rows),
+            "confirmed_on_device": bool(
+                installed_title_ids and latest["title_id"]
+                and family_base_title_id(latest["title_id"]) in installed_title_ids
+            ),
+        })
+
+    titles.sort(key=lambda t: t["at"] or datetime.min.replace(tzinfo=timezone.utc), reverse=True)
+    return {
+        "titles": titles,
+        "summary": _history_summary(titles, entries, today),
+        "total_transfers": len(entries),
+        "total_titles": len(titles),
+        "total_bytes": sum(e["bytes_total"] or 0 for e in entries),
+        "truncated": len(entries) >= limit,
+        "limit": limit,
+    }
+
+
+def _unsettled_library_item_ids(conn) -> set:
+    """job_ids still awaiting a decision in Queue. Drives the one text link
+    a journal is allowed: an address for a stuck row, never a control."""
+    all_rows = db.list_jobs(conn)
+    return {r["id"] for r in all_rows if _not_settled(all_rows, r)}
+
+
+def _history_summary(titles: list, entries: list, today) -> dict:
+    """The sentence the reader leaves with. Never claims an install: `today`
+    counts what the Switch ACCEPTED, which is the most SwitchAgent can see
+    (docs/ARCHITECTURE.md's transport-vs-install line)."""
+    todays = [e for e in entries if (m := _local(e["created_at"])) and m.date() == today]
+    arrived = [e for e in todays if classify_activity(e)["kind"] in
+               ("TRANSPORT_VERIFIED", "CONSOLE_CONFIRMED_SUCCESS", "TRANSPORT_UNVERIFIED")]
+    latest_today = max((_local(e["created_at"]) for e in todays), default=None)
+    stuck = [t for t in titles if t["flag"] in ("conflict", "failed")]
+    return {
+        "today_count": len(todays),
+        "today_arrived": len(arrived),
+        "today_all_arrived": bool(todays) and len(arrived) == len(todays),
+        "today_bytes": sum(e["bytes_total"] or 0 for e in arrived),
+        "today_device": arrived[0]["target_device_label"] if arrived else None,
+        "today_at": latest_today.strftime("%H:%M") if latest_today else None,
+        "stuck": stuck[:1],
+        "stuck_count": len(stuck),
+    }
+
+
 def list_history(conn, *, limit: int = 200) -> list[dict]:
     result = []
     for row in db.list_install_history(conn, limit=limit):
