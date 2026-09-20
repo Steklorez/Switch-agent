@@ -3,6 +3,10 @@
 Each `## vX.Y.Z` section becomes the body of that version's
 [GitHub Release](../../releases).
 
+Entries are one sentence per change, three to five lines per release, and
+only what a user would notice — no internals, no reasoning, no history.
+Those belong in the commit message. See [CLAUDE.md](CLAUDE.md#how-to-write-an-entry).
+
 ## v1.0.12
 
 - The library shows what is actually on disk: no duplicate entries after a folder's path changes, no games missing after re-adding one.
