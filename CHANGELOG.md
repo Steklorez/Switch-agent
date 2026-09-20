@@ -7,6 +7,11 @@ Entries are one sentence per change, three to five lines per release, and
 only what a user would notice — no internals, no reasoning, no history.
 Those belong in the commit message. See [CLAUDE.md](CLAUDE.md#how-to-write-an-entry).
 
+## v1.0.13
+
+- History is now the same list Queue shows, after the fact: every transfer in the order it happened, with the same Game / Update / DLC / Mod badge and how it ended.
+- It asks you to confirm nothing and changes nothing — the buttons are gone, and times are shown in your own timezone at last.
+
 ## v1.0.12
 
 - The library shows what is actually on disk: no duplicate entries after a folder's path changes, no games missing after re-adding one.
