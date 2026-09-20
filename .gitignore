@@ -31,3 +31,7 @@ SHA256SUMS.txt
 
 # Launch/marketing drafts -- kept local on purpose, not part of the product.
 promo/
+
+# Local-only promo/marketing working material, not part of the product
+promo/
+screenshots/Gemini_Generated_Image_*
