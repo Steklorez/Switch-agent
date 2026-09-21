@@ -33,7 +33,7 @@ from urllib.parse import urlencode
 # Never hardcode this into more than one place -- switchagent/web/app.py's
 # exception handler and any test asserting the Report-issue link both
 # import it from here.
-GITHUB_NEW_ISSUE_URL = "https://github.com/Steklorez/Switch-Agent/issues/new"
+GITHUB_NEW_ISSUE_URL = "https://github.com/Steklorez/SwitchAgent/issues/new"
 
 _PLACEHOLDER = "—"  # em dash -- "unknown/not applicable", same convention diagnostics._format_size() uses
 

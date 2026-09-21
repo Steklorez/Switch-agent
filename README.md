@@ -5,10 +5,10 @@ Switch from Windows, over USB** -- a library browser, a job queue and a
 local web UI on top of [DBI](https://github.com/rashevskyv/dbi)'s "MTP
 Responder" mode.
 
-[![Latest release](https://img.shields.io/github/v/release/Steklorez/Switch-agent?label=latest%20release&color=2ea043)](../../releases/latest)
-[![Downloads](https://img.shields.io/github/downloads/Steklorez/Switch-agent/total?label=downloads&color=2ea043)](../../releases)
+[![Latest release](https://img.shields.io/github/v/release/Steklorez/SwitchAgent?label=latest%20release&color=2ea043)](../../releases/latest)
+[![Downloads](https://img.shields.io/github/downloads/Steklorez/SwitchAgent/total?label=downloads&color=2ea043)](../../releases)
 [![Platform](https://img.shields.io/badge/platform-Windows%2010%2F11%20x64-0078D6?logo=windows&logoColor=white)](../../releases/latest)
-[![License: MIT](https://img.shields.io/github/license/Steklorez/Switch-agent?color=blue)](LICENSE)
+[![License: MIT](https://img.shields.io/github/license/Steklorez/SwitchAgent?color=blue)](LICENSE)
 
 ![SwitchAgent in action](screenshots/SwitchAgent-demo.gif)
 
@@ -208,8 +208,8 @@ Found a security problem? Do not open a public issue -- see
 ## Building from source
 
 ```powershell
-git clone https://github.com/Steklorez/Switch-agent.git
-cd Switch-agent
+git clone https://github.com/Steklorez/SwitchAgent.git
+cd SwitchAgent
 python -m venv .venv
 .venv\Scripts\activate
 pip install -e .

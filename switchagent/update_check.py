@@ -14,7 +14,7 @@ any diagnostics payload; there is nothing in the request for any of that
 to travel in.
 
 GITHUB_REPO_SLUG points at the project's real GitHub mirror
-(github.com/Steklorez/Switch-Agent, added 2026-09-12 alongside the
+(github.com/Steklorez/SwitchAgent, added 2026-09-12 alongside the
 existing Bitbucket `origin` remote -- Bitbucket remains the primary
 backup remote the other collaborating session pushes to; GitHub is
 additionally where this check and `.github/workflows/release-windows.yml`
@@ -35,7 +35,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 
-GITHUB_REPO_SLUG = "Steklorez/Switch-Agent"
+GITHUB_REPO_SLUG = "Steklorez/SwitchAgent"
 
 DEFAULT_MIN_INTERVAL_HOURS = 24.0
 _REQUEST_TIMEOUT_SECONDS = 10.0
