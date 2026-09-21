@@ -36,16 +36,29 @@ a job was created for.
   download into and it scans, classifies and groups what it finds as
   **Base Game / Update / DLC / Mod**, including content still sitting
   inside a ZIP/7Z/RAR archive.
+- **A library that stays current** -- automatic folder scanning and live
+  library updates, with game covers downloaded in the background and
+  cached locally. Both automatic scanning and cover downloads can be
+  turned off in Settings.
 - **A queue that survives a restart** -- close the app, unplug the
   console or reboot Windows: an unfinished job is still there afterwards,
   marked `INTERRUPTED` and still bound to the device it was created for.
   It is never silently reported as installed and never silently re-sent.
 - **Install order taken care of** -- Base Game -> Update -> DLC -> Mod.
+- **One archive at a time** -- extract, send its contents, clean up the
+  temporary payload, then move on to the next archive. Original library
+  files stay untouched.
+- **Live transfer progress** -- the Windows Portable Devices (WPD)
+  transport reports bytes sent; the Windows Shell remains a fallback.
+- **A read-only install journal** -- History shows transfers in order,
+  their outcomes and local times. Actions belong in Queue; console
+  contents belong in Devices.
 - **Nothing happens by accident** -- an existing file on the console is
   never overwritten automatically, a failed job is never auto-retried,
   and a job never lands on a different console than the one you picked.
-- **Usable away from the PC** -- started with `--host 0.0.0.0`, the same
-  web UI opens on a phone or tablet on your own network.
+- **Usable away from the PC** -- LAN access is enabled by default, so the
+  same web UI can open on a phone or tablet on your home network, subject
+  to your Windows firewall settings. Use `--host 127.0.0.1` for PC-only access.
 - **Nothing to install on the console** -- DBI does the installing;
   SwitchAgent's job is getting the bytes there over MTP, and saying
   honestly how that went.
@@ -161,16 +174,25 @@ over MTP -- check the console's own screen to confirm.
 
 ## Security model
 
-SwitchAgent's web UI binds to `127.0.0.1` only by default -- it is not
-reachable from other devices on your network or the internet unless you
-explicitly start it with a different bind address yourself. It has no
-telemetry, no auto-updater, and doesn't download or execute anything on
-its own. The only outbound network request it ever makes on its own is a
-periodic (at most once every 24h, or on demand via Settings' "Check now")
-check against GitHub's public Releases API for a newer version number --
-a bare request with no device IDs, library contents, or history in it,
-and never anything more than opening the release page in your own
-browser if you choose to.
+SwitchAgent binds to `0.0.0.0` by default for home-network access. There is
+no login: use it only on a trusted network. The app accepts loopback,
+private LAN and Tailscale-range client addresses and rejects other source
+addresses and browser requests marked cross-site. This address filter is
+not user authentication. Use `--host 127.0.0.1` for access from this PC
+only; do not expose the service through public port forwarding or a proxy.
+
+There is no telemetry or automatic software installation. Outbound
+requests serve two features:
+
+- **Game covers:** enabled by default, downloaded in the background using
+  the public TitleDB catalogue on GitHub and Nintendo image hosts. The
+  catalogue is matched locally; image requests identify the requested
+  cover. Disable cover downloads in Settings if you do not want these
+  requests.
+- **Version checks:** GitHub's public Releases API is checked at most once
+  every 24 hours, or on demand with Settings' "Check now". The check sends
+  no device IDs, library contents or install history. Updating the app is
+  manual; you can choose to open the release page in your browser.
 
 ## Reporting an issue
 
