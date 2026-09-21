@@ -333,4 +333,34 @@
       }
     });
   }
+
+  // -- Conflict policy: what to do when a file already exists on the Switch --
+
+  const conflictPolicySelect = document.getElementById("conflict-policy-select");
+  const conflictPolicyStatus = document.getElementById("conflict-policy-status");
+
+  if (conflictPolicySelect) {
+    conflictPolicySelect.addEventListener("change", async () => {
+      const policy = conflictPolicySelect.value;
+      conflictPolicySelect.disabled = true;
+      conflictPolicyStatus.textContent = "";
+      try {
+        const res = await fetch("/api/settings/conflict-policy", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ policy }),
+        });
+        if (!res.ok) {
+          conflictPolicyStatus.textContent = "Could not save.";
+          return;
+        }
+        conflictPolicyStatus.textContent = "Saved.";
+        setTimeout(() => { conflictPolicyStatus.textContent = ""; }, 2000);
+      } catch (e) {
+        conflictPolicyStatus.textContent = "Request failed: " + e;
+      } finally {
+        conflictPolicySelect.disabled = false;
+      }
+    });
+  }
 })();

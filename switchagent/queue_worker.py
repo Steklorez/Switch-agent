@@ -714,11 +714,23 @@ def _run_job_transfer(conn: sqlite3.Connection, backend: MtpBackend, job_row: sq
             # idempotent-but-not-blind: a file THIS job already delivered
             # was already skipped above via `delivered`; anything else
             # present is genuinely unresolved.
+            #
+            # Settings' conflict policy decides what happens next, not a
+            # person: "override" jobs already sent overwrite=True above and
+            # never reach this branch at all, so getting here only ever
+            # means the policy in effect was "skip" -- resolved immediately,
+            # the same way a manual Skip click always worked (abandoned=1),
+            # with no one needing to look at it.
             error = (
                 f"'{file.dest_relative_path}' already exists on '{storage}' "
-                "and was not sent by this job -- refusing to overwrite"
+                "and was not sent by this job -- skipped automatically "
+                "(Settings: existing files on the Switch are skipped)"
             )
-            db.update_job_status(conn, job_id, "DESTINATION_CONFLICT", bytes_done=bytes_done, error=error)
+            db.update_job_status(
+                conn, job_id, "DESTINATION_CONFLICT", bytes_done=bytes_done, error=error, finished_at=db.now_iso(),
+            )
+            conn.execute("UPDATE jobs SET abandoned=1 WHERE id=?", (job_id,))
+            conn.commit()
             db.log_job_event(conn, job_id, error)
             return JobRunOutcome(job_id=job_id, status="DESTINATION_CONFLICT", error=error)
         except MtpError as exc:

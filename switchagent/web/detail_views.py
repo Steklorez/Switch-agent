@@ -318,15 +318,6 @@ def build_device_detail_view(conn, ctx: WebContext, fingerprint: str) -> Optiona
     for family in family_list:
         family["summary"] = _summarize_activity(family["entries"])
 
-    # A job currently sitting in DESTINATION_CONFLICT is a live, unresolved
-    # condition (W3-006) -- surfaced here separately from the historical
-    # DESTINATION_CONFLICT outcomes counted above, which are already-past
-    # attempts.
-    open_conflicts = [
-        services._job_view(conn, j) for j in db.list_jobs(conn)
-        if j["target_device_id"] == device_id and j["status"] == "DESTINATION_CONFLICT"
-    ]
-
     return {
         "device_fingerprint": device["device_fingerprint"],
         "display_name": device["display_name"],
@@ -340,7 +331,6 @@ def build_device_detail_view(conn, ctx: WebContext, fingerprint: str) -> Optiona
         "entries": entries,
         "batches": batches,
         "families": family_list,
-        "open_conflicts": open_conflicts,
         "summary": _summarize_activity(entries),
     }
 

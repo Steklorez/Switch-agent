@@ -1191,7 +1191,7 @@ def test_settings_page_shows_worker_heartbeat_and_restart_button(client, web_ctx
 
 _RETRYABLE_STATUSES_FOR_TEST = (
     "INTERRUPTED", "FAILED", "DEVICE_UNAVAILABLE",
-    "SOURCE_CHANGED", "DESTINATION_CONFLICT", "BLOCKED_BY_DEPENDENCY",
+    "SOURCE_CHANGED", "BLOCKED_BY_DEPENDENCY",
 )
 
 
@@ -1285,7 +1285,7 @@ def test_retry_accepts_every_documented_retryable_status(client, web_ctx, status
 
 @pytest.mark.parametrize("status", [
     "PENDING_CONFIRM", "CONFIRMED", "RUNNING", "VERIFYING",
-    "DONE", "DONE_UNVERIFIED", "WAITING_FOR_BASE",
+    "DONE", "DONE_UNVERIFIED", "WAITING_FOR_BASE", "DESTINATION_CONFLICT",
 ])
 def test_retry_rejected_for_non_retryable_statuses(client, web_ctx, status):
     """DONE/DONE_UNVERIFIED especially: a verified-or-not SUCCESSFUL
@@ -1357,13 +1357,8 @@ def test_retry_rejected_when_source_no_longer_available(client, web_ctx):
 
 def test_retry_button_appears_in_queue_html_for_all_retryable_statuses(client, web_ctx):
     """Structural guard mirroring test_queue_page_has_live_polling_hook_elements
-    -- proves queue.html's Retry button condition actually covers all 6
-    statuses services.py accepts, not just the original 3 (FAILED/
-    INTERRUPTED/DEVICE_UNAVAILABLE) from before this was widened.
-
-    DESTINATION_CONFLICT is the one exception: W3-006 Override replaced its
-    plain Retry/Cancel pair with Override/Skip (a bare retry would just hit
-    the identical conflict again) -- checked separately below."""
+    -- proves queue.html's Retry button condition actually covers every
+    status services.py accepts."""
     item_id = _seed_library_item(web_ctx)
     res = client.post("/api/jobs", json={"library_item_ids": [item_id], "target_device_id": "mock-switch-parent"})
     job_id = res.json()["created"][0]["job_id"]
@@ -1372,87 +1367,28 @@ def test_retry_button_appears_in_queue_html_for_all_retryable_statuses(client, w
         with db.open_db(web_ctx.db_path) as conn:
             db.update_job_status(conn, job_id, status)
         html = client.get("/queue").text
-        if status == "DESTINATION_CONFLICT":
-            assert f'data-job-action="override" data-job-id="{job_id}"' in html, (
-                "Override button missing for DESTINATION_CONFLICT"
-            )
-            assert f'data-job-action="cancel" data-job-id="{job_id}"' in html, (
-                "Skip (cancel action) button missing for DESTINATION_CONFLICT"
-            )
-            assert f'data-job-action="retry" data-job-id="{job_id}"' not in html, (
-                "plain Retry button should not appear for DESTINATION_CONFLICT -- Override/Skip replace it"
-            )
-            continue
         assert f'data-job-action="retry" data-job-id="{job_id}"' in html, (
             f"Retry installation button missing for status {status}"
         )
 
 
-def test_override_only_accepts_destination_conflict_status(client, web_ctx):
-    """services.override_job() is deliberately narrower than retry_job()'s
-    own _RETRYABLE_JOB_STATUSES -- there's nothing to override about a
-    FAILED network blip, only an actual, currently-unresolved conflict."""
-    item_id = _seed_library_item(web_ctx)
-    res = client.post("/api/jobs", json={"library_item_ids": [item_id], "target_device_id": "mock-switch-parent"})
-    job_id = res.json()["created"][0]["job_id"]
-
-    with db.open_db(web_ctx.db_path) as conn:
-        db.update_job_status(conn, job_id, "FAILED", error="network blip")
-    res = client.post(f"/api/jobs/{job_id}/override")
-    assert res.status_code == 409
-
-    with db.open_db(web_ctx.db_path) as conn:
-        db.update_job_status(
-            conn, job_id, "DESTINATION_CONFLICT",
-            error="'x.nsp' already exists on 'SD_INSTALL' and was not sent by this job -- refusing to overwrite",
-        )
-    res = client.post(f"/api/jobs/{job_id}/override")
-    assert res.status_code == 200
-    body = res.json()
-    assert body["ok"] is True
-    new_job_id = body["new_job_id"]
-    assert new_job_id != job_id
-
-    with db.open_db(web_ctx.db_path) as conn:
-        new_row = db.get_job(conn, new_job_id)
-        old_row = db.get_job(conn, job_id)
-    # The new attempt is flagged to bypass the "never overwrite" guard;
-    # the old, conflicted job is left completely untouched -- same rule
-    # every other retry_job() path already follows.
-    assert new_row["force_overwrite"] == 1
-    assert old_row["status"] == "DESTINATION_CONFLICT"
-
-
-def test_override_refuses_a_second_click_on_the_same_stale_conflict_card(client, web_ctx):
-    """Real bug, 2026-09-18: old_row["status"] stays DESTINATION_CONFLICT
-    forever after a successful Override (see test above) -- a preparation-
-    batch item displays its job by the id it recorded at creation and
-    never re-checks whether it's since been superseded, so its stale
-    conflict card kept showing fully-live Override/Skip buttons after the
-    first click already went through. Before this fix, clicking Override
-    again on that same stale card would pass every check in retry_job()
-    (old["status"] unchanged, no guard against an existing retry) and
-    create ANOTHER new job -- repeatable without limit. retry_job() now
-    refuses once a live (non-abandoned) retry already exists for this
-    job, regardless of source path."""
+def test_no_action_buttons_for_an_auto_resolved_destination_conflict(client, web_ctx):
+    """DESTINATION_CONFLICT is always abandoned=1 by the time it's set --
+    queue_worker.py resolves it automatically per Settings' conflict
+    policy, the instant it happens (see FileAlreadyExistsError handling).
+    Nothing is left for a person to click: no Retry (retrying would just
+    hit the same conflict again), no Cancel (already abandoned)."""
     item_id = _seed_library_item(web_ctx)
     res = client.post("/api/jobs", json={"library_item_ids": [item_id], "target_device_id": "mock-switch-parent"})
     job_id = res.json()["created"][0]["job_id"]
     with db.open_db(web_ctx.db_path) as conn:
         db.update_job_status(conn, job_id, "DESTINATION_CONFLICT", error="conflict")
+        conn.execute("UPDATE jobs SET abandoned=1 WHERE id=?", (job_id,))
+        conn.commit()
 
-    first = client.post(f"/api/jobs/{job_id}/override")
-    assert first.status_code == 200
-    first_new_job_id = first.json()["new_job_id"]
-
-    second = client.post(f"/api/jobs/{job_id}/override")
-    assert second.status_code == 409
-
-    with db.open_db(web_ctx.db_path) as conn:
-        all_jobs = db.list_jobs(conn)
-    retries_of_original = [j for j in all_jobs if j["retry_of_job_id"] == job_id]
-    assert len(retries_of_original) == 1
-    assert retries_of_original[0]["id"] == first_new_job_id
+    html = client.get("/queue").text
+    assert f'data-job-action="retry" data-job-id="{job_id}"' not in html
+    assert f'data-job-action="cancel" data-job-id="{job_id}"' not in html
 
 
 # ---------------------------------------------------------------------------
@@ -1622,10 +1558,10 @@ def test_queue_grouped_drops_a_batch_once_every_job_is_terminally_successful(cli
 
 def test_queue_drops_a_single_abandoned_job(client, web_ctx):
     """A skipped/cancelled job (abandoned=1) is permanent History, but is
-    never active work again -- retry_job()/override_job() both explicitly
-    refuse to touch an abandoned job. Before this fix it sat in Queue
-    forever (list_queue only ever excluded DONE/DONE_UNVERIFIED), showing
-    Override/Skip buttons that led nowhere."""
+    never active work again -- retry_job() explicitly refuses to touch an
+    abandoned job. Before this fix it sat in Queue forever (list_queue
+    only ever excluded DONE/DONE_UNVERIFIED), showing action buttons that
+    led nowhere."""
     item_id = _seed_library_item(web_ctx)
     res = client.post("/api/jobs", json={"library_item_ids": [item_id], "target_device_id": "mock-switch-parent"})
     job_id = res.json()["created"][0]["job_id"]
@@ -1974,11 +1910,15 @@ def test_history_still_answers_where_a_stuck_thing_is_decided(client, web_ctx):
     res = client.post("/api/jobs", json={"library_item_ids": [item_id], "target_device_id": "mock-switch-parent"})
     job_id = res.json()["created"][0]["job_id"]
     with db.open_db(web_ctx.db_path) as conn:
-        db.update_job_status(conn, job_id, "DESTINATION_CONFLICT", error="already there")
+        # FAILED, not DESTINATION_CONFLICT: the latter is always
+        # abandoned=1 the instant it happens (Settings' conflict policy),
+        # so it can never actually be "still waiting in Queue" -- FAILED
+        # genuinely can, pending a Retry/Cancel decision.
+        db.update_job_status(conn, job_id, "FAILED", error="already there")
         db.record_install_history(
             conn, job_id=job_id, title_id="0100000000010000", display_name="Some Game.nsp",
             target_device_id="mock-switch-parent", target_storage="SD_CARD",
-            outcome="DESTINATION_CONFLICT", bytes_total=1000,
+            outcome="FAILED", bytes_total=1000,
         )
 
     html = client.get("/history").text
@@ -2191,38 +2131,32 @@ def _seed_real_destination_conflict(web_ctx, client) -> tuple[int, int]:
     return job_id, batch_id
 
 
-def test_queue_api_exposes_destination_conflict_path_and_conflict_count(client, web_ctx):
+def test_destination_conflict_drops_out_of_queue_immediately(client, web_ctx):
+    """Auto-resolved (abandoned=1) the instant it happens -- see
+    queue_worker.py's FileAlreadyExistsError handling -- so it never
+    lingers in the active Queue view waiting for a decision nobody needs
+    to make."""
     job_id, batch_id = _seed_real_destination_conflict(web_ctx, client)
 
-    job = next(j for j in client.get("/api/queue").json() if j["id"] == job_id)
-    assert job["destination_conflict_path"] == "Game [0100000000010000][v0].nsp"
-
+    assert all(j["id"] != job_id for j in client.get("/api/queue").json())
     groups = client.get("/api/queue/grouped").json()
-    group = next(g for g in groups if g["batch_id"] == batch_id)
-    assert group["conflict_count"] == 1
-
-
-def test_queue_html_renders_conflict_card_never_an_overwrite_button(client, web_ctx):
-    _seed_real_destination_conflict(web_ctx, client)
+    assert all(g["batch_id"] != batch_id for g in groups)
 
     html = client.get("/queue").text
-    assert "found an existing destination and will not overwrite it automatically" in html
-    assert "Game [0100000000010000][v0].nsp" in html
-    assert "mock-switch-parent" not in html  # raw device_id must never render as visible text (ARCH-001)
-    assert 'data-copy-conflict-path="Game [0100000000010000][v0].nsp"' in html
-    # W3-004: the card's "which device" affordance now points at that
-    # device's own detail page, by its safe fingerprint -- not at the
-    # generic /devices list W3-006 originally fell back to. (The generic
-    # /devices link still exists on this page as the global nav item, which
-    # is why this asserts the specific href rather than merely "some
-    # /devices link is present". Full regression coverage for the fix lives
-    # in tests/test_device_detail.py.)
-    from switchagent.mtp.windows import device_fingerprint
-    assert f'href="/devices/{device_fingerprint("mock-switch-parent")}"' in html
-    # Explicitly forbidden affordances (W3-006's own hard rule) -- must never appear anywhere on this page.
-    assert "overwrite" not in html.lower().replace("will not overwrite it automatically", "")
-    assert "assume same file" not in html.lower()
-    assert "remote delete" not in html.lower()
+    assert f'data-job-id="{job_id}"' not in html
+
+
+def test_destination_conflict_path_still_reachable_by_direct_job_lookup(client, web_ctx):
+    """destination_conflict_path is still real, useful information (the
+    Device Details page shows it) even though the Queue page no longer
+    surfaces this job at all -- GET /api/jobs/{id} looks a job up
+    directly, unfiltered by whether it's still "active"."""
+    job_id, _batch_id = _seed_real_destination_conflict(web_ctx, client)
+
+    job = client.get(f"/api/jobs/{job_id}").json()
+    assert job["destination_conflict_path"] == "Game [0100000000010000][v0].nsp"
+    assert job["status"] == "DESTINATION_CONFLICT"
+    assert job["abandoned"] is True
 
 
 # ---------------------------------------------------------------------------

@@ -3,7 +3,7 @@
   "configurations": [
     {
       "name": "switchagent-web-mock",
-      "runtimeExecutable": "python",
+      "runtimeExecutable": ".venv/Scripts/python.exe",
       "runtimeArgs": ["-m", "switchagent.cli", "web", "--mock", "--port", "8791"],
       "port": 8791
     },

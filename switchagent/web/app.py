@@ -23,6 +23,7 @@ from .. import title_id as title_id_mod
 from . import detail_views, error_reporting, onboarding, services
 from .context import WebContext
 from .schemas import (
+    ConflictPolicyRequest,
     CreateJobsRequest,
     DeviceStorageMappingClearRequest,
     DeviceStorageMappingRequest,
@@ -330,9 +331,12 @@ def create_app(ctx: WebContext) -> FastAPI:
 
     @app.get("/queue", response_class=HTMLResponse)
     def page_queue(request: Request, conn=Depends(get_conn), ctx: WebContext = Depends(get_ctx)):
+        from .. import config as config_mod
+
         return _TEMPLATES.TemplateResponse(request, "queue.html", {
             "groups": services.list_queue_grouped(conn), "devices": services.list_devices(conn, ctx),
             "worker_paused": ctx.worker_paused.is_set(), "active_page": "queue",
+            "conflict_policy": config_mod.load_conflict_policy(),
         })
 
     @app.get("/history", response_class=HTMLResponse)
@@ -494,19 +498,6 @@ def create_app(ctx: WebContext) -> FastAPI:
         ctx.preparations.continue_chain(job_id)
         return {"ok": True, **result}
 
-    @app.post("/api/jobs/{job_id}/override")
-    def api_override_job(job_id: int, ctx: WebContext = Depends(get_ctx), conn=Depends(get_conn)):
-        try:
-            result = services.override_job(conn, job_id)
-        except ValueError as exc:
-            raise HTTPException(status_code=409, detail=str(exc)) from exc
-        # If this job was the stuck front of a preparation batch's chain
-        # (Base/Update/DLC/Mod for one game), pick the rest of that chain
-        # back up now -- see PreparationQueue.continue_chain's own
-        # docstring for why this doesn't happen automatically on its own.
-        ctx.preparations.continue_chain(job_id)
-        return {"ok": True, **result}
-
     @app.post("/api/jobs/{job_id}/cancel")
     def api_cancel_job(job_id: int, ctx: WebContext = Depends(get_ctx), conn=Depends(get_conn)):
         try:
@@ -535,6 +526,10 @@ def create_app(ctx: WebContext) -> FastAPI:
     @app.get("/api/settings")
     def api_get_settings(conn=Depends(get_conn), ctx: WebContext = Depends(get_ctx)):
         return services.get_settings(conn, ctx)
+
+    @app.post("/api/settings/conflict-policy")
+    def api_set_conflict_policy(body: ConflictPolicyRequest):
+        return services.set_conflict_policy(body.policy)
 
     # -- JSON API: update availability notification (W3-008) -------------
     # Deliberately its own endpoint, fetched asynchronously by settings.js
