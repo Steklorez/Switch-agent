@@ -7,6 +7,11 @@ Entries are one sentence per change, three to five lines per release, and
 only what a user would notice — no internals, no reasoning, no history.
 Those belong in the commit message. See [CLAUDE.md](CLAUDE.md#how-to-write-an-entry).
 
+## v1.0.14
+
+- Installing over a file already on the Switch now follows a Settings choice — skip it or replace it, the same way every time — instead of a Queue card waiting to be clicked.
+- A game installed while the Switch stayed connected now shows as On Switch in Library right away, instead of only after reconnecting.
+
 ## v1.0.13
 
 - History is now the same list Queue shows, after the fact: every transfer in the order it happened, with the same Game / Update / DLC / Mod badge and how it ended.
