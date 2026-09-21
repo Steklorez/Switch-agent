@@ -114,27 +114,6 @@
   <pre id="device-diagnostics-output" class="diagnostics-output" hidden></pre>
 </section>
 
-{% if view.open_conflicts %}
-<section class="detail-section" id="device-open-conflicts">
-  <h3>Destination conflicts needing attention</h3>
-  <ul class="plain-list">
-    {% for j in view.open_conflicts %}
-    <li class="conflict-card">
-      <p class="conflict-explanation">{{ j.display_name }}</p>
-      <dl class="conflict-details">
-        <dt>Storage</dt><dd>{{ j.target_storage }}</dd>
-        {% if j.destination_conflict_path %}
-        <dt>Destination</dt><dd class="conflict-path">{{ j.destination_conflict_path }}</dd>
-        {% endif %}
-        <dt>Time</dt><dd>{{ j.finished_at or j.created_at }}</dd>
-      </dl>
-      <p class="settings-hint">Resolve the conflict manually on the device, then Retry from the Queue page.</p>
-    </li>
-    {% endfor %}
-  </ul>
-</section>
-{% endif %}
-
 <section class="detail-section" id="device-activity">
   <h3>SwitchAgent activity</h3>
   <p class="settings-hint">

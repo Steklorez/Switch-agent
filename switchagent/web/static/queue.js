@@ -59,7 +59,7 @@
   // a user can reasonably re-attempt from", not "resumable states").
   const RETRYABLE_STATUSES = [
     "FAILED", "INTERRUPTED", "DEVICE_UNAVAILABLE",
-    "SOURCE_CHANGED", "DESTINATION_CONFLICT", "BLOCKED_BY_DEPENDENCY",
+    "SOURCE_CHANGED", "BLOCKED_BY_DEPENDENCY",
   ];
   let knownActiveIds = new Set(
     Array.from(jobList.querySelectorAll(".job-row")).map((el) => el.dataset.jobId)
@@ -121,22 +121,16 @@
 
     let headerHtml = "";
     if (g.total > 1) {
-      const attentionHtml = g.conflict_count > 0 ? `<span class="batch-attention"></span>` : "";
       headerHtml = `
         <div class="batch-header">
           <span class="batch-title"></span>
           <span class="batch-progress"></span>
-          ${attentionHtml}
         </div>`;
     }
     li.innerHTML = `${headerHtml}<ol class="batch-jobs"></ol>`;
     if (g.total > 1) {
       li.querySelector(".batch-title").textContent = g.display_name;
       li.querySelector(".batch-progress").textContent = `${g.finished} / ${g.total} finished`;
-      if (g.conflict_count > 0) {
-        li.querySelector(".batch-attention").textContent =
-          `${g.conflict_count} item${g.conflict_count !== 1 ? "s" : ""} requires attention`;
-      }
     }
     const jobsList = li.querySelector(".batch-jobs");
     for (const j of g.jobs) jobsList.appendChild(renderJobRow(j));
@@ -166,40 +160,16 @@
     const progressTextHtml = (j.status === "RUNNING" && j.bytes_total > 0)
       ? `<div class="job-progress-text"></div>` : "";
     const waitingForDevice = j.status === "WAITING_FOR_DEVICE";
-    const isConflict = j.status === "DESTINATION_CONFLICT";
-    const errorHtml = (j.error && !waitingForDevice && !isConflict) ? `<div class="job-error"></div>` : "";
+    const errorHtml = (j.error && !waitingForDevice) ? `<div class="job-error"></div>` : "";
     const stallHtml = j.possibly_stalled ? `<div class="job-stall-warning"></div>` : "";
-    const conflictHtml = isConflict ? `
-      <div class="conflict-card">
-        <p class="conflict-explanation">SwitchAgent found an existing destination and will not overwrite it automatically.</p>
-        <dl class="conflict-details">
-          <dt>Content</dt><dd class="conflict-content"></dd>
-          <dt>Device</dt><dd class="conflict-device"></dd>
-          <dt>Storage</dt><dd class="conflict-storage"></dd>
-          ${j.destination_conflict_path ? `<dt>Destination</dt><dd class="conflict-path"></dd>` : ""}
-          <dt>Time</dt><dd class="conflict-time"></dd>
-        </dl>
-        <div class="conflict-actions">
-          ${j.destination_conflict_path ? `<button type="button" class="btn btn-small" data-copy-conflict-path="${j.destination_conflict_path}">Copy destination path</button>` : ""}
-          <!-- W3-006 originally linked to the generic /devices list as a
-               temporary fallback; W3-004 added a real per-device page, so
-               this now points at THIS job's target device by its safe
-               fingerprint (never the raw, serial-bearing device_id). -->
-          <a class="btn btn-small" href="/devices/${j.target_device_fingerprint}">Device Details</a>
-        </div>
-        <p class="settings-hint">Override replaces the existing file with this one; Skip leaves it alone and drops this install.</p>
-      </div>` : "";
-    // W3-006 Override: a conflict gets its own pair of actions (Override /
-    // Skip below) instead of the generic Retry/Cancel -- a plain retry
-    // would just hit the identical conflict again unless the user went and
-    // deleted the file by hand first, and "Cancel" doesn't say what happens
-    // to the existing destination file either way.
-    const retryBtn = !isConflict && !j.abandoned && RETRYABLE_STATUSES.includes(j.status)
+    // DESTINATION_CONFLICT resolves itself the instant it happens (Settings'
+    // conflict policy -- see queue_worker.py), abandoned=1 already set, so
+    // it never reaches here needing a decision -- same Retry/Cancel
+    // eligibility as any other terminal status, nothing conflict-specific.
+    const retryBtn = !j.abandoned && RETRYABLE_STATUSES.includes(j.status)
       ? `<button class="btn btn-small" data-job-action="retry" data-job-id="${j.id}">Retry installation</button>` : "";
-    const overrideBtn = isConflict && !j.abandoned
-      ? `<button class="btn btn-small btn-danger" data-job-action="override" data-job-id="${j.id}">Override</button>` : "";
     const cancelBtn = !j.abandoned && ["PENDING_CONFIRM", "CONFIRMED", "DEVICE_UNAVAILABLE", "WAITING_FOR_BASE", "WAITING_FOR_DEVICE", ...RETRYABLE_STATUSES].includes(j.status)
-      ? `<button class="btn btn-small ${isConflict ? "btn-ok" : "btn-danger"}" data-job-action="cancel" data-job-id="${j.id}">${isConflict ? "Skip" : "Cancel"}</button>` : "";
+      ? `<button class="btn btn-small btn-danger" data-job-action="cancel" data-job-id="${j.id}">Cancel</button>` : "";
 
     li.innerHTML = `
       <div class="job-main">
@@ -207,14 +177,13 @@
         <div class="job-meta"></div>
         ${progressTextHtml}
         ${errorHtml}
-        ${conflictHtml}
         ${stallHtml}
       </div>
       <div class="job-status">
         <span class="status-pill ${statusClass(j.status)}"></span>
         ${spinner}
       </div>
-      <div class="job-actions">${retryBtn}${overrideBtn}${cancelBtn}</div>
+      <div class="job-actions">${retryBtn}${cancelBtn}</div>
     `;
     setRowName(li.querySelector(".job-name"), j.display_name, j.variant_role);
     li.querySelector(".job-meta").textContent = waitingForDevice
@@ -231,17 +200,10 @@
         `Possibly stalled — no observable progress for ${minutes} min. ` +
         "Large MTP transfers may legitimately take a long time; this is not treated as a failure.";
     }
-    if (j.error && !waitingForDevice && !isConflict) {
+    if (j.error && !waitingForDevice) {
       const errorEl = li.querySelector(".job-error");
       errorEl.textContent = j.error;
       errorEl.title = j.error; // UX-001: long/technical errors are CSS-clamped -- full text via hover tooltip
-    }
-    if (isConflict) {
-      li.querySelector(".conflict-content").textContent = j.display_name;
-      li.querySelector(".conflict-device").textContent = j.target_device_label;
-      li.querySelector(".conflict-storage").textContent = j.target_storage;
-      if (j.destination_conflict_path) li.querySelector(".conflict-path").textContent = j.destination_conflict_path;
-      li.querySelector(".conflict-time").textContent = j.finished_at || j.created_at;
     }
     return li;
   }
@@ -297,48 +259,6 @@
       if (remaining.length) jobList.appendChild(renderGroup({...g, jobs: remaining}));
     }
     emptyState.hidden = groups.length > 0 || document.getElementById('preparation-list').children.length > 0;
-    updateBulkConflictBar();
-  }
-
-  // -- Override all / Skip all -----------------------------------------
-  // Conflict cards can pile up (one game after another already on the
-  // device) -- clicking Override/Skip one at a time is exactly the kind
-  // of tedium a bulk action exists for. Reuses the SAME single-job
-  // endpoints, one request at a time (never in parallel -- matches how
-  // every other multi-step action in this app is deliberately serial),
-  // so each one gets the same DESTINATION_CONFLICT-only guard, the same
-  // continue_chain() follow-up, and a genuine per-item result rather
-  // than one all-or-nothing call.
-  function updateBulkConflictBar() {
-    const bar = document.getElementById("bulk-resolve-bar");
-    if (!bar) return;
-    const count = document.querySelectorAll('[data-job-action="override"]').length;
-    bar.hidden = count === 0;
-    document.getElementById("bulk-resolve-count").textContent =
-      count > 0 ? `${count} conflict${count === 1 ? "" : "s"}` : "";
-  }
-
-  async function bulkResolveConflicts(action) {
-    const ids = Array.from(document.querySelectorAll('[data-job-action="override"]'))
-      .map((btn) => btn.dataset.jobId);
-    if (!ids.length) return;
-    const verb = action === "override" ? "Override" : "Skip";
-    const message = action === "override"
-      ? `Override all ${ids.length} conflicting file(s) with the new versions? This cannot be undone.`
-      : `Skip all ${ids.length} conflicting install(s), leaving the existing files alone?`;
-    if (!(await confirmAction(message))) return;
-    for (const jobId of ids) {
-      try {
-        const res = await fetch(`/api/jobs/${jobId}/${action}`, { method: "POST" });
-        if (!res.ok) {
-          const data = await res.json().catch(() => ({}));
-          showToast(`${verb} failed for job ${jobId}: ${data.detail || res.status}`, "error");
-        }
-      } catch (e) {
-        showToast(`${verb} failed for job ${jobId}: request error`, "error");
-      }
-    }
-    poll();
   }
 
   async function pollPreparation() {
@@ -397,15 +317,15 @@
         }
         // state.error is a snapshot of why the sequential run stopped,
         // frozen at the moment it happened -- it does NOT know that the
-        // item which stopped it may since have been resolved (Override
+        // item which stopped it may since have been resolved (Retry
         // creates a brand-new job the panel now follows forward to, see
-        // _resolve_latest_retry). Without this check, overriding a
-        // conflict and watching its new job actively copy still showed
+        // _resolve_latest_retry). Without this check, retrying a failure
+        // and watching its new job actively copy still showed
         // "Installation stopped" right next to a live, moving progress
         // bar -- flatly wrong, nothing is stopped. Only keep showing it
         // while there's a job still stuck in one of the same statuses
         // that originally halted the run, and it wasn't itself just
-        // abandoned via Skip -- i.e. something actually still needs a
+        // abandoned -- i.e. something actually still needs a
         // click. An item that never got a job created at all ("Not
         // started (installation stopped)") does NOT keep this banner
         // alive on its own: that item's own row already says exactly
@@ -433,46 +353,16 @@
   async function tick() {
     try { await poll(); } finally { setTimeout(tick, POLL_INTERVAL_MS); }
   }
-  updateBulkConflictBar();  // reflect the server-rendered initial state before the first poll lands
   tick();
 
   // -- actions (event delegation -- works for rows replaced by poll()) ----
 
   document.addEventListener("click", async (evt) => {
-    const bulkBtn = evt.target.closest("[data-bulk-action]");
-    if (bulkBtn) {
-      bulkBtn.disabled = true;
-      try {
-        await bulkResolveConflicts(bulkBtn.dataset.bulkAction);
-      } finally {
-        bulkBtn.disabled = false;
-      }
-      return;
-    }
-
-    const copyBtn = evt.target.closest("[data-copy-conflict-path]");
-    if (copyBtn) {
-      const path = copyBtn.dataset.copyConflictPath;
-      try {
-        if (navigator.clipboard && navigator.clipboard.writeText) {
-          await navigator.clipboard.writeText(path);
-          const original = copyBtn.textContent;
-          copyBtn.textContent = "Copied!";
-          setTimeout(() => { copyBtn.textContent = original; }, 2000);
-        }
-      } catch (e) {
-        // Clipboard access denied/unavailable -- the path is already
-        // visible in the conflict card for manual selection either way.
-      }
-      return;
-    }
-
     const btn = evt.target.closest("[data-job-action]");
     if (btn) {
       const action = btn.dataset.jobAction;
       const jobId = btn.dataset.jobId;
       if (action === "cancel" && !(await confirmAction("Abandon this attempt and release its temporary files when no other job needs them?"))) return;
-      if (action === "override" && !(await confirmAction("Overwrite the existing file(s) at the destination with this install? This cannot be undone."))) return;
       btn.disabled = true;
       try {
         const res = await fetch(`/api/jobs/${jobId}/${action}`, { method: "POST" });

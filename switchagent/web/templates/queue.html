@@ -4,11 +4,6 @@
 <div class="page-header">
   <h2>Queue</h2>
   <div class="worker-controls">
-    <div id="bulk-resolve-bar" class="bulk-resolve-bar" hidden>
-      <span class="bulk-resolve-count" id="bulk-resolve-count"></span>
-      <button class="btn btn-small btn-danger" data-bulk-action="override">Override all</button>
-      <button class="btn btn-small btn-ok" data-bulk-action="cancel">Skip all</button>
-    </div>
     <span class="worker-state">Worker: <strong>{{ "Paused" if worker_paused else "Running" }}</strong></span>
     <button class="btn btn-secondary" data-worker-action="{{ 'resume' if worker_paused else 'pause' }}">
       {{ "Resume" if worker_paused else "Pause" }}
@@ -26,9 +21,6 @@
     <div class="batch-header">
       <span class="batch-title">{{ g.display_name }}</span>
       <span class="batch-progress">{{ g.finished }} / {{ g.total }} finished</span>
-      {% if g.conflict_count > 0 %}
-      <span class="batch-attention">{{ g.conflict_count }} item{{ "s" if g.conflict_count != 1 }} requires attention</span>
-      {% endif %}
     </div>
     {% endif %}
     <ol class="batch-jobs">
@@ -56,32 +48,6 @@
           {% endif %}
           {% if j.status == "WAITING_FOR_DEVICE" %}
           <div class="job-meta">Waiting for {{ j.target_device_label }} to reconnect — resumes automatically</div>
-          {% elif j.status == "DESTINATION_CONFLICT" %}
-          <div class="conflict-card">
-            <p class="conflict-explanation">
-              SwitchAgent found an existing destination and will not overwrite it automatically.
-            </p>
-            <dl class="conflict-details">
-              <dt>Content</dt><dd>{{ j.display_name }}</dd>
-              <dt>Device</dt><dd>{{ j.target_device_label }}</dd>
-              <dt>Storage</dt><dd>{{ j.target_storage }}</dd>
-              {% if j.destination_conflict_path %}
-              <dt>Destination</dt><dd class="conflict-path" data-conflict-path="{{ j.destination_conflict_path }}">{{ j.destination_conflict_path }}</dd>
-              {% endif %}
-              <dt>Time</dt><dd>{{ j.finished_at or j.created_at }}</dd>
-            </dl>
-            <div class="conflict-actions">
-              {% if j.destination_conflict_path %}
-              <button type="button" class="btn btn-small" data-copy-conflict-path="{{ j.destination_conflict_path }}">Copy destination path</button>
-              {% endif %}
-              {# W3-006 shipped pointing at the generic /devices list as a
-                 temporary fallback, because no per-device page existed yet.
-                 W3-004 added one -- link straight at THIS job's target
-                 device (by its safe fingerprint, never the raw device_id). #}
-              <a class="btn btn-small" href="/devices/{{ j.target_device_fingerprint }}">Device Details</a>
-            </div>
-            <p class="settings-hint">Override replaces the existing file with this one; Skip leaves it alone and drops this install.</p>
-          </div>
           {% elif j.error %}<div class="job-error" title="{{ j.error }}">{{ j.error }}</div>{% endif %}
           {% if j.possibly_stalled %}
           <div class="job-stall-warning">
@@ -95,16 +61,11 @@
           {% if j.status == "RUNNING" %}<span class="spinner" aria-label="in progress"></span>{% endif %}
         </div>
         <div class="job-actions">
-          {% if j.status == "DESTINATION_CONFLICT" and not j.abandoned %}
-          <button class="btn btn-small btn-danger" data-job-action="override" data-job-id="{{ j.id }}">Override</button>
-          <button class="btn btn-small btn-ok" data-job-action="cancel" data-job-id="{{ j.id }}">Skip</button>
-          {% else %}
           {% if not j.abandoned and j.status in ("FAILED", "INTERRUPTED", "DEVICE_UNAVAILABLE", "SOURCE_CHANGED", "BLOCKED_BY_DEPENDENCY") %}
           <button class="btn btn-small" data-job-action="retry" data-job-id="{{ j.id }}">Retry installation</button>
           {% endif %}
           {% if not j.abandoned and j.status in ("PENDING_CONFIRM", "CONFIRMED", "DEVICE_UNAVAILABLE", "WAITING_FOR_BASE", "WAITING_FOR_DEVICE", "FAILED", "INTERRUPTED", "SOURCE_CHANGED", "BLOCKED_BY_DEPENDENCY") %}
           <button class="btn btn-small btn-danger" data-job-action="cancel" data-job-id="{{ j.id }}">Cancel</button>
-          {% endif %}
           {% endif %}
         </div>
       </li>

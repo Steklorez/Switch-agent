@@ -150,6 +150,45 @@ def set_library_source_dirs(new_paths: list[Path]) -> None:
     lines[start + 1:end] = [line, section]
     CONFIG_YAML_PATH.write_text("".join(lines), encoding="utf-8")
 
+
+_CONFLICT_POLICIES = ("skip", "override")
+
+
+def load_conflict_policy(yaml_path: Optional[Path] = None) -> str:
+    """"skip" (default) or "override": what happens automatically when a
+    job's destination already has a file SwitchAgent did not put there
+    (queue_worker.py's FileAlreadyExistsError handling). Deliberately only
+    two values, no "ask" -- one policy applies the same way to every job;
+    there is no per-item prompt to answer.
+
+    `yaml_path` defaults to the CURRENT value of the module-level
+    CONFIG_YAML_PATH, read inside the function body rather than bound as
+    a default-argument value -- a default argument is evaluated once, at
+    import time, so it would silently keep pointing at whatever path was
+    live when this module first loaded even after a test (or anything
+    else) monkeypatches CONFIG_YAML_PATH to somewhere else."""
+    path = yaml_path if yaml_path is not None else CONFIG_YAML_PATH
+    import yaml
+    data = yaml.safe_load(path.read_text(encoding="utf-8")) if path.exists() else {}
+    value = (data or {}).get("conflict_policy")
+    return value if value in _CONFLICT_POLICIES else "skip"
+
+
+def set_conflict_policy(policy: str, yaml_path: Optional[Path] = None) -> None:
+    if policy not in _CONFLICT_POLICIES:
+        raise ValueError(f"conflict_policy must be one of {_CONFLICT_POLICIES}, got {policy!r}")
+    path = yaml_path if yaml_path is not None else CONFIG_YAML_PATH
+    import re
+    text = path.read_text(encoding="utf-8") if path.exists() else ""
+    pattern = re.compile(r"^conflict_policy:.*\n?", re.MULTILINE)
+    if pattern.search(text):
+        text = pattern.sub(f"conflict_policy: {policy}\n", text, count=1)
+    else:
+        if text and not text.endswith("\n"):
+            text += "\n"
+        text += f"conflict_policy: {policy}\n"
+    path.write_text(text, encoding="utf-8")
+
 # A file is considered "still being written" if we can't open it exclusively,
 # or if its size changed between two checks spaced this far apart.
 STABLE_CHECK_INTERVAL_SECONDS = 2.0

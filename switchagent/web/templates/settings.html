@@ -79,6 +79,21 @@
 </section>
 
 <section class="settings-section">
+  <h3>If a file already exists on the Switch</h3>
+  <label>When SwitchAgent finds a file it did not put there itself
+    <select id="conflict-policy-select" class="filter-select">
+      <option value="skip" {{ "selected" if settings.conflict_policy == "skip" }}>Skip it — leave the existing file alone</option>
+      <option value="override" {{ "selected" if settings.conflict_policy == "override" }}>Replace it</option>
+    </select>
+  </label>
+  <span id="conflict-policy-status" role="status"></span>
+  <p class="settings-hint">
+    Applied automatically to every install, the same way every time — there is no per-item prompt.
+    Replacing is permanent and cannot be undone.
+  </p>
+</section>
+
+<section class="settings-section">
   <h3>Archive support</h3>
   <p>ZIP, 7Z: fully supported.</p>
   {% if settings.rar_extraction_available %}

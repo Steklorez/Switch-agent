@@ -1,5 +1,4 @@
-"""W3-004: the Device Details page (`GET /devices/{fingerprint}`), plus the
-W3-006 Destination-Conflict-UX link fix that page enabled.
+"""W3-004: the Device Details page (`GET /devices/{fingerprint}`).
 
 Same MockMtpBackend web fixture style as tests/test_web_api.py. The hard
 contracts under test:
@@ -14,9 +13,7 @@ contracts under test:
     the raw device_id is resolved server-side, never in the request URL
     (see api_rename_device_by_fingerprint's own docstring: an earlier
     version of this page called the raw-id routes directly, which leaked
-    the raw id into uvicorn's own access log);
-  * W3-006's conflict card now links at the specific device, not the
-    generic /devices list it fell back to before this page existed.
+    the raw id into uvicorn's own access log).
 """
 
 from __future__ import annotations
@@ -26,7 +23,7 @@ from pathlib import Path
 import pytest
 from fastapi.testclient import TestClient
 
-from switchagent import config, db, known_folders, queue_worker
+from switchagent import config, db, known_folders
 from switchagent.mtp.windows import device_fingerprint
 from switchagent.web.app import create_app
 from switchagent.web.context import build_mock_context
@@ -401,69 +398,3 @@ def test_device_scoped_diagnostics_export_is_scoped_and_leaks_no_raw_device_id(c
     assert PARENT_FP in text.text
     assert PARENT not in text.text
     assert "SwitchAgent activity" in text.text
-
-
-# ---------------------------------------------------------------------------
-# W3-006 integration: the Destination Conflict card's "Device Details" link
-# ---------------------------------------------------------------------------
-
-def _seed_real_destination_conflict(web_ctx, client) -> int:
-    """Drives a REAL DESTINATION_CONFLICT through the worker (same approach
-    as test_web_api.py's own conflict fixture): the file is already present
-    at the destination, put there by something that is not this job."""
-    item_id = _seed_library_item(web_ctx)
-    backend = web_ctx.registry.get(PARENT)
-    backend.connect()
-    backend.storage_tree("SD_INSTALL").write_file(
-        f"ZzzQuest [{BASE_TITLE_ID}][v0].nsp", b"someone else's file",
-    )
-
-    res = client.post("/api/jobs", json={"library_item_ids": [item_id], "target_device_id": PARENT})
-    job_id = res.json()["created"][0]["job_id"]
-    with db.open_db(web_ctx.db_path) as conn:
-        queue_worker.run_worker_once(conn, web_ctx.registry)
-        assert db.get_job(conn, job_id)["status"] == "DESTINATION_CONFLICT"
-    return job_id
-
-
-def test_conflict_card_links_to_the_specific_device_detail_page(client, web_ctx):
-    """W3-006 shipped with the conflict card's "Device Details" affordance
-    pointing at the generic /devices list, explicitly as a temporary
-    fallback until a per-device page existed. Now that W3-004 added one, it
-    must point at THIS job's target device -- by fingerprint, never the raw
-    device_id."""
-    job_id = _seed_real_destination_conflict(web_ctx, client)
-
-    html = client.get("/queue").text
-    conflict_card = html.split("conflict-actions", 1)[1].split("</div>", 1)[0]
-    assert f'href="/devices/{PARENT_FP}"' in conflict_card
-    assert 'href="/devices"' not in conflict_card  # the old generic fallback is gone
-    assert PARENT not in html
-
-    # the link really resolves to a rendered page for that device
-    assert client.get(f"/devices/{PARENT_FP}").status_code == 200
-
-    # ...and the same fingerprint reaches queue.js through the JSON API, so
-    # the live-refreshed card builds the identical link.
-    job = next(j for j in client.get("/api/queue").json() if j["id"] == job_id)
-    assert job["target_device_fingerprint"] == PARENT_FP
-
-    queue_js = (config.PROJECT_ROOT / "switchagent" / "web" / "static" / "queue.js").read_text(encoding="utf-8")
-    assert "/devices/${j.target_device_fingerprint}" in queue_js
-
-
-def test_device_page_surfaces_the_open_destination_conflict(client, web_ctx):
-    """A job currently sitting in DESTINATION_CONFLICT is a live, unresolved
-    condition -- shown on this page distinctly from past attempts, and
-    (W3-006's own hard rule) never with an overwrite/force affordance. The
-    worker's own error text legitimately contains the word "overwrite"
-    ("...refusing to overwrite"), so this asserts the absence of an ACTION,
-    not of the word."""
-    _seed_real_destination_conflict(web_ctx, client)
-    html = client.get(f"/devices/{PARENT_FP}").text
-    assert 'id="device-open-conflicts"' in html
-    assert f"ZzzQuest [{BASE_TITLE_ID}][v0].nsp" in html
-    assert "refusing to overwrite" in html  # the honest reason, shown as-is
-    for forbidden in ("overwrite anyway", "force overwrite", "assume same file",
-                      "remote delete", "delete on device"):
-        assert forbidden not in html.lower(), forbidden

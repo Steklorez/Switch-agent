@@ -1090,27 +1090,30 @@ def _status_bucket(status: str) -> str:
 # but the user may simply not intend to reconnect that device at all.
 _CANCELABLE_JOB_STATUSES = (
     "PENDING_CONFIRM", "CONFIRMED", "DEVICE_UNAVAILABLE", "WAITING_FOR_BASE", "WAITING_FOR_DEVICE",
-    "FAILED", "INTERRUPTED", "SOURCE_CHANGED", "DESTINATION_CONFLICT", "BLOCKED_BY_DEPENDENCY",
+    "FAILED", "INTERRUPTED", "SOURCE_CHANGED", "BLOCKED_BY_DEPENDENCY",
+    # DESTINATION_CONFLICT is deliberately absent: queue_worker.py already
+    # resolves it automatically (Settings' conflict policy) the instant it
+    # happens -- abandoned=1 is set right there, not by a later cancel.
 )
 
 
 def _not_settled(rows: list, row) -> bool:
     """True if `row` still belongs in the active Queue view. Excludes:
     - DONE/DONE_UNVERIFIED (History's job, see list_history_grouped()).
-    - abandoned (Cancel/Skip -- see cancel_job()): the user already gave
-      up on this exact attempt; retry_job()/override_job() both explicitly
-      refuse to touch an abandoned job ("select the source again in
-      Library"), so there is never anything left to DO with one here.
+    - abandoned (Cancel, or an automatic DESTINATION_CONFLICT resolution --
+      see cancel_job() and queue_worker.py's FileAlreadyExistsError
+      handling): nothing is left to DO with this attempt; retry_job()
+      explicitly refuses to touch an abandoned job ("select the source
+      again in Library").
     - superseded (some OTHER job's retry_of_job_id points at this one --
-      see db.create_job()'s own comment on the column): clicking Retry or
-      Override on a DESTINATION_CONFLICT/FAILED card used to leave the OLD
-      card sitting there completely unchanged, showing the exact same
-      live Override/Skip/Retry buttons as before -- nothing stopped a
-      second, third, Nth click creating a pile of parallel duplicate
-      attempts at the SAME file. The instant a retry exists, the old row
-      is superseded and drops out of Queue -- still a permanent, untouched
-      record (still in History), just not active work, and no longer
-      clickable."""
+      see db.create_job()'s own comment on the column): clicking Retry on
+      a FAILED card used to leave the OLD card sitting there completely
+      unchanged, showing the exact same live Retry button as before --
+      nothing stopped a second, third, Nth click creating a pile of
+      parallel duplicate attempts at the SAME file. The instant a retry
+      exists, the old row is superseded and drops out of Queue -- still a
+      permanent, untouched record (still in History), just not active
+      work, and no longer clickable."""
     if row["status"] in ("DONE", "DONE_UNVERIFIED") or row["abandoned"]:
         return False
     return not any(r["retry_of_job_id"] == row["id"] for r in rows)
@@ -1205,7 +1208,6 @@ def _batch_group_view(conn, batch_id: Optional[int], rows: list) -> dict:
         target_device_id = batch_row["target_device_id"] if batch_row is not None else rows[0]["target_device_id"]
 
     display_name = jobs[0]["display_name"] if len(jobs) == 1 else f"{len(jobs)} items"
-    conflict_count = sum(1 for r in rows if r["status"] == "DESTINATION_CONFLICT")
     return {
         "batch_id": batch_id,
         "display_name": display_name,
@@ -1219,11 +1221,6 @@ def _batch_group_view(conn, batch_id: Optional[int], rows: list) -> dict:
         "successful": counts["successful"],
         "failed": counts["failed"],
         "waiting": counts["waiting"],
-        # W3-006: DESTINATION_CONFLICT already counts toward "failed" above
-        # (unchanged, existing transport-outcome bucketing) -- this is an
-        # ADDITIVE, more specific count so the batch header can say
-        # "N item(s) requires attention" distinctly from a generic failure.
-        "conflict_count": conflict_count,
     }
 
 
@@ -1388,6 +1385,7 @@ def create_and_confirm_jobs(conn, library_item_ids: list[int], target_device_id:
         raise ValueError("target_device_id is required")
     target_device_id = resolve_target_device_id(conn, target_device_id)
 
+    from .. import config as config_mod
     from .preparation import preflight, remove_extraction
     library_item_ids = list(dict.fromkeys(library_item_ids))
     preflight_errors = preflight(conn, library_item_ids, progress)
@@ -1395,6 +1393,13 @@ def create_and_confirm_jobs(conn, library_item_ids: list[int], target_device_id:
         return {"created": [], "errors": preflight_errors, "batch_id": None}
 
     batch_id = db.create_installation_batch(conn, target_device_id=target_device_id)
+    # Settings' conflict policy, read once for the whole batch: "override"
+    # sends every job with overwrite=True from the start (a pre-existing
+    # file it doesn't recognize is simply replaced, no FileAlreadyExistsError
+    # ever raised); "skip" (default) leaves force_overwrite off, so
+    # queue_worker.py's FileAlreadyExistsError handling is what applies and
+    # resolves the job on its own -- no per-item prompt either way.
+    force_overwrite = config_mod.load_conflict_policy() == "override"
 
     created = []
     errors = []
@@ -1460,6 +1465,7 @@ def create_and_confirm_jobs(conn, library_item_ids: list[int], target_device_id:
                 job_id = queue_worker.create_job_from_report(
                     conn, sub_report, library_item_id=item_id, action=action,
                     target_device_id=target_device_id, batch_id=batch_id,
+                    force_overwrite=force_overwrite,
                 )
                 created.append({"library_item_id": item_id, "job_id": job_id})
             except (OSError, manifest_mod.ManifestError, extractor.ArchiveError, ValueError) as exc:
@@ -1514,7 +1520,12 @@ def create_and_confirm_jobs(conn, library_item_ids: list[int], target_device_id:
 # every status.
 _RETRYABLE_JOB_STATUSES = (
     "INTERRUPTED", "FAILED", "DEVICE_UNAVAILABLE",
-    "SOURCE_CHANGED", "DESTINATION_CONFLICT", "BLOCKED_BY_DEPENDENCY",
+    "SOURCE_CHANGED", "BLOCKED_BY_DEPENDENCY",
+    # DESTINATION_CONFLICT is deliberately absent: it is already resolved
+    # (Settings' conflict policy applies automatically), so there is
+    # nothing left for a retry to do -- re-running it would just reach the
+    # exact same conflict again under a "skip" policy, or never have
+    # reached it at all under "override".
 )
 
 
@@ -1660,24 +1671,6 @@ def _retry_staged_job(conn, old, frozen, *, force_overwrite: bool = False) -> di
         raise
     db.log_job_event(conn, new_id, f"retry of job {old['id']} using retained payload")
     return {"old_job_id": old["id"], "new_job_id": new_id, "batch_id": batch_id}
-
-
-def override_job(conn, job_id: int) -> dict:
-    """The Web UI's "Override" action -- only ever offered on a
-    DESTINATION_CONFLICT card (see queue.html/queue.js). Runs the exact
-    same retry_job() path (fresh preview or retained payload, brand-new
-    job, old job/History untouched) but with force_overwrite=True: the new
-    job's _run_job_transfer skips its existence check and overwrites
-    whatever is already at the destination. Deliberately narrower than
-    retry_job's own _RETRYABLE_JOB_STATUSES -- there is nothing to
-    override about a FAILED network blip or an INTERRUPTED disconnect, so
-    this only accepts a job that is CURRENTLY, actually conflicted."""
-    old = db.get_job(conn, job_id)
-    if old is None:
-        raise ValueError(f"no such job: {job_id}")
-    if old["status"] != "DESTINATION_CONFLICT":
-        raise ValueError(f"job {job_id} is '{old['status']}' -- override only applies to a DESTINATION_CONFLICT")
-    return retry_job(conn, job_id, force_overwrite=True)
 
 
 def abandon_all_jobs_for_device(conn, device_id: str, reason: str) -> list[int]:
@@ -2002,6 +1995,7 @@ def get_settings(conn, ctx: WebContext) -> dict:
     return {
         "library_dir": str(config_mod.LIBRARY_DIR),
         "library_dirs": [str(p) for p in config_mod.library_dirs()],
+        "conflict_policy": config_mod.load_conflict_policy(),
         "lan_addresses": lan_addresses,
         "library_dir_configured": library_info.configured,
         "library_dir_exists": library_info.exists,
@@ -2018,6 +2012,17 @@ def get_settings(conn, ctx: WebContext) -> dict:
         "runtime_mode": config_mod.RUNTIME_MODE,
         "rar_extraction_available": extractor.rar_backend_available(),
     }
+
+
+def set_conflict_policy(policy: str) -> dict:
+    """"skip" or "override" -- see config.load_conflict_policy(). Applied
+    to every job created from here on (create_and_confirm_jobs reads it at
+    creation time); jobs already in flight keep whatever was in effect
+    when they were created."""
+    from .. import config as config_mod
+
+    config_mod.set_conflict_policy(policy)
+    return {"conflict_policy": policy}
 
 
 def _validate_library_dir_candidate(raw_path: str) -> Path:

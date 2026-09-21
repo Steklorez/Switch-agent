@@ -474,8 +474,12 @@ def test_destination_conflict_detected_without_a_separate_exists_probe(isolated_
     assert outcome.status == "DESTINATION_CONFLICT"
     job = db.get_job(conn, job_id)
     assert job["error"] == (
-        f"'{name}' already exists on 'SD_INSTALL' and was not sent by this job -- refusing to overwrite"
+        f"'{name}' already exists on 'SD_INSTALL' and was not sent by this job -- skipped automatically "
+        "(Settings: existing files on the Switch are skipped)"
     )
+    # Auto-resolved the instant it happens (Settings' conflict policy) --
+    # no one needs to look at it, so it is abandoned right away.
+    assert bool(job["abandoned"]) is True
     exists_ops = [op for op in parent.operation_log if op.operation == "EXISTS"]
     assert exists_ops == []
 

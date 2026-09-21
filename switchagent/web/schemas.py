@@ -20,6 +20,10 @@ class RenameDeviceRequest(BaseModel):
     friendly_name: Optional[str] = None
 
 
+class ConflictPolicyRequest(BaseModel):
+    policy: Literal["skip", "override"]
+
+
 class ScanTriggerResponse(BaseModel):
     started: bool
 
