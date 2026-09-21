@@ -32,6 +32,7 @@ from typing import Callable, Optional
 from .. import config, db, queue_worker
 from ..mtp.base import DeviceInfo, MtpBackend
 from ..mtp.errors import DeviceNotFoundError
+from ..transfer import STORAGE_SD_INSTALL
 
 log = logging.getLogger("switchagent.web")
 
@@ -158,6 +159,23 @@ class WebContext:
         self._installed_games_cache: dict[str, set[str]] = {}  # device_id -> base_title_ids
         self._installed_games_cache_lock = threading.Lock()
 
+        # DBI does not rewrite InstalledApplications.csv mid-session
+        # (field-confirmed 2026-09-21: a title this app itself sends via
+        # SD_INSTALL never appears in _installed_games_cache above until
+        # the NEXT MTP session, no matter how many more times that same
+        # stale file is re-read) -- so a freshly succeeded SD_INSTALL job
+        # is the only signal available that a title just landed, until
+        # reconnecting lets DBI regenerate the CSV for real. Purely an
+        # additive union at read time (get_known_installed_title_ids), never
+        # merged into _installed_games_cache itself -- that dict stays
+        # exactly what the CSV says, so a real disagreement (e.g. the
+        # install actually failed on the console) is still visible in the
+        # two-axis sense this module already keeps elsewhere. Pruned to
+        # live devices the same "gone the instant its device disconnects"
+        # way as _installed_games_cache (see refresh_devices()) -- the next
+        # connect's fresh CSV read is what's authoritative from then on.
+        self._locally_confirmed_installs: dict[str, set[str]] = {}  # device_id -> base_title_ids
+
         # Worker heartbeat (UI-001/UI-006): updated once per _worker_loop
         # iteration, whether or not that iteration found any work -- this
         # is "the worker thread is alive and ticking", a different signal
@@ -265,6 +283,11 @@ class WebContext:
             live_ids = {device.device_id for device in live}
             self._installed_games_cache = {key: value for key, value in self._installed_games_cache.items() if key in live_ids}
             self._installed_games_cache.update(installed_games_snapshot)
+            # Same prune as above, same reason: gone the instant its device
+            # disconnects, never carried into a later, different session.
+            self._locally_confirmed_installs = {
+                key: value for key, value in self._locally_confirmed_installs.items() if key in live_ids
+            }
 
         # By explicit request: a connection-state change in EITHER
         # direction -- a device dropping OR a fresh connect (this
@@ -302,9 +325,40 @@ class WebContext:
         INSTALLED/INSTALLED_UNVERIFIED status (services.py's
         _JOB_STATUS_TO_DISPLAY) -- never a replacement for it, the two
         answer genuinely different questions (what SwitchAgent itself once
-        sent, vs. what DBI reports is there right now)."""
+        sent, vs. what DBI reports is there right now).
+
+        Also unions in _locally_confirmed_installs -- see that field's own
+        comment for why a title this session itself just installed must
+        count here too, not just what the last CSV read happened to catch."""
         with self._installed_games_cache_lock:
-            return {tid for ids in self._installed_games_cache.values() for tid in ids}
+            ids = {tid for ids in self._installed_games_cache.values() for tid in ids}
+            ids |= {tid for ids in self._locally_confirmed_installs.values() for tid in ids}
+            return ids
+
+    def note_install_job_outcome(self, conn, outcome: Optional["queue_worker.JobRunOutcome"]) -> None:
+        """Called once per _worker_loop pass, right after run_worker_once()
+        (see below) -- the only place that both knows a job just reached a
+        terminal status AND has a `conn` to look up what it actually was.
+        Folds a freshly succeeded SD_INSTALL job's base title id into
+        _locally_confirmed_installs (see that field's own comment); a no-op
+        for anything else (no outcome, a non-terminal-success status, a
+        SD_CARD/mod job -- DBI never installs those, so there is nothing for
+        its CSV to ever confirm), so calling this unconditionally on every
+        pass is always safe and cheap."""
+        if outcome is None or outcome.status not in ("DONE", "DONE_UNVERIFIED"):
+            return
+        job = db.get_job(conn, outcome.job_id)
+        if job is None or job["target_storage"] != STORAGE_SD_INSTALL or job["library_item_id"] is None:
+            return
+        item = db.get_library_item_by_id(conn, job["library_item_id"])
+        if item is None:
+            return
+        from .services import family_base_title_id
+        base_title_id = family_base_title_id(item["title_id"])
+        if base_title_id is None:
+            return
+        with self._installed_games_cache_lock:
+            self._locally_confirmed_installs.setdefault(job["target_device_id"], set()).add(base_title_id)
 
     def get_known_storages(self, device_id: str) -> list:
         """What every HTTP request thread calls to read a device's
@@ -419,6 +473,7 @@ class WebContext:
                         self._stop_event.wait(1.0)
                         continue
                     outcome = queue_worker.run_worker_once(conn, self.registry)
+                    self.note_install_job_outcome(conn, outcome)
                 except Exception:  # noqa: BLE001 -- one bad iteration must not kill the worker thread
                     log.exception("worker loop iteration failed")
                     outcome = None
