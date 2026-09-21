@@ -3,11 +3,21 @@
 {% block content %}
 <div class="page-header">
   <h2>Queue</h2>
-  <div class="worker-controls">
-    <span class="worker-state">Worker: <strong>{{ "Paused" if worker_paused else "Running" }}</strong></span>
-    <button class="btn btn-secondary" data-worker-action="{{ 'resume' if worker_paused else 'pause' }}">
-      {{ "Resume" if worker_paused else "Pause" }}
-    </button>
+  <div class="header-controls">
+    <div class="conflict-policy-toggle" title="Applies to every install from here on, not just this one">
+      <span>If a file already exists: <strong id="conflict-policy-label">{{ "Replace" if conflict_policy == "override" else "Skip" }}</strong></span>
+      <label class="switch">
+        <input type="checkbox" id="conflict-policy-toggle" {{ "checked" if conflict_policy == "override" }}
+               aria-label="Replace files that already exist on the Switch, instead of skipping them">
+        <span class="switch-slider" aria-hidden="true"></span>
+      </label>
+    </div>
+    <div class="worker-controls">
+      <span class="worker-state">Worker: <strong>{{ "Paused" if worker_paused else "Running" }}</strong></span>
+      <button class="btn btn-secondary" data-worker-action="{{ 'resume' if worker_paused else 'pause' }}">
+        {{ "Resume" if worker_paused else "Pause" }}
+      </button>
+    </div>
   </div>
 </div>
 

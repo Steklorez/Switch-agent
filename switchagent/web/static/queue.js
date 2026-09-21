@@ -387,4 +387,34 @@
       window.location.reload(); // worker state text lives outside job-list -- a full reload here is fine, it's user-triggered, not a live-progress path
     }
   });
+
+  // Global conflict policy -- same setting as Settings' own select (both
+  // read/write config.conflict_policy through the one endpoint), just
+  // reachable without leaving the page you're watching an install on.
+  const conflictToggle = document.getElementById("conflict-policy-toggle");
+  const conflictLabel = document.getElementById("conflict-policy-label");
+  if (conflictToggle) {
+    conflictToggle.addEventListener("change", async () => {
+      const policy = conflictToggle.checked ? "override" : "skip";
+      conflictToggle.disabled = true;
+      try {
+        const res = await fetch("/api/settings/conflict-policy", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ policy }),
+        });
+        if (!res.ok) {
+          conflictToggle.checked = !conflictToggle.checked; // revert
+          alert("Could not save: " + res.status);
+          return;
+        }
+        conflictLabel.textContent = policy === "override" ? "Replace" : "Skip";
+      } catch (e) {
+        conflictToggle.checked = !conflictToggle.checked;
+        alert("Request failed: " + e);
+      } finally {
+        conflictToggle.disabled = false;
+      }
+    });
+  }
 })();

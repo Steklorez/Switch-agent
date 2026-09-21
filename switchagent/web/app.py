@@ -331,9 +331,12 @@ def create_app(ctx: WebContext) -> FastAPI:
 
     @app.get("/queue", response_class=HTMLResponse)
     def page_queue(request: Request, conn=Depends(get_conn), ctx: WebContext = Depends(get_ctx)):
+        from .. import config as config_mod
+
         return _TEMPLATES.TemplateResponse(request, "queue.html", {
             "groups": services.list_queue_grouped(conn), "devices": services.list_devices(conn, ctx),
             "worker_paused": ctx.worker_paused.is_set(), "active_page": "queue",
+            "conflict_policy": config_mod.load_conflict_policy(),
         })
 
     @app.get("/history", response_class=HTMLResponse)
