@@ -136,6 +136,7 @@ WPD_OBJECT_FORMAT = PROPERTYKEY(_OBJ, 6)
 WPD_OBJECT_CONTENT_TYPE = PROPERTYKEY(_OBJ, 7)
 WPD_OBJECT_SIZE = PROPERTYKEY(_OBJ, 11)
 WPD_OBJECT_ORIGINAL_FILE_NAME = PROPERTYKEY(_OBJ, 12)
+WPD_RESOURCE_DEFAULT = PROPERTYKEY('{E81E79BE-34F0-41BF-B53F-F1A06AE87842}', 0)
 _CLIENT = "{204D9F0C-2292-4080-9F42-40664E70F859}"
 WPD_CLIENT_NAME = PROPERTYKEY(_CLIENT, 2)
 WPD_CLIENT_MAJOR_VERSION = PROPERTYKEY(_CLIENT, 3)
@@ -147,6 +148,7 @@ WPD_STORAGE_FREE_SPACE_IN_BYTES = PROPERTYKEY(_STORAGE, 5)
 
 WPD_CONTENT_TYPE_FOLDER = GUID("{27E2E392-A111-48E0-AB0C-E17705A05F85}")
 WPD_CONTENT_TYPE_GENERIC_FILE = GUID("{0085E0A6-8D34-45D7-BC5C-447E59C73D48}")
+WPD_CONTENT_TYPE_UNSPECIFIED = GUID("{28D8D31E-249C-454E-AABC-34883168E634}")
 WPD_OBJECT_FORMAT_UNSPECIFIED = GUID("{30000000-AE6C-4804-98BA-C57B46965FE7}")
 
 DEVICE_OBJECT_ID = "DEVICE"
@@ -314,12 +316,12 @@ def enum_children(content, parent_object_id):
             fetched = ULONG(0)
             hr = vcall(enum_ptr, 3, (ULONG, POINTER(c_void_p), POINTER(ULONG)), 32, batch, byref(fetched),
                        what="Next", check=False)
-            if fetched.value == 0:
-                break
             for i in range(fetched.value):
                 ids.append(ctypes.cast(batch[i], c_wchar_p).value)
                 ole32_c.CoTaskMemFree(batch[i])
-            if hr != S_OK:
+            if hr not in (S_OK, 1):
+                raise ComError(hr, 'IEnumPortableDeviceObjectIDs::Next')
+            if fetched.value == 0 or hr == 1:
                 break
     finally:
         release(enum_ptr)
@@ -348,6 +350,61 @@ def read_props(properties, object_id):
 
 def object_name(props):
     return props.get(str(WPD_OBJECT_ORIGINAL_FILE_NAME)) or props.get(str(WPD_OBJECT_NAME))
+
+
+def supported_resources(content, object_id):
+    """Return advertised resource keys; callers still need GetStream to prove data exists."""
+    resources = c_void_p()
+    try:
+        vcall(content, 5, (POINTER(c_void_p),), byref(resources), what='Transfer')
+        if not resources:
+            raise ComError(0x80004003, 'Transfer returned no resources')
+        keys = c_void_p()
+        try:
+            vcall(resources, 3, (LPCWSTR, POINTER(c_void_p)), object_id, byref(keys),
+                  what='GetSupportedResources')
+            if not keys:
+                raise ComError(0x80004003, 'GetSupportedResources returned no collection')
+            count = DWORD()
+            vcall(keys, 3, (POINTER(DWORD),), byref(count), what='ResourceKeys::GetCount')
+            if count.value > 128:
+                raise ComError(0x80070057, 'GetSupportedResources returned too many keys')
+            result = []
+            for index in range(count.value):
+                key = PROPERTYKEY()
+                vcall(keys, 4, (DWORD, POINTER(PROPERTYKEY)), index, byref(key),
+                      what='ResourceKeys::GetAt')
+                result.append(key)
+            return result
+        finally:
+            release(keys)
+    finally:
+        release(resources)
+
+
+def open_read_stream(content, object_id):
+    resources = c_void_p()
+    vcall(content, 5, (POINTER(c_void_p),), byref(resources), what='Transfer')
+    try:
+        stream = c_void_p()
+        optimal = DWORD()
+        vcall(resources, 5, (LPCWSTR, POINTER(PROPERTYKEY), DWORD, POINTER(DWORD), POINTER(c_void_p)),
+              object_id, byref(WPD_RESOURCE_DEFAULT), 0, byref(optimal), byref(stream), what='GetStream(read)')
+        return stream, optimal.value
+    finally:
+        release(resources)
+
+
+def stream_read(stream, length):
+    buffer = ctypes.create_string_buffer(length)
+    received = ULONG()
+    hr = vcall(stream, 3, (c_void_p, ULONG, POINTER(ULONG)), buffer, length,
+               byref(received), what='IStream::Read', check=False)
+    if hr not in (S_OK, 1):
+        raise ComError(hr, 'IStream::Read')
+    if received.value > length:
+        raise ComError(0, 'IStream::Read returned an invalid count')
+    return buffer.raw[:received.value]
 
 
 def create_file_object(content, parent_object_id, filename, size):
@@ -531,6 +588,42 @@ class WpdSession:
         return False
 
     # -- reads ------------------------------------------------------------
+
+    def children(self, parent_object_id):
+        """Fresh list, deliberately preserving duplicate display names."""
+        return [(object_id, read_props(self._properties, object_id))
+                for object_id in enum_children(self._content, parent_object_id)]
+
+    def supported_resources(self, object_id):
+        return supported_resources(self._content, object_id)
+
+    def resolve_read_path(self, root_object_id, path):
+        from .base import read_path
+        from .errors import AmbiguousPathError, SourceNotFoundError, InvalidOperationError
+        current = root_object_id
+        parts = read_path(path).split('/') if path else []
+        for index, segment in enumerate(parts):
+            matches = [(obj, props) for obj, props in self.children(current) if object_name(props) == segment]
+            if not matches:
+                raise SourceNotFoundError(path)
+            if len(matches) != 1:
+                raise AmbiguousPathError(path)
+            current, props = matches[0]
+            if index < len(parts) - 1 and props.get(str(WPD_OBJECT_CONTENT_TYPE)) != str(WPD_CONTENT_TYPE_FOLDER):
+                raise InvalidOperationError('path traverses a non-directory')
+        return current
+
+    def receive_file(self, object_id, destination_path, *, size=None, progress=None,
+                     cancel=None, check_session=None):
+        from .reading import receive_stream
+        stream, optimal = open_read_stream(self._content, object_id)
+        try:
+            return receive_stream(lambda n: stream_read(stream, n), destination_path,
+                                  size=size, progress=progress, cancel=cancel,
+                                  check_session=check_session,
+                                  chunk_size=max(65536, min(optimal or 1048576, 4 * 1048576)))
+        finally:
+            release(stream)
 
     def storages(self):
         """[(object_id, raw_name)] for every storage the device exposes, in

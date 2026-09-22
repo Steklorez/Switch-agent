@@ -648,9 +648,12 @@ class RealMtpBackend(MtpBackend):
     def connect(self) -> DeviceInfo:
         item = self._find_device_item()
         if item is None:
+            self.disconnect()
             raise DeviceNotFoundError(f"device {mask_device_id(self._device_id)} not currently reachable")
         self._device_item = item
         self._device_folder = item.GetFolder
+        if not self._connected:
+            self._read_session_token = uuid.uuid4().hex
         self._connected = True
         log.info("connected device=%s name=%r", device_fingerprint(self._device_id), item.Name)
         return DeviceInfo(device_id=self._device_id, name=item.Name, connected=True)
@@ -674,7 +677,115 @@ class RealMtpBackend(MtpBackend):
         # its own (see docs/STAGE5B-REAL-MTP.md, is_connected()). Both must
         # hold: we haven't explicitly disconnected, AND the device is
         # actually still there right now.
-        return self._connected and self._device_currently_present()
+        if self._connected and not self._device_currently_present():
+            self.disconnect()
+        return self._connected
+
+    def capabilities(self):
+        return {'read_files': not self._wpd_unavailable, 'exact_restore': False,
+                'verified_save_identity': False}
+
+    def _read_objects(self, storage, path, expected_session):
+        from .base import read_path
+        from .errors import AmbiguousPathError, UnsupportedOperationError
+        token = self._check_read_session(expected_session)
+        read_path(path)
+        session = self._wpd_session()
+        if session is None:
+            raise UnsupportedOperationError('WPD reading is unavailable; no Shell fallback')
+        roots = [obj for obj, name in session.storages()
+                 if resolve_storage_name(name, self._storage_overrides) == storage]
+        if not roots:
+            raise StorageNotFoundError(storage)
+        if len(roots) != 1:
+            raise AmbiguousPathError('multiple storages share this mapping')
+        return session, session.resolve_read_path(roots[0], path), token
+
+    @staticmethod
+    def _read_entry(session, path, object_id, props, token):
+        from . import wpd
+        from .base import MtpEntry
+        kind = props.get(str(wpd.WPD_OBJECT_CONTENT_TYPE))
+        is_dir = kind == str(wpd.WPD_CONTENT_TYPE_FOLDER)
+        type_known = kind in (str(wpd.WPD_CONTENT_TYPE_FOLDER),
+                              str(wpd.WPD_CONTENT_TYPE_GENERIC_FILE))
+        if kind == str(wpd.WPD_CONTENT_TYPE_UNSPECIFIED):
+            # DBI exposes some save files as UNSPECIFIED without OBJECT_NAME.
+            # That type alone does not prove a file; require the original file
+            # name and exactly one DEFAULT resource.
+            original = props.get(str(wpd.WPD_OBJECT_ORIGINAL_FILE_NAME))
+            if (isinstance(original, str) and original and '/' not in original
+                    and '\\' not in original):
+                keys = session.supported_resources(object_id)
+                type_known = sum(key == wpd.WPD_RESOURCE_DEFAULT for key in keys) == 1
+        size = props.get(str(wpd.WPD_OBJECT_SIZE))
+        if is_dir or not isinstance(size, int) or isinstance(size, bool) or size < 0:
+            size = None
+        return MtpEntry(path, wpd.object_name(props) or '', is_dir, size, object_id,
+                        {'type_known': type_known,
+                         'wpd_properties': props}, token)
+
+    def _read_failure(self, exc):
+        from . import wpd
+        if isinstance(exc, wpd.ComError):
+            # Object handles must never survive a failed transport operation.
+            self.disconnect()
+            if exc.hr in (0x80070005, 0x80030005):
+                from .errors import ReadAccessDeniedError
+                raise ReadAccessDeniedError(str(exc)) from exc
+            if exc.hr in (0x8007048F, 0x8007001F, 0x80010108):
+                raise DeviceDisconnectedError(str(exc)) from exc
+            raise TransferFailedError(str(exc)) from exc
+        raise exc
+
+    def list_directory(self, storage, path='', *, expected_session=None):
+        from . import wpd
+        try:
+            session, object_id, token = self._read_objects(storage, path, expected_session)
+            if path:
+                props = wpd.read_props(session._properties, object_id)
+                if props.get(str(wpd.WPD_OBJECT_CONTENT_TYPE)) != str(wpd.WPD_CONTENT_TYPE_FOLDER):
+                    raise InvalidOperationError('source is not a known directory')
+            result = []
+            for child_id, props in session.children(object_id):
+                name = wpd.object_name(props)
+                if not isinstance(name, str) or not name or '/' in name or '\\' in name:
+                    raise InvalidOperationError('object has an unusable name')
+                child_path = f'{path}/{name}' if path else name
+                result.append(self._read_entry(session, child_path, child_id, props, token))
+            self._check_read_session(token)
+            return result
+        except Exception as exc:
+            self._read_failure(exc)
+
+    def stat(self, storage, path, *, expected_session=None):
+        from . import wpd
+        from .base import MtpEntry
+        try:
+            session, object_id, token = self._read_objects(storage, path, expected_session)
+            if not path:
+                return MtpEntry('', '', True, object_id=object_id, session_token=token)
+            entry = self._read_entry(session, path, object_id,
+                                     wpd.read_props(session._properties, object_id), token)
+            self._check_read_session(token)
+            return entry
+        except Exception as exc:
+            self._read_failure(exc)
+
+    def receive_file(self, storage, source_path, destination_path, *, progress=None,
+                     cancel=None, expected_session=None):
+        from . import wpd
+        try:
+            session, object_id, token = self._read_objects(storage, source_path, expected_session)
+            entry = self._read_entry(session, source_path, object_id,
+                                     wpd.read_props(session._properties, object_id), token)
+            if entry.is_dir or not entry.metadata['type_known']:
+                raise InvalidOperationError('source is not a known file')
+            return session.receive_file(object_id, destination_path, size=entry.size,
+                                        progress=progress, cancel=cancel,
+                                        check_session=lambda: self._check_read_session(token))
+        except Exception as exc:
+            self._read_failure(exc)
 
     # -- MtpBackend: storage --------------------------------------------------
 

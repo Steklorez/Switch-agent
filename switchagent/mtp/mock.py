@@ -20,7 +20,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Optional
 
-from .base import DeviceInfo, MtpBackend, StorageInfo, TransferResult, TransferStatus
+from .base import DeviceInfo, MtpBackend, MtpEntry, StorageInfo, TransferResult, TransferStatus, read_path
 from .errors import (
     DestinationNotFoundError,
     DeviceDisconnectedError,
@@ -177,6 +177,8 @@ class MockMtpBackend(MtpBackend):
 
     def set_device_present(self, present: bool) -> None:
         self._device_present = present
+        if not present:
+            self._connected = False
 
     def simulate_disconnect(self) -> None:
         """The Switch goes away right now, independent of any in-flight
@@ -236,6 +238,8 @@ class MockMtpBackend(MtpBackend):
                 f"no Switch/DBI MTP Responder found for device_id={self._device_id!r} "
                 "(mock: device_present=False)"
             )
+        if not self._connected:
+            self._read_session_token = uuid.uuid4().hex
         self._connected = True
         self._log_op("CONNECT", {"device_id": self._device_id, "device": self._device_name})
         return DeviceInfo(device_id=self._device_id, name=self._device_name, connected=True)
@@ -247,6 +251,136 @@ class MockMtpBackend(MtpBackend):
     @property
     def is_connected(self) -> bool:
         return self._connected
+
+    def capabilities(self):
+        return {'read_files': True, 'exact_restore': True, 'verified_save_identity': True}
+
+    def set_save_identity(self, storage, path, *, title_id, user_id, environment_id,
+                          save_type='Account', verified=True):
+        """Explicit test-fixture identity; never inferred from display names."""
+        if not hasattr(self, '_save_identities'):
+            self._save_identities = {}
+        self._save_identities[(storage, read_path(path))] = {
+            'title_id': title_id, 'user_id': user_id, 'environment_id': environment_id,
+            'save_type': save_type, 'verified': verified, 'source': 'mock-fixture'}
+
+    def save_identity(self, storage, path, *, expected_session=None):
+        self.stat(storage, path, expected_session=expected_session)
+        identity = getattr(self, '_save_identities', {}).get((storage, path))
+        return dict(identity) if identity else super().save_identity(storage, path, expected_session=expected_session)
+
+    def replace_save_tree(self, storage, path, source_directory, *, expected_identity,
+                          expected_session, cancel=None, progress=None):
+        from .errors import OperationCancelledError
+        from .reading import is_link_or_reparse
+        token = self._check_read_session(expected_session)
+        path = read_path(path)
+        identity = self.save_identity(storage, path, expected_session=token)
+        if (storage != 'SAVES' or not path or not identity.get('verified')
+                or identity.get('save_type') != 'Account'
+                or any(not identity.get(k) or identity.get(k) != expected_identity.get(k)
+                       for k in ('title_id', 'user_id', 'environment_id', 'save_type'))
+                or not expected_identity.get('verified')):
+            raise InvalidOperationError('save identity is unknown or differs from the original target')
+        tree = self._get_storage_obj(storage)
+        if not tree.writable or not tree.is_dir(path):
+            raise InvalidOperationError('save target is not writable')
+        source = Path(source_directory)
+        if not source.is_dir():
+            raise InvalidOperationError('restore source is not a directory')
+        for parent in (source, *source.parents):
+            if is_link_or_reparse(parent):
+                raise InvalidOperationError('restore source traverses a link')
+        candidates = [source]
+        replacement = {}
+        total = 0
+        while candidates:
+            local = candidates.pop()
+            if is_link_or_reparse(local):
+                raise InvalidOperationError('restore source contains a link')
+            if cancel and cancel():
+                raise OperationCancelledError('restore cancelled before writing')
+            relative = local.relative_to(source).as_posix()
+            key = path if local == source else path + '/' + read_path(relative)
+            if local.is_dir():
+                replacement[key] = _MockNode(True)
+                candidates.extend(local.iterdir())
+            elif local.is_file():
+                data = local.read_bytes()  # mock's in-memory storage; real API takes paths
+                replacement[key] = _MockNode(False, data)
+                total += len(data)
+            else:
+                raise InvalidOperationError('restore source is not a regular file')
+        if tree.free_bytes is not None and total > tree.free_bytes:
+            raise TransferFailedError('insufficient space for restore')
+        self._check_read_session(token)
+        if self.save_identity(storage, path) != identity:
+            raise InvalidOperationError('save identity changed')
+        fault = self._pop_matching_fault(storage, path)
+        self._log_op('REPLACE_SAVE_TREE', {'storage': storage, 'path': path})
+        if fault:
+            if fault.mode == 'disconnect':
+                self.simulate_disconnect()
+                raise DeviceDisconnectedError('restore disconnected; target state unknown')
+            raise TransferFailedError('mock restore failed; target state unknown')
+        for old in list(tree.nodes):
+            if old == path or old.startswith(path + '/'):
+                del tree.nodes[old]
+        tree.nodes.update(replacement)
+        if progress:
+            progress(total, total)
+
+    def stat(self, storage, path, *, expected_session=None):
+        from .errors import SourceNotFoundError
+        token = self._check_read_session(expected_session)
+        path = read_path(path)
+        tree = self._get_storage_obj(storage)
+        if not path:
+            return MtpEntry('', '', True, session_token=token)
+        node = tree.nodes.get(path)
+        if node is None:
+            raise SourceNotFoundError(path)
+        return MtpEntry(path, path.rsplit('/', 1)[-1], node.is_dir,
+                        None if node.is_dir else len(node.data), path, {}, token)
+
+    def list_directory(self, storage, path='', *, expected_session=None):
+        entry = self.stat(storage, path, expected_session=expected_session)
+        if not entry.is_dir:
+            raise InvalidOperationError('source is not a directory')
+        prefix = path + '/' if path else ''
+        return [self.stat(storage, p, expected_session=entry.session_token)
+                for p in sorted(self._get_storage_obj(storage).nodes)
+                if p.startswith(prefix) and '/' not in p[len(prefix):]]
+
+    def receive_file(self, storage, source_path, destination_path, *, progress=None,
+                     cancel=None, expected_session=None):
+        import io
+        from .reading import receive_stream
+        entry = self.stat(storage, source_path, expected_session=expected_session)
+        if entry.is_dir:
+            raise InvalidOperationError('source is a directory')
+        data = self._get_storage_obj(storage).read_file(source_path)
+        fault = getattr(self, '_read_fault', None)
+        if fault and fault[1] in (None, storage) and fault[2] in (None, source_path):
+            self._read_fault = None
+        else:
+            fault = None
+        source = io.BytesIO(data[:len(data) // 2] if fault and fault[0] == 'short' else data)
+        def read(count):
+            if fault and fault[0] == 'disconnect':
+                self.simulate_disconnect()
+                raise DeviceDisconnectedError('mock disconnected while reading')
+            if fault and fault[0] == 'error':
+                raise TransferFailedError('mock read failed')
+            return source.read(count)
+        return receive_stream(read, destination_path, size=entry.size,
+                              progress=progress, cancel=cancel,
+                              check_session=lambda: self._check_read_session(entry.session_token))
+
+    def arm_read_failure(self, mode, *, storage=None, source_path=None):
+        if mode not in ('short', 'disconnect', 'error'):
+            raise ValueError('unknown read failure')
+        self._read_fault = (mode, storage, source_path)
 
     def set_storage_overrides(self, overrides: dict[str, str]) -> None:
         """Stored and reflected in operation_log for test introspection

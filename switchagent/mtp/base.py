@@ -113,10 +113,76 @@ class TransferResult:
     error: Optional[str] = None
 
 
+@dataclass(frozen=True)
+class MtpEntry:
+    path: str
+    name: str
+    is_dir: bool
+    size: Optional[int] = None
+    object_id: Optional[str] = None
+    metadata: dict = field(default_factory=dict)
+    session_token: str = ''
+
+
+def read_path(path: str) -> str:
+    """Validate device-relative paths; never normalize away unsafe segments."""
+    from .errors import InvalidOperationError
+    if not isinstance(path, str) or '\\' in path or '\x00' in path or ':' in path or path.startswith('/'):
+        raise InvalidOperationError('expected a relative MTP path')
+    if path and any(part in ('', '.', '..') for part in path.split('/')):
+        raise InvalidOperationError('unsafe MTP path component')
+    return path
+
+
 class MtpBackend(ABC):
     """Everything the rest of SwitchAgent is allowed to know about talking
     to a Switch. No method here does anything Windows-specific or
     USB-specific -- that's entirely up to the concrete implementation."""
+
+    @property
+    def session_token(self) -> str:
+        from .errors import DeviceDisconnectedError
+        if not self.is_connected:
+            raise DeviceDisconnectedError('not connected')
+        return getattr(self, '_read_session_token', '')
+
+    def _check_read_session(self, expected_session=None):
+        from .errors import StaleSessionError
+        token = self.session_token
+        if not token or (expected_session is not None and token != expected_session):
+            raise StaleSessionError('connection changed; enumerate the source again')
+        return token
+
+    def capabilities(self) -> dict:
+        return {'read_files': False, 'exact_restore': False, 'verified_save_identity': False}
+
+    def list_directory(self, storage, path='', *, expected_session=None) -> list[MtpEntry]:
+        from .errors import UnsupportedOperationError
+        raise UnsupportedOperationError('directory reading is unavailable')
+
+    def stat(self, storage, path, *, expected_session=None) -> MtpEntry:
+        from .errors import UnsupportedOperationError
+        raise UnsupportedOperationError('object metadata is unavailable')
+
+    def receive_file(self, storage, source_path, destination_path, *, progress=None,
+                     cancel=None, expected_session=None) -> int:
+        """Read to a NEW local file; remove incomplete output on failure.
+
+        progress(bytes_received, total_or_none) runs on the calling worker.
+        cancel is a zero-argument predicate. No device write or Shell fallback.
+        """
+        from .errors import UnsupportedOperationError
+        raise UnsupportedOperationError('file reading is unavailable')
+
+    def save_identity(self, storage, path, *, expected_session=None) -> dict:
+        self._check_read_session(expected_session)
+        return {'verified': False, 'title_id': None, 'user_id': None,
+                'environment_id': None, 'save_type': None, 'source': 'unavailable'}
+
+    def replace_save_tree(self, storage, path, source_directory, *, expected_identity,
+                          expected_session, cancel=None, progress=None) -> None:
+        from .errors import UnsupportedOperationError
+        raise UnsupportedOperationError('exact save restoration has not been qualified')
 
     # -- connection lifecycle ------------------------------------------------
 

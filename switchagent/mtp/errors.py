@@ -50,3 +50,27 @@ class TransferFailedError(MtpError):
 class InvalidOperationError(MtpError):
     """The operation was called in a state that doesn't make sense for it --
     e.g. before connect(), or with a malformed path."""
+
+
+class UnsupportedOperationError(MtpError):
+    """The connected adapter cannot safely perform this operation."""
+
+
+class SourceNotFoundError(MtpError):
+    """A requested source object no longer exists."""
+
+
+class AmbiguousPathError(MtpError):
+    """Multiple objects match a path; selecting one would be unsafe."""
+
+
+class StaleSessionError(MtpError):
+    """A reference belongs to an expired connection."""
+
+
+class OperationCancelledError(MtpError):
+    """The caller cancelled an operation."""
+
+
+class ReadAccessDeniedError(MtpError):
+    """Device refused access to the requested source."""
