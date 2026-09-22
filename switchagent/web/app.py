@@ -32,11 +32,17 @@ from .schemas import (
     PreferencesRequest,
     RenameDeviceRequest,
 )
+from pydantic import BaseModel
 
 log = logging.getLogger("switchagent.web")
 
 _WEB_DIR = Path(__file__).resolve().parent
 _TEMPLATES = Jinja2Templates(directory=str(_WEB_DIR / "templates"))
+
+
+class BackupInventoryRequest(BaseModel):
+    device_id: str
+    kind: str
 
 
 def _format_size(num_bytes) -> str:
@@ -279,6 +285,23 @@ def create_app(ctx: WebContext) -> FastAPI:
     @app.get("/api/health")
     def api_health():
         return {"app": "SwitchAgent", "version": __version__, "status": "ok"}
+
+    @app.post("/api/backups/inventory", status_code=202)
+    def api_backup_inventory(body: BackupInventoryRequest, ctx: WebContext = Depends(get_ctx)):
+        if body.kind not in ("saves", "games"):
+            raise HTTPException(status_code=422, detail="kind must be saves or games")
+        try:
+            job_id = ctx.enqueue_backup("inventory_" + body.kind, device_id=body.device_id)
+        except ValueError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        return {"job_id": job_id}
+
+    @app.get("/api/backups/jobs/{job_id}")
+    def api_backup_job(job_id: str, ctx: WebContext = Depends(get_ctx)):
+        job = ctx.backup_job(job_id)
+        if job is None:
+            raise HTTPException(status_code=404, detail="backup job not found")
+        return job
 
     # -- HTML pages -----------------------------------------------------
 

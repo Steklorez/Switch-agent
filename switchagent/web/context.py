@@ -24,12 +24,15 @@ from __future__ import annotations
 import logging
 import threading
 import time
+import uuid
+from collections import deque
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable, Optional
 
 from .. import config, db, queue_worker
+from ..backup_manager import BackupManager
 from ..mtp.base import DeviceInfo, MtpBackend
 from ..mtp.errors import DeviceNotFoundError
 from ..transfer import STORAGE_SD_INSTALL
@@ -89,6 +92,7 @@ class WebContext:
         worker_poll_interval_seconds: float = DEFAULT_WORKER_POLL_INTERVAL_SECONDS,
         library_watch_debounce_seconds: float = DEFAULT_LIBRARY_WATCH_DEBOUNCE_SECONDS,
         storage_refresh_interval_seconds: float = DEFAULT_STORAGE_REFRESH_INTERVAL_SECONDS,
+        backup_root: Path | None = None,
     ):
         """`discover_devices(registry)` is the one mode-specific hook: it
         must register any newly-visible device_id's MtpBackend into
@@ -97,6 +101,18 @@ class WebContext:
         before the context is even constructed -- see build_real_context()/
         build_mock_context() below)."""
         self.db_path = db_path
+        # Mock stores follow the injected database path. A test server can
+        # never see or modify the real user's backup catalog by accident.
+        self.backup_root = backup_root or db_path.with_name(db_path.stem + "-backups")
+        self.backups = BackupManager(self.backup_root)
+        self._backup_lock = threading.Lock()
+        self._backup_pending: deque[str] = deque()
+        self._backup_jobs: dict[str, dict] = {}
+        self._backup_cancel: dict[str, threading.Event] = {}
+        self._backup_inventory: dict[str, dict] = {}
+        self._restore_reservations: dict[str, dict] = {}
+        self._backup_downloads: dict[str, Path] = {}
+        self._backup_catalog = self._load_backup_catalog()
         from .preparation import PreparationQueue
         self.preparations = PreparationQueue(db_path)
         from ..covers import CoverQueue
@@ -385,7 +401,7 @@ class WebContext:
     # -- background worker ------------------------------------------------
 
     def start_worker(self) -> None:
-        if self._worker_thread is not None:
+        if self._worker_thread is not None and self._worker_thread.is_alive():
             return
         self._stop_event.clear()
         self.preparations.stop.clear()
@@ -395,9 +411,13 @@ class WebContext:
     def stop_worker(self) -> None:
         self.preparations.stop.set()
         self._stop_event.set()
+        with self._backup_lock:
+            for cancellation in self._backup_cancel.values():
+                cancellation.set()
         if self._worker_thread is not None:
             self._worker_thread.join(timeout=10.0)
-            self._worker_thread = None
+            if not self._worker_thread.is_alive():
+                self._worker_thread = None
 
     @property
     def worker_running(self) -> bool:
@@ -467,20 +487,202 @@ class WebContext:
                     conn = db.get_connection(self.db_path)
                     db.init_db(conn)
                 self._touch_worker_heartbeat()
+                processed_backup = False
                 try:
                     self.refresh_devices(conn)
+                    self._expire_restore_reservations()
                     if self.worker_paused.is_set():
                         self._stop_event.wait(1.0)
                         continue
-                    outcome = queue_worker.run_worker_once(conn, self.registry)
-                    self.note_install_job_outcome(conn, outcome)
+                    processed_backup = self.run_backup_once()
+                    with self._backup_lock:
+                        reserved = bool(self._restore_reservations)
+                    if reserved:
+                        # Install queue has no reservation-aware selector.
+                        # Holding it globally is conservative and prevents
+                        # a confirmed install from touching the reserved device.
+                        outcome = None
+                    else:
+                        outcome = queue_worker.run_worker_once(conn, self.registry)
+                        self.note_install_job_outcome(conn, outcome)
                 except Exception:  # noqa: BLE001 -- one bad iteration must not kill the worker thread
                     log.exception("worker loop iteration failed")
                     outcome = None
-                if outcome is None:
+                if outcome is None and not processed_backup:
                     self._stop_event.wait(self.worker_poll_interval_seconds)
         finally:
             conn.close()
+
+    # -- backup commands: HTTP owns DTOs, this same worker owns MTP -------
+
+    def _load_backup_catalog(self) -> dict:
+        return {"snapshots": self.backups.list_snapshots(),
+                "incomplete": self.backups.list_incomplete(),
+                "games": self.backups.list_game_exports()}
+
+    def backup_state(self) -> dict:
+        with self._backup_lock:
+            return {"root": str(self.backup_root),
+                    "inventory": {key: dict(value) for key, value in self._backup_inventory.items()},
+                    "catalog": {key: list(value) for key, value in self._backup_catalog.items()},
+                    "jobs": [dict(row) for row in self._backup_jobs.values()],
+                    "reservations": {key: dict(value) for key, value in self._restore_reservations.items()},
+                    "paused": self.worker_paused.is_set()}
+
+    def enqueue_backup(self, action: str, *, device_id: str | None = None, **params) -> str:
+        allowed = {"inventory_saves", "inventory_games", "create_snapshots", "export_games",
+                   "create_archive", "import_archive", "prepare_restore", "confirm_restore",
+                   "cancel_restore", "restore_diagnostics", "verify_game_download"}
+        if action not in allowed:
+            raise ValueError("unknown backup operation")
+        if device_id is not None and self.registry.get(device_id) is None:
+            raise ValueError("device is not registered")
+        job_id = uuid.uuid4().hex
+        with self._backup_lock:
+            if action == "prepare_restore":
+                if device_id in self._restore_reservations:
+                    raise ValueError("restore already reserves this device")
+                self._restore_reservations[device_id] = {"job_id": job_id, "state": "preparing"}
+            if action in ("confirm_restore", "cancel_restore"):
+                reservation = self._restore_reservations.get(device_id)
+                if reservation is None or reservation.get("plan_id") != params.get("plan_id"):
+                    raise ValueError("restore plan does not reserve this device")
+            self._backup_jobs[job_id] = {"id": job_id, "action": action,
+                                         "device_id": device_id, "params": params,
+                                         "state": "queued", "done": 0, "total": None,
+                                         "result": None, "error": None}
+            self._backup_cancel[job_id] = threading.Event()
+            self._backup_pending.append(job_id)
+        return job_id
+
+    def backup_job(self, job_id: str) -> dict | None:
+        with self._backup_lock:
+            job = self._backup_jobs.get(job_id)
+            return dict(job) if job else None
+
+    def cancel_backup_job(self, job_id: str) -> bool:
+        with self._backup_lock:
+            job = self._backup_jobs.get(job_id)
+            if job is None or job["state"] in ("ready", "failed", "cancelled"):
+                return False
+            self._backup_cancel[job_id].set()
+            return True
+
+    def backup_download(self, token: str) -> Path | None:
+        with self._backup_lock:
+            return self._backup_downloads.get(token)
+
+    def _expire_restore_reservations(self) -> None:
+        now = time.time()
+        with self._backup_lock:
+            expired = [(device_id, item["plan_id"])
+                       for device_id, item in self._restore_reservations.items()
+                       if item.get("expires_at", now + 1) <= now and item.get("plan_id")]
+        for device_id, plan_id in expired:
+            self.backups.cancel_restore(plan_id)
+            with self._backup_lock:
+                if self._restore_reservations.get(device_id, {}).get("plan_id") == plan_id:
+                    self._restore_reservations.pop(device_id, None)
+
+    def run_backup_once(self) -> bool:
+        """Called only by _worker_loop, never from an HTTP request."""
+        with self._backup_lock:
+            if not self._backup_pending:
+                return False
+            job_id = self._backup_pending.popleft()
+            job = self._backup_jobs[job_id]
+            job["state"] = "running"
+            action, device_id, params = job["action"], job["device_id"], job["params"]
+            cancellation = self._backup_cancel[job_id]
+        try:
+            if cancellation.is_set():
+                raise ValueError("backup operation cancelled")
+            backend = self.registry.get(device_id) if device_id else None
+            if backend is not None:
+                backend.connect()
+            progress = lambda done, total: self._set_backup_progress(job_id, done, total)
+            if action == "inventory_saves":
+                result = self.backups.inventory_saves(backend, cancel=cancellation.is_set)
+                with self._backup_lock:
+                    self._backup_inventory.setdefault(device_id, {})["saves"] = result
+            elif action == "inventory_games":
+                result = self.backups.inventory_games(backend, cancel=cancellation.is_set)
+                with self._backup_lock:
+                    self._backup_inventory.setdefault(device_id, {})["games"] = result
+            elif action == "create_snapshots":
+                result = self.backups.create_snapshots(backend, params["paths"],
+                                                       cancel=cancellation.is_set, progress=progress)
+            elif action == "export_games":
+                result = self.backups.export_games(backend, params["paths"],
+                                                   cancel=cancellation.is_set, progress=progress)
+                for item in result:
+                    path = self.backups.game_export_path(item["id"])
+                    with self._backup_lock:
+                        self._backup_downloads[item["id"]] = path
+            elif action == "create_archive":
+                archive_id = uuid.uuid4().hex
+                path = self.backup_root / "archives" / (archive_id + ".zip")
+                self.backups.create_archive(params["snapshot_ids"], path,
+                                            cancel=cancellation.is_set, progress=progress)
+                with self._backup_lock:
+                    self._backup_downloads[archive_id] = path
+                result = {"archive_id": archive_id, "size": path.stat().st_size,
+                          "download_url": "/api/backups/download/" + archive_id}
+            elif action == "import_archive":
+                source = Path(params["source"])
+                try:
+                    result = self.backups.import_archive(source, cancel=cancellation.is_set,
+                                                         progress=progress)
+                finally:
+                    source.unlink(missing_ok=True)
+            elif action == "prepare_restore":
+                result = self.backups.prepare_restore(backend, params["snapshot_id"],
+                                                      cancel=cancellation.is_set, progress=progress)
+                with self._backup_lock:
+                    self._restore_reservations[device_id] = {"job_id": job_id,
+                                                               "plan_id": result["id"],
+                                                               "expires_at": result["expires_at"],
+                                                               "state": "prepared"}
+            elif action == "confirm_restore":
+                try:
+                    result = self.backups.confirm_restore(backend, params["plan_id"],
+                                                          cancel=cancellation.is_set, progress=progress)
+                finally:
+                    with self._backup_lock:
+                        self._restore_reservations.pop(device_id, None)
+            elif action == "cancel_restore":
+                result = {"cancelled": self.backups.cancel_restore(params["plan_id"])}
+                with self._backup_lock:
+                    self._restore_reservations.pop(device_id, None)
+            elif action == "restore_diagnostics":
+                result = self.backups.restore_diagnostics(backend, params["path"])
+            elif action == "verify_game_download":
+                path = self.backups.game_export_path(params["export_id"])
+                with self._backup_lock:
+                    self._backup_downloads[params["export_id"]] = path
+                result = {"download_url": "/api/backups/download/" + params["export_id"]}
+            else:
+                raise ValueError("backup operation is not wired yet")
+            with self._backup_lock:
+                job["result"] = result
+                job["state"] = "ready"
+                self._backup_catalog = self._load_backup_catalog()
+        except Exception as exc:
+            log.exception("backup operation failed")
+            with self._backup_lock:
+                job["error"] = str(exc)
+                job["state"] = "cancelled" if cancellation.is_set() else "failed"
+                if action == "prepare_restore":
+                    self._restore_reservations.pop(device_id, None)
+                if action in ("confirm_restore", "cancel_restore"):
+                    self._restore_reservations.pop(device_id, None)
+                self._backup_catalog = self._load_backup_catalog()
+        return True
+
+    def _set_backup_progress(self, job_id: str, done: int, total: int | None) -> None:
+        with self._backup_lock:
+            self._backup_jobs[job_id]["done"] = done
+            self._backup_jobs[job_id]["total"] = total
 
     # -- library scan (point 16: must not block the UI) --------------------
 
@@ -719,7 +921,9 @@ def _discover_real_devices(registry: queue_worker.DeviceRegistry) -> None:
 
 
 def build_real_context(db_path: Path) -> WebContext:
-    return WebContext(db_path=db_path, registry=queue_worker.DeviceRegistry(), discover_devices=_discover_real_devices)
+    return WebContext(db_path=db_path, registry=queue_worker.DeviceRegistry(),
+                      discover_devices=_discover_real_devices,
+                      backup_root=config.DATA_DIR / "backups")
 
 
 def build_mock_context(db_path: Path, *, device_ids: Optional[list[str]] = None) -> WebContext:
@@ -745,6 +949,14 @@ def build_mock_context(db_path: Path, *, device_ids: Optional[list[str]] = None)
         backend = MockMtpBackend(device_id=device_id, device_name=names.get(device_id, device_id))
         backend.add_storage("SD_CARD", free_bytes=sd_card_free_bytes, total_bytes=sd_card_total_bytes)
         backend.add_storage("SD_INSTALL")
+        saves = backend.add_storage("SAVES", free_bytes=sd_card_free_bytes, total_bytes=sd_card_total_bytes)
+        installed_games = backend.add_storage("INSTALLED_GAMES")
+        saves.ensure_directory("Demo Adventure/Player/Default")
+        saves.write_file("Demo Adventure/Player/Default/progress.dat", b"SwitchAgent mock save progress\n")
+        backend.set_save_identity("SAVES", "Demo Adventure/Player/Default",
+                                  title_id="0100000000010000", user_id="mock-user-1",
+                                  environment_id=device_id + "-nand-1")
+        installed_games.write_file("Demo Adventure [0100000000010000][v0].nsp", b"mock game package\n")
         registry.register(device_id, backend)
 
     def _noop_discover(_registry: queue_worker.DeviceRegistry) -> None:
