@@ -20,9 +20,10 @@ a pre-Stage-5 architecture audit (see docs/STAGE4.1.md):
      exists -- only a file THIS job's own prior send_file call is recorded
      (in manifest.py's progress.json) as having delivered gets skipped;
      anything else found already present is treated as an unresolved
-     conflict, not as proof of a prior successful send. Real MTP gives no
-     cheap way to hash a remote file to prove equivalence, and this
-     codebase deliberately does not pretend otherwise.
+     conflict, not as proof of a prior successful send -- unless reading it
+     back proves it holds exactly the bytes being sent (small files on a
+     real filesystem only; see manifest.py's docstring). A matching name or
+     size is never taken as proof.
 
 One worker, one job, one device at a time (the explicitly allowed minimal
 shape for this stage) -- but nothing here assumes there is only ever one
@@ -650,6 +651,9 @@ def _run_job_transfer(conn: sqlite3.Connection, backend: MtpBackend, job_row: sq
         return JobRunOutcome(job_id=job_id, status="SOURCE_CHANGED", error=error)
 
     delivered = manifest_mod.load_progress(job_id)
+    # Files a previous attempt of this same transfer left half written (see
+    # manifest.inherit_progress) -- the only ones replaced without asking.
+    replaceable = manifest_mod.load_replaceable(job_id)
     bytes_done = sum(f.size for f in manifest.files if f.dest_relative_path in delivered)
     # UI-006 follow-up: bytes_total/bytes_done were previously only ever
     # written at a TERMINAL status (see the DESTINATION_CONFLICT/FAILED/
@@ -679,6 +683,12 @@ def _run_job_transfer(conn: sqlite3.Connection, backend: MtpBackend, job_row: sq
     # (db.py) -- so _process_job() can never be re-entered for a job that
     # already delivered a file as UNVERIFIED in a prior run.
     any_unverified = False
+    # Files found already on the card with exactly these bytes (read back
+    # and hashed by the backend -- see send_file's expected_sha256): done,
+    # without sending them again. Counted for one log line at the end rather
+    # than one per file: a re-run over a 4,625-file folder would otherwise
+    # write 4,625 of them.
+    already_present = 0
 
     for file in manifest.files:
         if file.dest_relative_path in delivered:
@@ -692,7 +702,9 @@ def _run_job_transfer(conn: sqlite3.Connection, backend: MtpBackend, job_row: sq
         # docstring), this is what keeps last_progress_at reflecting "just
         # started sending this file" rather than staying frozen at
         # whenever the job first went RUNNING.
-        db.update_job_status(conn, job_id, "RUNNING", last_progress_at=db.now_iso())
+        db.update_job_status(
+            conn, job_id, "RUNNING", last_progress_at=db.now_iso(), current_file=file.dest_relative_path,
+        )
 
         parent = "/".join(file.dest_relative_path.split("/")[:-1])
         source_path = manifest_mod.resolve_source_path(file, job_id, batch_id=manifest.batch_id)
@@ -727,7 +739,11 @@ def _run_job_transfer(conn: sqlite3.Connection, backend: MtpBackend, job_row: sq
             # MTP round-trips this loop doesn't need.
             result = backend.send_file(
                 storage, file.dest_relative_path, source_path,
-                overwrite=bool(job_row["force_overwrite"]), progress=report_progress,
+                overwrite=bool(job_row["force_overwrite"]) or file.dest_relative_path in replaceable,
+                progress=report_progress,
+                # Only a real filesystem can be read back meaningfully -- DBI's
+                # install node is not one (see mtp/windows.py).
+                expected_sha256=file.sha256 if storage == STORAGE_SD_CARD else None,
             )
         except FileAlreadyExistsError:
             # Exists on the device, but WE have no record (progress.json) of
@@ -764,7 +780,11 @@ def _run_job_transfer(conn: sqlite3.Connection, backend: MtpBackend, job_row: sq
 
         if result.status is TransferStatus.COMPLETED:
             manifest_mod.mark_delivered(job_id, file.dest_relative_path)
-            bytes_done += result.bytes_sent
+            if result.already_present:
+                already_present += 1
+                bytes_done += file.size
+            else:
+                bytes_done += result.bytes_sent
             db.update_job_status(conn, job_id, "RUNNING", last_progress_at=db.now_iso(), bytes_done=bytes_done)
             continue
 
@@ -810,6 +830,11 @@ def _run_job_transfer(conn: sqlite3.Connection, backend: MtpBackend, job_row: sq
         )
         return JobRunOutcome(job_id=job_id, status="DONE_UNVERIFIED")
 
+    if already_present:
+        db.log_job_event(
+            conn, job_id,
+            f"{already_present} file(s) were already on the device with exactly these contents -- not sent again",
+        )
     db.update_job_status(conn, job_id, "DONE", bytes_done=bytes_done, finished_at=db.now_iso())
     db.log_job_event(conn, job_id, f"done, {len(manifest.files)} file(s)")
     return JobRunOutcome(job_id=job_id, status="DONE")

@@ -525,3 +525,70 @@ def test_a_missing_nro_is_said_on_the_card_itself(tmp_path, monkeypatch):
     html = TestClient(create_app(build_mock_context(db_path))).get("/").text
     card = html.split('class="game-group"', 1)[1].split("game-variants", 1)[0]
     assert "Needs sdmc:/switch/mmxregenesis_nx/mmxregenesis_nx.nro" in card
+
+
+
+# ---------------------------------------------------------------------------
+# Retry continues its transfer (2026-09-23): Mega Man's switch/ folder
+# stopped after 613 files; a retry that knew none of them met file #1 on the
+# card and, under "skip", stopped there. A file already there with exactly
+# the same bytes is done either way.
+# ---------------------------------------------------------------------------
+
+def _zuma_sd_job(conn, parent):
+    _zuma(config.LIBRARY_DIR)
+    scanner.scan_library_once(conn)
+    game = _game(services.list_library_view(conn, kind="games"), ZUMA_ID)
+    result = services.create_and_confirm_jobs(conn, [game["sd_files"][0]["id"]], "mock-switch-parent")
+    return result["created"][0]["job_id"]
+
+
+def test_a_retry_carries_on_after_what_its_attempt_delivered(isolated_db):
+    conn, _ = isolated_db
+    parent, registry = _backend()
+    job_id = _zuma_sd_job(conn, parent)
+    files = [f.dest_relative_path for f in manifest_mod.load_manifest(job_id).files]
+    # File 2 of 3 breaks off half-way: the card now holds file 1 and a
+    # half-written file 2 of this transfer's own.
+    parent.arm_failure("partial", storage="SD_CARD", dest_path=files[1])
+    queue_worker.run_worker_once(conn, registry)
+    old = db.get_job(conn, job_id)
+    assert old["status"] in ("FAILED", "INTERRUPTED") and old["current_file"] == files[1]
+
+    retried = services.retry_job(conn, job_id)["new_job_id"]
+    assert manifest_mod.load_progress(retried) == {files[0]}
+    assert manifest_mod.load_replaceable(retried) == {files[1]}
+    _run_worker(conn, registry)
+    assert db.get_job(conn, retried)["status"] == "DONE"
+    tree = parent.storage_tree("SD_CARD")
+    assert tree.read_file("switch/zumaportable/dbc17o.nro") == b"nro"
+    assert tree.read_file("switch/zumaportable/images/advback.jpg") == b"jpg"
+    assert tree.read_file("switch/zumaportable/levels/spiral/spiral.dat") == b"level"
+
+
+def test_files_already_on_the_card_with_the_same_bytes_are_not_a_conflict(isolated_db):
+    conn, _ = isolated_db
+    parent, registry = _backend()
+    job_id = _zuma_sd_job(conn, parent)
+    manifest = manifest_mod.load_manifest(job_id)
+    tree = parent.storage_tree("SD_CARD")
+    first = manifest.files[0]
+    tree.ensure_directory(first.dest_relative_path.rsplit("/", 1)[0])
+    tree.write_file(first.dest_relative_path,
+                    manifest_mod.resolve_source_path(first, job_id, batch_id=manifest.batch_id).read_bytes())
+    _run_worker(conn, registry)
+    assert db.get_job(conn, job_id)["status"] == "DONE"
+    assert any("already on the device" in e["message"] for e in db.list_job_log(conn, job_id))
+
+
+def test_a_different_file_in_the_way_is_still_skipped_as_a_conflict(isolated_db):
+    conn, _ = isolated_db
+    parent, registry = _backend()
+    job_id = _zuma_sd_job(conn, parent)
+    first = manifest_mod.load_manifest(job_id).files[0]
+    tree = parent.storage_tree("SD_CARD")
+    tree.ensure_directory(first.dest_relative_path.rsplit("/", 1)[0])
+    tree.write_file(first.dest_relative_path, b"somebody else's file")
+    _run_worker(conn, registry)
+    assert db.get_job(conn, job_id)["status"] == "DESTINATION_CONFLICT"
+    assert tree.read_file(first.dest_relative_path) == b"somebody else's file"

@@ -155,3 +155,8 @@ the real Zuma / Mega Man layouts, so change a test on purpose or not at all:
   missing `.nro` is said on the card, not discovered on the console.
 - DBI's installed list cannot confirm SD files (like mods): no "On Switch" for
   them, and DBI itself only refreshes that list when reopened on the console.
+- **Thousands of small files over MTP must survive a console that stalls.**
+  One timed-out write reopens the WPD session and retries that file; it does
+  not move the rest of the job to the Shell (25x slower). Retry continues
+  from what the previous attempt delivered, and a file already on the card
+  with exactly the same bytes (read back, hashed) is done, not a conflict.

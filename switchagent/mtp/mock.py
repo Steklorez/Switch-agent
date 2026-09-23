@@ -299,7 +299,7 @@ class MockMtpBackend(MtpBackend):
 
     def send_file(
         self, storage: str, dest_path: str, source_path: Path, *, overwrite: bool = False,
-        progress: Optional[Callable[[int, int], None]] = None,
+        progress: Optional[Callable[[int, int], None]] = None, expected_sha256: Optional[str] = None,
     ) -> TransferResult:
         self._require_connected()
         s = self._get_storage_obj(storage)
@@ -313,6 +313,15 @@ class MockMtpBackend(MtpBackend):
                 f"destination directory for '{dest_path}' does not exist on '{storage}' "
                 f"-- call ensure_directory() first"
             )
+
+        if s.exists(dest_path) and expected_sha256 is not None:
+            if hashlib.sha256(s.read_file(dest_path)).hexdigest() == expected_sha256:
+                self._log_op("SEND_FILE_ALREADY_PRESENT", {"storage": storage, "path": dest_path})
+                return TransferResult(
+                    operation_id=operation_id, status=TransferStatus.COMPLETED, storage=storage,
+                    dest_path=dest_path, bytes_sent=0, bytes_total=source_path.stat().st_size,
+                    already_present=True,
+                )
 
         if s.exists(dest_path) and not overwrite:
             self._log_op("SEND_FILE_REJECTED", {"storage": storage, "path": dest_path, "reason": "already exists"})
