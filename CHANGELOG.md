@@ -7,6 +7,12 @@ Entries are one sentence per change, three to five lines per release, and
 only what a user would notice — no internals, no reasoning, no history.
 Those belong in the commit message. See [CLAUDE.md](CLAUDE.md#how-to-write-an-entry).
 
+## v1.0.15
+
+- A homebrew port is one game now: its `switch/` folder, as an archive like switch.7z or already unpacked, is part of the game's card and is copied to the SD card when you install it.
+- A game whose icon would start a file that none of its files provide says so on its card.
+- Undertale Yellow and other ports with a TITLE_ID of their own show as games, not as DLC of a game that does not exist.
+
 ## v1.0.14
 
 - Installing over a file already on the Switch now follows a Settings choice — skip it or replace it, the same way every time — instead of a Queue card waiting to be clicked.
