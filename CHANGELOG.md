@@ -9,9 +9,10 @@ Those belong in the commit message. See [CLAUDE.md](CLAUDE.md#how-to-write-an-en
 
 ## v1.0.15
 
-- A homebrew port is one game now: its `switch/` folder, as an archive like switch.7z or already unpacked, is part of the game's card and is copied to the SD card when you install it.
-- A game whose icon would start a file that none of its files provide says so on its card.
-- Undertale Yellow and other ports with a TITLE_ID of their own show as games, not as DLC of a game that does not exist.
+- A homebrew port is one game now: its `switch/` folder, archived or unpacked, is part of the game's card and is copied to the SD card on install.
+- If a game's icon would start a file none of its files provide, its card says so.
+- Homebrew ports with a TITLE_ID of their own show as games, not as DLC of a missing game.
+- Card tags wrap onto a second line instead of scrolling sideways.
 
 ## v1.0.14
 
