@@ -134,6 +134,21 @@ def read_path(path: str) -> str:
     return path
 
 
+def save_write_path(storage: str, save_root: str, path: str) -> tuple[str, str]:
+    """Validate an object strictly inside an existing DBI save directory."""
+    from .errors import InvalidOperationError
+
+    root = read_path(save_root)
+    target = read_path(path)
+    parts = root.split('/')
+    if (storage != 'SAVES' or len(parts) != 3
+            or parts[0] not in ('Installed games', 'Uninstalled games')
+            or not all(parts) or not target.startswith(root + '/')
+            or len(target.split('/')) < 4):
+        raise InvalidOperationError('save write must stay inside an existing DBI save folder')
+    return root, target
+
+
 class MtpBackend(ABC):
     """Everything the rest of SwitchAgent is allowed to know about talking
     to a Switch. No method here does anything Windows-specific or
@@ -154,7 +169,8 @@ class MtpBackend(ABC):
         return token
 
     def capabilities(self) -> dict:
-        return {'read_files': False, 'exact_restore': False, 'verified_save_identity': False}
+        return {'read_files': False, 'exact_restore': False,
+                'verified_save_identity': False, 'save_write': False}
 
     def list_directory(self, storage, path='', *, expected_session=None) -> list[MtpEntry]:
         from .errors import UnsupportedOperationError
@@ -183,6 +199,20 @@ class MtpBackend(ABC):
                           expected_session, cancel=None, progress=None) -> None:
         from .errors import UnsupportedOperationError
         raise UnsupportedOperationError('exact save restoration has not been qualified')
+
+    def delete_save_object(self, storage, save_root, path, *, expected_session,
+                           recursive=False) -> None:
+        from .errors import UnsupportedOperationError
+        raise UnsupportedOperationError('save deletion is unavailable')
+
+    def create_save_directory(self, storage, save_root, path, *, expected_session) -> None:
+        from .errors import UnsupportedOperationError
+        raise UnsupportedOperationError('save directory creation is unavailable')
+
+    def write_save_file(self, storage, save_root, path, source_path, *, replace,
+                        expected_session, cancel=None, progress=None) -> None:
+        from .errors import UnsupportedOperationError
+        raise UnsupportedOperationError('save file writing is unavailable')
 
     # -- connection lifecycle ------------------------------------------------
 

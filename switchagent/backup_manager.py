@@ -44,6 +44,8 @@ class BackupLimits:
 
 FORMAT_VERSION = 1
 _SAVE_GROUPS = frozenset({'Installed games', 'Uninstalled games'})
+_NON_PROFILE_SAVE_TYPES = frozenset({'system', 'device', 'bcat', 'cache',
+                                     'temporary', 'systembcat'})
 _CHUNK = 1024 * 1024
 _RESERVED = re.compile(
     r'^(?:CON|PRN|AUX|NUL|CONIN\$|CONOUT\$|'
@@ -592,6 +594,7 @@ class BackupManager:
                 originals = set()
                 for snapshot in snapshots:
                     self._validate_file_table(snapshot)
+                    self._restore_origin(snapshot)
                     if snapshot.get('state') != 'ready':
                         raise BackupError('archive contains a non-ready snapshot')
                     old_id = snapshot.get('id')
@@ -680,34 +683,130 @@ class BackupManager:
         return imported
 
     @staticmethod
-    def _identity_matches(source: dict, target: dict) -> bool:
-        fields = ('title_id', 'user_id', 'environment_id', 'save_type')
-        return (source.get('verified') is True and target.get('verified') is True
-                and source.get('save_type') == target.get('save_type') == 'Account'
-                and all(source.get(k) and source[k] == target.get(k) for k in fields))
+    def _save_class(profile: str) -> str:
+        folded = profile.casefold()
+        return folded if folded in _NON_PROFILE_SAVE_TYPES else 'profile'
+
+    @staticmethod
+    def _declared_type_matches(identity: dict, save_class: str) -> bool:
+        declared = identity.get('save_type')
+        if declared is None:
+            return identity.get('verified') is not True
+        if not isinstance(declared, str):
+            return False
+        return (declared == 'Account' if save_class == 'profile'
+                else declared.casefold() == save_class)
+
+    @staticmethod
+    def _restore_origin(source: dict) -> dict:
+        """Validate provenance shape; an imported manifest remains unsigned."""
+        origin = source.get('origin')
+        if not isinstance(origin, dict) or set(origin) != {
+                'device_fingerprint', 'group', 'game', 'profile'}:
+            raise BackupError('restore source origin is missing or malformed')
+        if (not isinstance(origin['device_fingerprint'], str)
+                or not re.fullmatch(r'[0-9a-f]{16}', origin['device_fingerprint'])
+                or origin['group'] not in _SAVE_GROUPS
+                or not all(_device_part(origin[key]) for key in ('game', 'profile'))
+                or source.get('source_path') != '/'.join(
+                    (origin['group'], origin['game'], origin['profile']))):
+            raise BackupError('restore source origin is missing or malformed')
+        return origin
+
+    @staticmethod
+    def _restore_identity_matches(source: dict, target: dict, *, cross_profile: bool) -> bool:
+        if not isinstance(source, dict) or not isinstance(target, dict):
+            return False
+        source_verified = source.get('verified') is True
+        target_verified = target.get('verified') is True
+        if source_verified != target_verified:
+            return False
+        if source_verified:
+            fields = ('title_id', 'environment_id', 'save_type')
+            if not all(source.get(field) and source[field] == target.get(field)
+                       for field in fields):
+                return False
+            if not source.get('user_id') or not target.get('user_id'):
+                return False
+            if not cross_profile and source['user_id'] != target['user_id']:
+                return False
+        else:
+            # Values in an unverified identity are not treated as proof, but a
+            # contradiction is still reason to refuse the write.
+            if any((source.get(field) or target.get(field))
+                   and source.get(field) != target.get(field)
+                   for field in ('title_id', 'environment_id', 'save_type')):
+                return False
+            if (not cross_profile and (source.get('user_id') or target.get('user_id'))
+                    and source.get('user_id') != target.get('user_id')):
+                return False
+        return True
+
+    def _restore_target(self, backend: MtpBackend, source: dict, target_path: str,
+                        session: str) -> tuple[dict, bool, dict]:
+        from .mtp.windows import device_fingerprint
+        origin = self._restore_origin(source)
+        parts = target_path.split('/')
+        if (len(parts) != 3 or parts[0] not in _SAVE_GROUPS
+                or not all(_device_part(part) for part in parts)
+                or parts[:2] != [origin['group'], origin['game']]):
+            raise BackupError('restore target must be an existing save of the same game')
+        if device_fingerprint(backend.device_id) != origin['device_fingerprint']:
+            raise BackupError('restore source belongs to another console')
+        source_class = self._save_class(origin['profile'])
+        if source_class != self._save_class(parts[2]):
+            raise BackupError('restore target save type differs from source')
+        cross_profile = parts[2] != origin['profile']
+        if cross_profile and source_class != 'profile':
+            raise BackupError('restore target save type differs from source')
+        entry = backend.stat('SAVES', target_path, expected_session=session)
+        if not entry.is_dir:
+            raise BackupError('restore target is not an existing save folder')
+        identity = backend.save_identity('SAVES', target_path,
+                                         expected_session=session)
+        if (not self._declared_type_matches(source['identity'], source_class)
+                or not self._declared_type_matches(identity, self._save_class(parts[2]))):
+            raise BackupError('restore target save type differs from source')
+        if backend.capabilities().get('verified_save_identity') and (
+                source['identity'].get('verified') is not True
+                or identity.get('verified') is not True):
+            raise BackupError('save identity is unknown or differs from target')
+        if not self._restore_identity_matches(source['identity'], identity,
+                                              cross_profile=cross_profile):
+            raise BackupError('save identity is unknown or differs from target')
+        return identity, cross_profile, origin
 
     def restore_diagnostics(self, backend: MtpBackend, path: str, *,
                             storage: str = 'SAVES') -> dict:
-        """Read-only explanation of the adapter's actual restore evidence."""
+        """Read-only target/adapter check; source and hardware remain unproven."""
         session = backend.session_token
-        identity = backend.save_identity(storage, read_path(path),
-                                         expected_session=session)
+        path = read_path(path)
         capabilities = backend.capabilities()
         missing = []
         if storage != 'SAVES':
             missing.append('SAVES storage')
-        for field in ('title_id', 'user_id', 'environment_id'):
-            if not identity.get(field):
-                missing.append(field)
-        if identity.get('save_type') != 'Account':
-            missing.append('Account save type')
-        if identity.get('verified') is not True or not capabilities.get('verified_save_identity'):
-            missing.append('verified adapter identity')
-        if not capabilities.get('exact_restore'):
-            missing.append('verified exact restore capability')
+        parts = path.split('/')
+        if (len(parts) != 3 or parts[0] not in _SAVE_GROUPS
+                or not all(_device_part(part) for part in parts)):
+            missing.append('existing DBI save folder')
+        entry = backend.stat(storage, path, expected_session=session)
+        if not entry.is_dir:
+            missing.append('existing DBI save folder')
+        identity = backend.save_identity(storage, path, expected_session=session)
+        if capabilities.get('verified_save_identity'):
+            for field in ('title_id', 'user_id', 'environment_id', 'save_type'):
+                if not identity.get(field):
+                    missing.append(field)
+            if identity.get('verified') is not True:
+                missing.append('verified adapter identity')
+        if not capabilities.get('save_write'):
+            missing.append('MTP save write capability')
         return {'eligible': not missing, 'missing': missing,
                 'identity': identity, 'capabilities': capabilities,
-                'session_token': session}
+                'session_token': session,
+                'eligibility_scope': 'target-and-adapter-only',
+                'source_origin_and_content_pending': True,
+                'hardware_qualified': False}
 
     @staticmethod
     def _content_digest(files: list[dict], directories: list[str]) -> str:
@@ -716,8 +815,8 @@ class BackupManager:
         return hashlib.sha256(json.dumps(payload, sort_keys=True,
                                          separators=(',', ':')).encode('utf-8')).hexdigest()
 
-    def _fingerprint_device_tree(self, backend: MtpBackend, path: str, session: str,
-                                 *, cancel=None) -> str:
+    def _read_device_tree(self, backend: MtpBackend, path: str, session: str,
+                          *, cancel=None) -> tuple[str, list[dict], list[str]]:
         files, directories = self._enumerate_tree(backend, 'SAVES', path, session, cancel)
         parent = self.root / '.partial'
         _ensure_plain_path(parent)
@@ -740,39 +839,49 @@ class BackupManager:
                     raise BackupError('actual target size limit exceeded')
                 total += size
                 fingerprints.append({'path': relative, 'size': size, 'sha256': digest})
-        return self._content_digest(fingerprints, directories)
+        return self._content_digest(fingerprints, directories), fingerprints, directories
+
+    def _fingerprint_device_tree(self, backend: MtpBackend, path: str, session: str,
+                                 *, cancel=None) -> str:
+        return self._read_device_tree(backend, path, session, cancel=cancel)[0]
 
     def prepare_restore(self, backend: MtpBackend, snapshot_id: str, *,
                         target_path: str | None = None, cancel=None,
                         progress=None) -> dict:
         """Make a prebackup and one-use confirmation plan, before any write."""
-        if not backend.capabilities().get('exact_restore') \
-                or not backend.capabilities().get('verified_save_identity'):
-            raise UnsupportedOperationError('this adapter cannot verify exact restore identity and semantics')
+        if not backend.capabilities().get('save_write'):
+            raise UnsupportedOperationError('this adapter cannot write a save through MTP')
         source = self._manifest_for(snapshot_id)
         self._verify_snapshot(source, cancel)
         target_path = read_path(target_path or source['source_path'])
-        if target_path != source['source_path']:
-            raise BackupError('restore target differs from original save path')
         session = backend.session_token
-        target = backend.save_identity('SAVES', target_path, expected_session=session)
-        if not self._identity_matches(source['identity'], target):
-            raise BackupError('save identity is unknown or differs from target')
+        target, cross_profile, origin = self._restore_target(
+            backend, source, target_path, session)
         size = sum(item['size'] for item in source['files'])
-        free = backend.get_storage('SAVES').free_bytes
+        storage = backend.get_storage('SAVES')
+        if not storage.writable:
+            raise BackupError('save storage is read-only')
+        free = storage.free_bytes
         if free is not None and free < size:
             raise BackupError('insufficient target free space')
         for existing in self._plans.values():
             if existing['device_id'] == backend.device_id and existing['expires_at'] > time.time():
                 raise BackupError('another restore plan already reserves this device')
         prebackup = self.create_snapshot(backend, target_path, cancel=cancel, progress=progress)
-        if not self._identity_matches(source['identity'], prebackup['identity']):
+        if prebackup['identity'] != target or self._restore_origin(prebackup) != {
+                'device_fingerprint': origin['device_fingerprint'],
+                'group': origin['group'], 'game': origin['game'],
+                'profile': target_path.split('/')[2]}:
             raise BackupError('target identity changed while making prebackup')
         plan_id = uuid.uuid4().hex
         plan = {'id': plan_id, 'snapshot_id': snapshot_id,
                 'prebackup_id': prebackup['id'], 'target_path': target_path,
                 'device_id': backend.device_id, 'session_token': session,
                 'identity': target, 'expires_at': time.time() + 600,
+                'cross_profile': cross_profile,
+                'requires_profile_confirmation': cross_profile,
+                'target_profile': target_path.split('/')[2],
+                'origin_assurance': 'unsigned-manifest',
                 'source_digest': self._content_digest(source['files'], source['directories']),
                 'target_digest': self._content_digest(prebackup['files'], prebackup['directories'])}
         self._plans[plan_id] = plan
@@ -786,18 +895,21 @@ class BackupManager:
             self._record('restore', 'cancelled', plan_id=plan_id)
         return existed
 
-    def confirm_restore(self, backend: MtpBackend, plan_id: str, *, cancel=None,
+    def confirm_restore(self, backend: MtpBackend, plan_id: str, *,
+                        confirm_profile: str | None = None, cancel=None,
                         progress=None) -> dict:
-        """Consume the plan, revalidate bytes and target, exact-replace, read back."""
-        plan = self._plans.pop(plan_id, None)
+        """Consume a confirmed plan, revalidate, apply a diff, and read back."""
+        plan = self._plans.get(plan_id)
         if plan is None:
             raise BackupError('restore plan is absent or already consumed')
+        if plan['cross_profile'] and confirm_profile != plan['target_profile']:
+            raise BackupError('enter the exact target profile name to confirm restore')
+        self._plans.pop(plan_id)
         _check_cancel(cancel)
         if time.time() >= plan['expires_at'] or backend.device_id != plan['device_id'] \
                 or backend.session_token != plan['session_token']:
             raise BackupError('restore plan expired or connection changed')
-        if not backend.capabilities().get('exact_restore') \
-                or not backend.capabilities().get('verified_save_identity'):
+        if not backend.capabilities().get('save_write'):
             raise UnsupportedOperationError('restore capability is no longer available')
         source = self._manifest_for(plan['snapshot_id'])
         prebackup = self._manifest_for(plan['prebackup_id'])
@@ -806,9 +918,9 @@ class BackupManager:
         if self._content_digest(source['files'], source['directories']) != plan['source_digest'] \
                 or self._content_digest(prebackup['files'], prebackup['directories']) != plan['target_digest']:
             raise BackupError('restore source or prebackup changed')
-        identity = backend.save_identity('SAVES', plan['target_path'],
-                                         expected_session=plan['session_token'])
-        if identity != plan['identity'] or not self._identity_matches(source['identity'], identity):
+        identity, cross_profile, _ = self._restore_target(
+            backend, source, plan['target_path'], plan['session_token'])
+        if identity != plan['identity'] or cross_profile != plan['cross_profile']:
             raise BackupError('target identity changed')
         current_digest = self._fingerprint_device_tree(backend, plan['target_path'],
                                                        plan['session_token'], cancel=cancel)
@@ -818,16 +930,19 @@ class BackupManager:
             self._verify_snapshot(source, cancel)
         except BackupError as exc:
             raise BackupError('restore source changed before write') from exc
-        identity = backend.save_identity('SAVES', plan['target_path'],
-                                         expected_session=plan['session_token'])
-        if identity != plan['identity'] or not self._identity_matches(source['identity'], identity):
+        identity, cross_profile, _ = self._restore_target(
+            backend, source, plan['target_path'], plan['session_token'])
+        if identity != plan['identity'] or cross_profile != plan['cross_profile']:
             raise BackupError('target identity changed before write')
         _check_cancel(cancel)
         size = sum(item['size'] for item in source['files'])
-        free = backend.get_storage('SAVES').free_bytes
+        storage = backend.get_storage('SAVES')
+        if not storage.writable:
+            raise BackupError('save storage is read-only')
+        free = storage.free_bytes
         if free is not None and free < size:
             raise BackupError('insufficient target free space')
-        final_target_digest = self._fingerprint_device_tree(
+        final_target_digest, target_files, target_directories = self._read_device_tree(
             backend, plan['target_path'], plan['session_token'], cancel=cancel)
         if final_target_digest != plan['target_digest']:
             raise BackupError('target progress changed before write')
@@ -835,22 +950,58 @@ class BackupManager:
             self._verify_snapshot(source, cancel)
         except BackupError as exc:
             raise BackupError('restore source changed before write') from exc
-        identity = backend.save_identity('SAVES', plan['target_path'],
-                                         expected_session=plan['session_token'])
-        if identity != plan['identity'] or not self._identity_matches(source['identity'], identity):
+        identity, cross_profile, _ = self._restore_target(
+            backend, source, plan['target_path'], plan['session_token'])
+        if identity != plan['identity'] or cross_profile != plan['cross_profile'] \
+                or backend.session_token != plan['session_token']:
             raise BackupError('target identity changed before write')
+        source_files = {item['path']: item for item in source['files']}
+        current_files = {item['path']: item for item in target_files}
+        stale_files = sorted(current_files.keys() - source_files.keys())
+        stale_directories = sorted(set(target_directories) - set(source['directories']),
+                                   key=lambda value: (-value.count('/'), value))
+        new_directories = sorted(set(source['directories']) - set(target_directories),
+                                 key=lambda value: (value.count('/'), value))
+        changed_files = [item for item in source['files']
+                         if current_files.get(item['path']) != item]
+        save_root = plan['target_path']
+        session = plan['session_token']
         # All checks above precede the first possible device write. Any failure
         # below must be reported as an uncertain target; no retry or rollback.
         try:
-            backend.replace_save_tree('SAVES', plan['target_path'],
-                                      self._snapshot_dir(source['id']) / 'files',
-                                      expected_identity=identity,
-                                      expected_session=plan['session_token'],
-                                      cancel=cancel, progress=progress)
+            for relative in stale_files:
+                _check_cancel(cancel)
+                backend.delete_save_object('SAVES', save_root, save_root + '/' + relative,
+                                           expected_session=session, recursive=False)
+            for relative in stale_directories:
+                _check_cancel(cancel)
+                backend.delete_save_object('SAVES', save_root, save_root + '/' + relative,
+                                           expected_session=session, recursive=False)
+            for relative in new_directories:
+                _check_cancel(cancel)
+                backend.create_save_directory('SAVES', save_root, save_root + '/' + relative,
+                                              expected_session=session)
+            done = 0
+            total = sum(item['size'] for item in changed_files)
+            for item in changed_files:
+                _check_cancel(cancel)
+                relative = item['path']
+                backend.write_save_file(
+                    'SAVES', save_root, save_root + '/' + relative,
+                    self._snapshot_dir(source['id']) / 'files' / Path(*relative.split('/')),
+                    replace=relative in current_files, expected_session=session,
+                    cancel=cancel,
+                    progress=(lambda received, _total, offset=done:
+                              progress(offset + received, total)) if progress else None)
+                done += item['size']
+                if progress:
+                    progress(done, total)
             readback = self._fingerprint_device_tree(backend, plan['target_path'],
                                                      plan['session_token'], cancel=cancel)
             if readback != plan['source_digest']:
                 raise BackupError('restore readback differs from source')
+            if self._restore_target(backend, source, save_root, session)[0] != identity:
+                raise BackupError('target identity changed during restore')
         except BaseException as exc:
             try:
                 self._record('restore', 'unknown', plan_id=plan_id,

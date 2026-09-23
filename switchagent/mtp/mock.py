@@ -20,13 +20,14 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Optional
 
-from .base import DeviceInfo, MtpBackend, MtpEntry, StorageInfo, TransferResult, TransferStatus, read_path
+from .base import DeviceInfo, MtpBackend, MtpEntry, StorageInfo, TransferResult, TransferStatus, read_path, save_write_path
 from .errors import (
     DestinationNotFoundError,
     DeviceDisconnectedError,
     DeviceNotFoundError,
     FileAlreadyExistsError,
     InvalidOperationError,
+    OperationCancelledError,
     StorageNotFoundError,
     TransferFailedError,
 )
@@ -155,6 +156,7 @@ class MockMtpBackend(MtpBackend):
         self._log_seq = 0
         self._transfers: dict[str, TransferResult] = {}
         self._armed_faults: list[_ArmedFault] = []
+        self._save_faults: list[tuple[str, str, Optional[str]]] = []
         self._storage_overrides: dict[str, str] = {}
 
     # -- test setup / inspection (mock-only, not part of MtpBackend) --------
@@ -194,6 +196,22 @@ class MockMtpBackend(MtpBackend):
         if mode not in _FAULT_MODES:
             raise ValueError(f"unknown fault mode: {mode!r}, expected one of {_FAULT_MODES}")
         self._armed_faults.append(_ArmedFault(mode, storage, dest_path))
+
+    def arm_save_failure(self, action: str, *, mode: str = 'error', path: Optional[str] = None) -> None:
+        """One-shot fault for delete/create/write; write also supports partial."""
+        if action not in ('delete', 'create', 'write') or mode not in ('error', 'disconnect', 'partial'):
+            raise ValueError('unknown save fault')
+        self._save_faults.append((action, mode, path))
+
+    def _save_fault(self, action: str, path: str) -> Optional[str]:
+        for index, (wanted, mode, wanted_path) in enumerate(self._save_faults):
+            if wanted == action and wanted_path in (None, path):
+                self._save_faults.pop(index)
+                if mode == 'disconnect':
+                    self.simulate_disconnect()
+                    raise DeviceDisconnectedError('mock disconnected during save write; target state unknown')
+                return mode
+        return None
 
     @property
     def operation_log(self) -> list[LogEntry]:
@@ -253,7 +271,80 @@ class MockMtpBackend(MtpBackend):
         return self._connected
 
     def capabilities(self):
-        return {'read_files': True, 'exact_restore': True, 'verified_save_identity': True}
+        return {'read_files': True, 'exact_restore': True,
+                'verified_save_identity': True, 'save_write': True}
+
+    def _save_write_tree(self, storage, save_root, path, expected_session):
+        if not expected_session:
+            raise InvalidOperationError('save write requires a pinned session')
+        self._check_read_session(expected_session)
+        root, target = save_write_path(storage, save_root, path)
+        tree = self._get_storage_obj(storage)
+        if not tree.writable or not tree.is_dir(root):
+            raise InvalidOperationError('save root is missing or not writable')
+        return tree, target
+
+    def delete_save_object(self, storage, save_root, path, *, expected_session,
+                           recursive=False) -> None:
+        if not isinstance(recursive, bool):
+            raise InvalidOperationError('recursive must be explicit boolean')
+        tree, target = self._save_write_tree(storage, save_root, path, expected_session)
+        node = tree.nodes.get(target)
+        if node is None:
+            raise DestinationNotFoundError(target)
+        children = [key for key in tree.nodes if key.startswith(target + '/')]
+        if children and not recursive:
+            raise InvalidOperationError('directory is not empty')
+        self._log_op('DELETE_SAVE_OBJECT', {'storage': storage, 'path': target,
+                                            'recursive': recursive})
+        if self._save_fault('delete', target):
+            raise TransferFailedError('mock save delete failed; target state unknown')
+        for key in (target, *children):
+            tree.delete(key)
+
+    def create_save_directory(self, storage, save_root, path, *, expected_session) -> None:
+        tree, target = self._save_write_tree(storage, save_root, path, expected_session)
+        parent = target.rsplit('/', 1)[0]
+        if not tree.is_dir(parent):
+            raise DestinationNotFoundError(parent)
+        if tree.exists(target):
+            raise FileAlreadyExistsError(target)
+        self._log_op('CREATE_SAVE_DIRECTORY', {'storage': storage, 'path': target})
+        if self._save_fault('create', target):
+            raise TransferFailedError('mock save directory creation failed; target state unknown')
+        tree.ensure_directory(target)
+
+    def write_save_file(self, storage, save_root, path, source_path, *, replace,
+                        expected_session, cancel=None, progress=None) -> None:
+        from .reading import is_link_or_reparse
+
+        if not isinstance(replace, bool):
+            raise InvalidOperationError('replace must be explicit boolean')
+        tree, target = self._save_write_tree(storage, save_root, path, expected_session)
+        parent = target.rsplit('/', 1)[0]
+        if not tree.is_dir(parent):
+            raise DestinationNotFoundError(parent)
+        existing = tree.nodes.get(target)
+        if existing is not None and (existing.is_dir or not replace):
+            raise FileAlreadyExistsError(target)
+        source = Path(source_path)
+        if not source.is_file() or any(is_link_or_reparse(item) for item in (source, *source.parents)):
+            raise InvalidOperationError('restore source is not a regular unlinked file')
+        if cancel and cancel():
+            raise OperationCancelledError('save write cancelled before transfer')
+        data = source.read_bytes()
+        self._check_read_session(expected_session)
+        self._log_op('WRITE_SAVE_FILE', {'storage': storage, 'path': target,
+                                         'replace': replace, 'bytes': len(data)})
+        fault = self._save_fault('write', target)
+        if fault == 'partial':
+            tree.write_file(target, data[:len(data) // 2])
+            raise TransferFailedError('mock partial save write; target state unknown')
+        if fault:
+            raise TransferFailedError('mock save write failed; target state unknown')
+        tree.write_file(target, data)
+        if progress:
+            progress(len(data), len(data))
 
     def set_save_identity(self, storage, path, *, title_id, user_id, environment_id,
                           save_type='Account', verified=True):

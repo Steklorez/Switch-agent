@@ -688,8 +688,145 @@ class RealMtpBackend(MtpBackend):
         return self._connected
 
     def capabilities(self):
+        save_write = False
+        if self.is_connected:
+            session = self._wpd_session()
+            if session is not None:
+                try:
+                    save_write = len(self._known_save_storages(session)) == 1
+                except Exception:
+                    save_write = False
         return {'read_files': not self._wpd_unavailable, 'exact_restore': False,
-                'verified_save_identity': False}
+                'verified_save_identity': False,
+                'save_write': save_write}
+
+    def _known_save_storages(self, session):
+        return [object_id for object_id, raw_name in session.storages()
+                if (logical_storage_name(raw_name) == 'SAVES'
+                    and resolve_storage_name(raw_name, self._storage_overrides) == 'SAVES')]
+
+    def _save_write_context(self, storage, save_root, path, expected_session):
+        from .base import save_write_path
+        from .errors import AmbiguousPathError, UnsupportedOperationError
+
+        if not expected_session:
+            raise InvalidOperationError('save write requires a pinned session')
+        root, target = save_write_path(storage, save_root, path)
+        token = self._check_read_session(expected_session)
+        session = self._wpd_session()
+        if session is None:
+            raise UnsupportedOperationError('WPD save writing is unavailable; no Shell fallback')
+        roots = self._known_save_storages(session)
+        if not roots:
+            raise UnsupportedOperationError('DBI Saves storage is not uniquely identified')
+        if len(roots) != 1:
+            raise AmbiguousPathError('multiple DBI Saves storages')
+        root_id = session.resolve_read_path(roots[0], root)
+        props = wpd.read_props(session._properties, root_id)
+        if props.get(str(wpd.WPD_OBJECT_CONTENT_TYPE)) != str(wpd.WPD_CONTENT_TYPE_FOLDER):
+            raise InvalidOperationError('save root is not a known directory')
+        parent_path, name = target.rsplit('/', 1)
+        parent_relative = parent_path[len(root):].lstrip('/')
+        parent_id = session.resolve_read_path(root_id, parent_relative)
+        parent_props = wpd.read_props(session._properties, parent_id)
+        if parent_props.get(str(wpd.WPD_OBJECT_CONTENT_TYPE)) != str(wpd.WPD_CONTENT_TYPE_FOLDER):
+            raise InvalidOperationError('save parent is not a known directory')
+        return session, root_id, parent_id, name, target, token
+
+    @staticmethod
+    def _save_child(session, parent_id, name):
+        from .errors import AmbiguousPathError
+
+        matches = [(obj, props) for obj, props in session.children(parent_id)
+                   if wpd.object_name(props) == name]
+        if len(matches) > 1:
+            raise AmbiguousPathError(f'ambiguous save object: {name}')
+        return matches[0] if matches else None
+
+    def _save_failure(self, exc):
+        if isinstance(exc, wpd.ComError):
+            self.disconnect()
+            raise TransferFailedError(f'{exc}; save target state unknown') from exc
+        self._read_failure(exc)
+
+    def delete_save_object(self, storage, save_root, path, *, expected_session,
+                           recursive=False) -> None:
+        try:
+            if not isinstance(recursive, bool):
+                raise InvalidOperationError('recursive must be explicit boolean')
+            session, _, parent_id, name, target, token = self._save_write_context(
+                storage, save_root, path, expected_session)
+            found = self._save_child(session, parent_id, name)
+            if found is None:
+                raise DestinationNotFoundError(target)
+            entry = self._read_entry(session, target, found[0], found[1], token)
+            if not entry.metadata['type_known']:
+                raise InvalidOperationError('save object type is not known')
+            if entry.is_dir and not recursive and session.children(found[0]):
+                raise InvalidOperationError('save directory is not empty')
+            session.delete_save_object(parent_id, found[0], recursive=recursive)
+            self._check_read_session(token)
+            if self._save_child(session, parent_id, name) is not None:
+                raise TransferFailedError('save object remains after delete; target state unknown')
+        except Exception as exc:
+            self._save_failure(exc)
+
+    def create_save_directory(self, storage, save_root, path, *, expected_session) -> None:
+        try:
+            session, _, parent_id, name, target, token = self._save_write_context(
+                storage, save_root, path, expected_session)
+            if self._save_child(session, parent_id, name) is not None:
+                raise FileAlreadyExistsError(target)
+            session.create_save_directory(parent_id, name)
+            self._check_read_session(token)
+            found = self._save_child(session, parent_id, name)
+            if found is None or found[1].get(str(wpd.WPD_OBJECT_CONTENT_TYPE)) != str(wpd.WPD_CONTENT_TYPE_FOLDER):
+                raise TransferFailedError('save directory not confirmed; target state unknown')
+        except Exception as exc:
+            self._save_failure(exc)
+
+    def write_save_file(self, storage, save_root, path, source_path, *, replace,
+                        expected_session, cancel=None, progress=None) -> None:
+        from .reading import is_link_or_reparse
+
+        try:
+            source = Path(source_path)
+            if not source.is_file() or any(is_link_or_reparse(item) for item in (source, *source.parents)):
+                raise InvalidOperationError('restore source is not a regular unlinked file')
+            if not isinstance(replace, bool):
+                raise InvalidOperationError('replace must be explicit boolean')
+            if cancel and cancel():
+                from .errors import OperationCancelledError
+                raise OperationCancelledError('save write cancelled before transfer')
+            session, root_id, parent_id, name, target, token = self._save_write_context(
+                storage, save_root, path, expected_session)
+            found = self._save_child(session, parent_id, name)
+            if found is not None:
+                entry = self._read_entry(session, target, found[0], found[1], token)
+                if not replace or entry.is_dir or not entry.metadata['type_known']:
+                    raise FileAlreadyExistsError(target)
+                session.delete_save_object(parent_id, found[0], recursive=False)
+                # Deletion is itself a write. Re-resolve before file creation.
+                fresh = self._save_write_context(storage, save_root, path, token)
+                session, new_root, new_parent, name, target, token = fresh
+                if (new_root, new_parent) != (root_id, parent_id):
+                    raise TransferFailedError('save parent changed after delete; target state unknown')
+                parent_id = new_parent
+                if self._save_child(session, parent_id, name) is not None:
+                    raise TransferFailedError('old save file remains after delete; target state unknown')
+            if cancel and cancel():
+                from .errors import OperationCancelledError
+                raise OperationCancelledError('save write cancelled before transfer')
+            session.write_save_file(parent_id, name, source,
+                                    check_session=lambda: self._check_read_session(token),
+                                    cancel=cancel, progress=progress)
+            self._check_read_session(token)
+            found = self._save_child(session, parent_id, name)
+            if (found is None or found[1].get(str(wpd.WPD_OBJECT_CONTENT_TYPE)) == str(wpd.WPD_CONTENT_TYPE_FOLDER)
+                    or found[1].get(str(wpd.WPD_OBJECT_SIZE)) != source.stat().st_size):
+                raise TransferFailedError('save file not confirmed after commit; target state unknown')
+        except Exception as exc:
+            self._save_failure(exc)
 
     def _read_objects(self, storage, path, expected_session):
         from .base import read_path

@@ -21,8 +21,8 @@ No third-party dependency: this is plain ctypes over the COM vtables, so it
 survives PyInstaller packaging unchanged (comtypes' runtime code generation
 does not).
 
-READ-ONLY apart from create_file_object()/create_folder(), which are the
-only two functions here that write anything to a device.
+Save restore also uses explicit WPD delete/create/write primitives. Their
+callers constrain every object to an existing DBI save folder.
 """
 from __future__ import annotations
 
@@ -126,6 +126,8 @@ IID_IPortableDeviceProperties = "{7F6D695C-03DF-4439-A809-59266BEEE3A6}"
 IID_IPortableDeviceResources = "{FD8878AC-D841-4D17-891C-E6829CDB6934}"
 IID_IStream = "{0000000C-0000-0000-C000-000000000046}"
 IID_IPortableDeviceDataStream = "{88E04DB3-1012-4D64-9996-F703A950D3F4}"
+CLSID_PortableDevicePropVariantCollection = "{08A99E2F-6D6D-4B80-AF5A-BAF2BCBE4CB9}"
+IID_IPortableDevicePropVariantCollection = "{89B2E422-4F1B-4316-BCEF-A44AFEA83EB3}"
 
 # -- Well-known WPD property keys (verified against the device by dump) ------
 _OBJ = "{EF6B490D-5CD8-437A-AFFC-DA8B60EE4A3C}"
@@ -464,6 +466,47 @@ def stream_commit(stream):
     vcall(stream, 8, (DWORD,), 0, what="IStream::Commit")
 
 
+def stream_revert(stream):
+    vcall(stream, 9, (), what="IStream::Revert")
+
+
+def delete_object(content, object_id, *, recursive=False):
+    """Delete exactly one WPD object and check its individual HRESULT."""
+    ids = co_create(CLSID_PortableDevicePropVariantCollection,
+                    IID_IPortableDevicePropVariantCollection)
+    try:
+        variant = PROPVARIANT()
+        variant.vt = 31  # VT_LPWSTR
+        name = ctypes.create_unicode_buffer(object_id)
+        pointer = ctypes.addressof(name)
+        for index, byte in enumerate(pointer.to_bytes(ctypes.sizeof(c_void_p), 'little')):
+            variant.data[index] = byte
+        vcall(ids, 5, (POINTER(PROPVARIANT),), byref(variant), what='ObjectIDs::Add')
+        results = c_void_p()
+        try:
+            hr = vcall(content, 8, (DWORD, c_void_p, POINTER(c_void_p)),
+                       1 if recursive else 0, ids, byref(results),
+                       what='IPortableDeviceContent::Delete', check=False)
+            _check(hr, 'IPortableDeviceContent::Delete')  # S_FALSE is partial failure.
+            if not results:
+                raise ComError(0x80004003, 'Delete returned no per-object result')
+            count = DWORD()
+            vcall(results, 3, (POINTER(DWORD),), byref(count), what='DeleteResults::GetCount')
+            if count.value != 1:
+                raise ComError(0x80004005, 'Delete returned an unexpected result count')
+            result = PROPVARIANT()
+            vcall(results, 4, (DWORD, POINTER(PROPVARIANT)), 0, byref(result),
+                  what='DeleteResults::GetAt')
+            if result.vt != 10:  # VT_ERROR / HRESULT
+                raise ComError(0x80004005, 'Delete returned no HRESULT')
+            item_hr = int.from_bytes(bytes(result.data)[:4], 'little')
+            _check(item_hr, 'Delete object')
+        finally:
+            release(results)
+    finally:
+        release(ids)
+
+
 def create_folder(content, parent_object_id, name):
     """CreateObjectWithPropertiesOnly for a folder. WRITES to the device."""
     values = values_new()
@@ -674,6 +717,59 @@ class WpdSession:
         object_id = create_folder(self._content, parent_object_id, name)
         self._children_cache.setdefault(parent_object_id, {})[name] = object_id
         return object_id
+
+    def create_save_directory(self, parent_object_id, name):
+        object_id = create_folder(self._content, parent_object_id, name)
+        self.forget_children(parent_object_id)
+        return object_id
+
+    def delete_save_object(self, parent_object_id, object_id, *, recursive=False):
+        delete_object(self._content, object_id, recursive=recursive)
+        self.forget_children(parent_object_id)
+
+    def write_save_file(self, parent_object_id, filename, source_path, *,
+                        check_session, cancel=None, progress=None):
+        """Commit once. Revert only when transfer failed before Commit began."""
+        from .errors import OperationCancelledError, TransferFailedError
+
+        check_session()
+        size = source_path.stat().st_size
+        stream, chunk_size = create_file_object(self._content, parent_object_id, filename, size)
+        commit_started = False
+        try:
+            buffer = ctypes.create_string_buffer(max(65536, min(chunk_size or 262144, 4 * 1048576)))
+            written = 0
+            with source_path.open('rb') as handle:
+                while True:
+                    check_session()
+                    if cancel and cancel():
+                        raise OperationCancelledError('save write cancelled; target state unknown')
+                    count = handle.readinto(buffer)
+                    if not count:
+                        break
+                    stream_write(stream, buffer, count)
+                    written += count
+                    if progress:
+                        progress(written, size)
+            if written != size:
+                raise TransferFailedError('restore source changed during transfer; target state unknown')
+            check_session()
+            if cancel and cancel():
+                raise OperationCancelledError('save write cancelled; target state unknown')
+            if progress:
+                progress(written, size)
+            commit_started = True
+            stream_commit(stream)
+        except Exception:
+            if not commit_started:
+                try:
+                    stream_revert(stream)
+                except Exception:
+                    pass  # original transfer fault is more informative; state remains unknown
+            raise
+        finally:
+            release(stream)
+            self.forget_children(parent_object_id)
 
     def navigate(self, root_object_id, path, *, create_missing):
         """Walks a posix-style path one segment at a time ('' meaning the

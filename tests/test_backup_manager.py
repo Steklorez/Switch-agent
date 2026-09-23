@@ -11,6 +11,15 @@ from switchagent.mtp.mock import MockMtpBackend
 from switchagent.backup_manager import BackupManager, BackupError, BackupLimits
 
 
+SAVE_WRITE_OPERATIONS = {'DELETE_SAVE_OBJECT', 'CREATE_SAVE_DIRECTORY',
+                         'WRITE_SAVE_FILE'}
+
+
+def save_write_operations(backend):
+    return [item for item in backend.operation_log
+            if item.operation in SAVE_WRITE_OPERATIONS]
+
+
 def populated_backend():
     backend = MockMtpBackend()
     saves = backend.add_storage('SAVES')
@@ -169,7 +178,7 @@ def test_snapshot_persists_files_and_hashes_without_device_writes(tmp_path):
     }]
     assert (tmp_path / 'backups' / 'snapshots' / snapshot['id'] / 'files' / 'main.dat').read_bytes() == b'original progress'
     assert BackupManager(tmp_path / 'backups').list_snapshots()[0]['id'] == snapshot['id']
-    assert not any(item.operation == 'REPLACE_SAVE_TREE' for item in backend.operation_log)
+    assert not save_write_operations(backend)
 
 
 def test_short_device_read_retains_incomplete_marker_and_never_publishes(tmp_path):
@@ -251,7 +260,7 @@ def test_restore_refuses_unlisted_file_in_snapshot_tree(tmp_path):
     extra.write_bytes(b'not in manifest')
     with pytest.raises(BackupError, match='unlisted'):
         service.prepare_restore(backend, source['id'])
-    assert not any(item.operation == 'REPLACE_SAVE_TREE' for item in backend.operation_log)
+    assert not save_write_operations(backend)
 
 
 def test_import_rejects_manifest_missing_parent_directory(tmp_path):
@@ -297,7 +306,7 @@ def test_source_changed_during_target_recheck_refuses_before_write(tmp_path, mon
     monkeypatch.setattr(backend, 'receive_file', mutate_after_target_read)
     with pytest.raises(BackupError, match='source changed'):
         service.confirm_restore(backend, plan['id'])
-    assert not any(item.operation == 'REPLACE_SAVE_TREE' for item in backend.operation_log)
+    assert not save_write_operations(backend)
 
 
 def test_restore_diagnostics_names_unproven_identity_and_capability(tmp_path):
@@ -340,7 +349,7 @@ def test_target_changed_after_first_recheck_refuses_before_write(tmp_path, monke
     monkeypatch.setattr(backend, 'save_identity', change_during_final_identity_check)
     with pytest.raises(BackupError, match='target progress changed'):
         service.confirm_restore(backend, plan['id'])
-    assert not any(item.operation == 'REPLACE_SAVE_TREE' for item in backend.operation_log)
+    assert not save_write_operations(backend)
 
 
 def test_import_rejects_crc_tampering_as_backup_error(tmp_path):
@@ -427,10 +436,10 @@ def test_restore_refuses_foreign_target_identity_before_prebackup(tmp_path, fiel
     backend.set_save_identity('SAVES', path, **{
         key: identity[key] for key in ('title_id', 'user_id', 'environment_id', 'save_type', 'verified')
     })
-    with pytest.raises(BackupError, match='identity'):
+    with pytest.raises(BackupError, match='identity|save type'):
         service.prepare_restore(backend, source['id'])
     assert [item['id'] for item in service.list_snapshots()] == [source['id']]
-    assert not any(item.operation == 'REPLACE_SAVE_TREE' for item in backend.operation_log)
+    assert not save_write_operations(backend)
 
 
 def test_reconnect_consumes_restore_plan_without_writing(tmp_path):
@@ -445,7 +454,7 @@ def test_reconnect_consumes_restore_plan_without_writing(tmp_path):
         service.confirm_restore(backend, plan['id'])
     with pytest.raises(BackupError, match='already consumed'):
         service.confirm_restore(backend, plan['id'])
-    assert not any(item.operation == 'REPLACE_SAVE_TREE' for item in backend.operation_log)
+    assert not save_write_operations(backend)
 
 
 def test_restore_disconnect_attempts_write_once_and_keeps_prebackup(tmp_path):
@@ -453,11 +462,12 @@ def test_restore_disconnect_attempts_write_once_and_keeps_prebackup(tmp_path):
     service = BackupManager(tmp_path / 'store')
     path = 'Installed games/Game A/Profile A'
     source = service.create_snapshot(backend, path)
+    backend.storage_tree('SAVES').write_file(path + '/main.dat', b'new progress')
     plan = service.prepare_restore(backend, source['id'])
-    backend.arm_failure('disconnect', storage='SAVES', dest_path=path)
+    backend.arm_save_failure('write', mode='disconnect', path=path + '/main.dat')
     with pytest.raises(BackupError, match='target state is unknown'):
         service.confirm_restore(backend, plan['id'])
-    assert [item.operation for item in backend.operation_log].count('REPLACE_SAVE_TREE') == 1
+    assert len(save_write_operations(backend)) == 1
     assert plan['prebackup_id'] in {item['id'] for item in service.list_snapshots()}
     assert any(event['kind'] == 'restore' and event['state'] == 'unknown'
                for event in service.list_events())
@@ -482,7 +492,7 @@ def test_snapshot_cancel_after_first_file_stays_incomplete(tmp_path):
                                 progress=mark_progress)
     assert service.list_snapshots() == []
     assert len(service.list_incomplete()) == 1
-    assert not any(item.operation == 'REPLACE_SAVE_TREE' for item in backend.operation_log)
+    assert not save_write_operations(backend)
 
 
 def test_local_disk_fault_does_not_publish_partial_snapshot(tmp_path, monkeypatch):
@@ -498,7 +508,7 @@ def test_local_disk_fault_does_not_publish_partial_snapshot(tmp_path, monkeypatc
         service.create_snapshot(backend, 'Installed games/Game A/Profile A')
     assert service.list_snapshots() == []
     assert len(service.list_incomplete()) == 1
-    assert not any(item.operation == 'REPLACE_SAVE_TREE' for item in backend.operation_log)
+    assert not save_write_operations(backend)
 
 
 @pytest.mark.parametrize('extra_name', [
@@ -573,7 +583,7 @@ def test_inventory_all_includes_non_account_individual_saves_only(tmp_path):
     snapshot = service.create_snapshot(backend, path)
     assert snapshot['identity']['save_type'] == 'Device'
     assert snapshot['files'][-1]['path'] == 'nested/progress.dat'
-    with pytest.raises(BackupError, match='identity'):
+    with pytest.raises(BackupError, match='identity|save type'):
         service.prepare_restore(backend, snapshot['id'])
 
 
@@ -676,6 +686,7 @@ def test_restore_result_survives_journal_failure_after_write(tmp_path, monkeypat
     service = BackupManager(tmp_path / 'store')
     path = 'Installed games/Game A/Profile A'
     source = service.create_snapshot(backend, path)
+    backend.storage_tree('SAVES').write_file(path + '/main.dat', b'new progress')
     plan = service.prepare_restore(backend, source['id'])
     original_record = service._record
 
@@ -726,7 +737,7 @@ def test_final_source_recheck_after_last_target_read(tmp_path, monkeypatch):
     with pytest.raises(BackupError, match='source changed'):
         service.confirm_restore(backend, plan['id'])
     assert mutated
-    assert not any(item.operation == 'REPLACE_SAVE_TREE' for item in backend.operation_log)
+    assert not save_write_operations(backend)
 
 
 @pytest.mark.parametrize('zone', ['snapshots', 'import', 'game-exports'])
@@ -762,8 +773,9 @@ def test_unknown_restore_outcome_survives_journal_failure(tmp_path, monkeypatch)
     service = BackupManager(tmp_path / 'store')
     path = 'Installed games/Game A/Profile A'
     source = service.create_snapshot(backend, path)
+    backend.storage_tree('SAVES').write_file(path + '/main.dat', b'new progress')
     plan = service.prepare_restore(backend, source['id'])
-    backend.arm_failure('disconnect', storage='SAVES', dest_path=path)
+    backend.arm_save_failure('write', mode='disconnect', path=path + '/main.dat')
     original_record = service._record
 
     def fail_unknown(kind, state, **details):
@@ -774,6 +786,225 @@ def test_unknown_restore_outcome_survives_journal_failure(tmp_path, monkeypatch)
     monkeypatch.setattr(service, '_record', fail_unknown)
     with pytest.raises(BackupError, match='target state is unknown'):
         service.confirm_restore(backend, plan['id'])
-    assert [item.operation for item in backend.operation_log].count('REPLACE_SAVE_TREE') == 1
+    assert len(save_write_operations(backend)) == 1
     assert plan['prebackup_id'] in {item['id'] for item in service.list_snapshots()}
     assert any('restore unknown:' in warning for warning in service.journal_warnings)
+
+
+def test_same_profile_plan_needs_only_normal_confirmation(tmp_path):
+    backend = populated_backend()
+    service = BackupManager(tmp_path / 'store')
+    path = 'Installed games/Game A/Profile A'
+    source = service.create_snapshot(backend, path)
+    backend.storage_tree('SAVES').write_file(path + '/main.dat', b'new progress')
+    plan = service.prepare_restore(backend, source['id'])
+    assert plan['cross_profile'] is False
+    assert plan['requires_profile_confirmation'] is False
+    assert plan['target_profile'] == 'Profile A'
+    assert plan['origin_assurance'] == 'unsigned-manifest'
+    assert service.confirm_restore(backend, plan['id'])['state'] == 'completed'
+
+
+def test_cross_profile_requires_exact_server_checked_name_before_plan_consumption(tmp_path):
+    backend = populated_backend()
+    service = BackupManager(tmp_path / 'store')
+    source_path = 'Installed games/Game A/Profile A'
+    target_path = 'Installed games/Game A/Profile B'
+    source = service.create_snapshot(backend, source_path)
+    backend.storage_tree('SAVES').ensure_directory(target_path)
+    backend.storage_tree('SAVES').write_file(target_path + '/main.dat', b'other progress')
+    backend.set_save_identity('SAVES', target_path, title_id='0100000000000001',
+                              user_id='uid-b', environment_id='installation-a')
+    plan = service.prepare_restore(backend, source['id'], target_path=target_path)
+    assert plan['cross_profile'] is True
+    assert plan['requires_profile_confirmation'] is True
+    assert plan['target_profile'] == 'Profile B'
+    assert plan['prebackup_id'] in {item['id'] for item in service.list_snapshots()}
+    with pytest.raises(BackupError, match='exact target profile'):
+        service.confirm_restore(backend, plan['id'])
+    with pytest.raises(BackupError, match='exact target profile'):
+        service.confirm_restore(backend, plan['id'], confirm_profile='profile B')
+    assert not save_write_operations(backend)
+    assert service.confirm_restore(backend, plan['id'],
+                                   confirm_profile='Profile B')['state'] == 'completed'
+    assert backend.storage_tree('SAVES').read_file(target_path + '/main.dat') == b'original progress'
+    assert backend.storage_tree('SAVES').read_file(source_path + '/main.dat') == b'original progress'
+    with pytest.raises(BackupError, match='already consumed'):
+        service.confirm_restore(backend, plan['id'], confirm_profile='Profile B')
+
+
+@pytest.mark.parametrize('origin_change', [
+    {'device_fingerprint': '0' * 16},
+    {'game': 'Game B'},
+    {'profile': 'System'},
+    {'device_fingerprint': 'not-a-fingerprint'},
+])
+def test_restore_rejects_foreign_or_malformed_source_origin_before_prebackup(
+        tmp_path, origin_change):
+    backend = populated_backend()
+    service = BackupManager(tmp_path / 'store')
+    source = service.create_snapshot(backend, 'Installed games/Game A/Profile A')
+    path = service.root / 'snapshots' / source['id'] / 'manifest.json'
+    manifest = json.loads(path.read_text(encoding='utf-8'))
+    manifest['origin'].update(origin_change)
+    path.write_text(json.dumps(manifest), encoding='utf-8')
+    with pytest.raises(BackupError, match='origin|another console'):
+        service.prepare_restore(backend, source['id'])
+    assert len(service.list_snapshots()) == 1
+    assert not save_write_operations(backend)
+
+
+def test_restore_rejects_other_game_and_save_type_before_prebackup(tmp_path):
+    backend = populated_backend()
+    service = BackupManager(tmp_path / 'store')
+    source = service.create_snapshot(backend, 'Installed games/Game A/Profile A')
+    with pytest.raises(BackupError, match='same game'):
+        service.prepare_restore(backend, source['id'],
+                                target_path='Installed games/Game B/Profile B')
+    target = 'Installed games/Game A/System'
+    backend.storage_tree('SAVES').ensure_directory(target)
+    backend.set_save_identity('SAVES', target, title_id='0100000000000001',
+                              user_id='uid-a', environment_id='installation-a',
+                              save_type='System')
+    with pytest.raises(BackupError, match='save type'):
+        service.prepare_restore(backend, source['id'], target_path=target)
+    assert len(service.list_snapshots()) == 1
+    assert not save_write_operations(backend)
+
+
+@pytest.mark.parametrize('field,value', [
+    ('title_id', '0100000000000002'),
+    ('environment_id', 'installation-other'),
+    ('save_type', 'Device'),
+])
+def test_cross_profile_verified_identity_still_requires_same_game_environment_type(
+        tmp_path, field, value):
+    backend = populated_backend()
+    service = BackupManager(tmp_path / 'store')
+    source = service.create_snapshot(backend, 'Installed games/Game A/Profile A')
+    target = 'Installed games/Game A/Profile B'
+    backend.storage_tree('SAVES').ensure_directory(target)
+    identity = {'title_id': '0100000000000001', 'user_id': 'uid-b',
+                'environment_id': 'installation-a', 'save_type': 'Account'}
+    identity[field] = value
+    backend.set_save_identity('SAVES', target, **identity)
+    with pytest.raises(BackupError, match='identity|save type'):
+        service.prepare_restore(backend, source['id'], target_path=target)
+    assert not save_write_operations(backend)
+
+
+def test_restore_diff_deletes_deepest_first_then_creates_and_writes_only_changes(tmp_path):
+    backend = populated_backend()
+    tree = backend.storage_tree('SAVES')
+    root = 'Installed games/Game A/Profile A'
+    tree.write_file(root + '/keep.dat', b'unchanged')
+    tree.ensure_directory(root + '/nested/inner')
+    tree.write_file(root + '/nested/new.dat', b'new')
+    tree.write_file(root + '/nested/inner/deep.dat', b'deep')
+    service = BackupManager(tmp_path / 'store')
+    source = service.create_snapshot(backend, root)
+    tree.write_file(root + '/main.dat', b'new progress')
+    tree.ensure_directory(root + '/old/a/b')
+    tree.write_file(root + '/old/a/b/stale.dat', b'stale')
+    tree.write_file(root + '/obsolete.dat', b'obsolete')
+    for relative in ('nested/inner/deep.dat', 'nested/new.dat', 'nested/inner', 'nested'):
+        tree.delete(root + '/' + relative)
+    plan = service.prepare_restore(backend, source['id'])
+    assert service.confirm_restore(backend, plan['id'])['state'] == 'completed'
+    operations = save_write_operations(backend)
+    assert [item.operation for item in operations] == (
+        ['DELETE_SAVE_OBJECT'] * 5 + ['CREATE_SAVE_DIRECTORY'] * 2
+        + ['WRITE_SAVE_FILE'] * 3)
+    assert [item.details['path'] for item in operations[:5]] == [
+        root + '/obsolete.dat', root + '/old/a/b/stale.dat',
+        root + '/old/a/b', root + '/old/a', root + '/old']
+    assert [item.details['path'] for item in operations[5:7]] == [
+        root + '/nested', root + '/nested/inner']
+    assert {item.details['path'] for item in operations[7:]} == {
+        root + '/main.dat', root + '/nested/new.dat', root + '/nested/inner/deep.dat'}
+    assert all('keep.dat' not in item.details['path'] for item in operations)
+
+
+def test_partial_write_is_unknown_and_never_retried(tmp_path):
+    backend = populated_backend()
+    service = BackupManager(tmp_path / 'store')
+    path = 'Installed games/Game A/Profile A'
+    source = service.create_snapshot(backend, path)
+    backend.storage_tree('SAVES').write_file(path + '/main.dat', b'new progress')
+    plan = service.prepare_restore(backend, source['id'])
+    backend.arm_save_failure('write', mode='partial', path=path + '/main.dat')
+    with pytest.raises(BackupError, match='target state is unknown'):
+        service.confirm_restore(backend, plan['id'])
+    assert len(save_write_operations(backend)) == 1
+    assert plan['prebackup_id'] in {item['id'] for item in service.list_snapshots()}
+    with pytest.raises(BackupError, match='already consumed'):
+        service.confirm_restore(backend, plan['id'])
+    assert len(save_write_operations(backend)) == 1
+
+
+def test_readback_mismatch_is_unknown_and_preserves_prebackup(tmp_path, monkeypatch):
+    backend = populated_backend()
+    service = BackupManager(tmp_path / 'store')
+    path = 'Installed games/Game A/Profile A'
+    source = service.create_snapshot(backend, path)
+    backend.storage_tree('SAVES').write_file(path + '/main.dat', b'new progress')
+    plan = service.prepare_restore(backend, source['id'])
+    original_write = backend.write_save_file
+
+    def corrupt_after_write(*args, **kwargs):
+        original_write(*args, **kwargs)
+        backend.storage_tree('SAVES').write_file(path + '/main.dat', b'corrupt')
+
+    monkeypatch.setattr(backend, 'write_save_file', corrupt_after_write)
+    with pytest.raises(BackupError, match='target state is unknown'):
+        service.confirm_restore(backend, plan['id'])
+    assert len(save_write_operations(backend)) == 1
+    assert plan['prebackup_id'] in {item['id'] for item in service.list_snapshots()}
+    assert any(event['state'] == 'unknown' for event in service.list_events()
+               if event['kind'] == 'restore')
+
+
+def test_unverified_dbi_identity_uses_origin_and_path_without_inventing_uid(
+        tmp_path, monkeypatch):
+    backend = populated_backend()
+    path = 'Installed games/Game A/Profile A'
+    backend.set_save_identity('SAVES', path, title_id=None, user_id=None,
+                              environment_id=None, save_type=None, verified=False)
+    original_capabilities = backend.capabilities
+    monkeypatch.setattr(backend, 'capabilities', lambda: dict(
+        original_capabilities(), verified_save_identity=False))
+    service = BackupManager(tmp_path / 'store')
+    source = service.create_snapshot(backend, path)
+    backend.storage_tree('SAVES').write_file(path + '/main.dat', b'new progress')
+    diagnostics = service.restore_diagnostics(backend, path)
+    assert diagnostics['eligible'] is True
+    assert diagnostics['hardware_qualified'] is False
+    assert diagnostics['source_origin_and_content_pending'] is True
+    plan = service.prepare_restore(backend, source['id'])
+    assert plan['identity']['user_id'] is None
+    assert plan['origin_assurance'] == 'unsigned-manifest'
+    assert service.confirm_restore(backend, plan['id'])['state'] == 'completed'
+
+
+@pytest.mark.parametrize('origin_change', ['missing', 'wrong_game'])
+def test_import_rejects_missing_or_path_mismatched_origin(tmp_path, origin_change):
+    backend = populated_backend()
+    source_store = BackupManager(tmp_path / 'source')
+    source = source_store.create_snapshot(backend, 'Installed games/Game A/Profile A')
+    archive = source_store.create_archive([source['id']], tmp_path / 'valid.zip')
+    altered = tmp_path / 'altered.zip'
+    with zipfile.ZipFile(archive) as reader, zipfile.ZipFile(altered, 'w') as writer:
+        for name in reader.namelist():
+            data = reader.read(name)
+            if name == 'manifest.json':
+                manifest = json.loads(data)
+                if origin_change == 'missing':
+                    manifest['snapshots'][0].pop('origin')
+                else:
+                    manifest['snapshots'][0]['origin']['game'] = 'Game B'
+                data = json.dumps(manifest).encode()
+            writer.writestr(name, data)
+    imported = BackupManager(tmp_path / 'imported')
+    with pytest.raises(BackupError, match='origin'):
+        imported.import_archive(altered)
+    assert imported.list_snapshots() == []
