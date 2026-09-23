@@ -175,71 +175,69 @@ body {
   .main-nav a, .btn, .search-box, .filter-select, .motion-controls select { transition: none; }
 }
 
-/* -- Library activity panel (activity.js) ------------------------------------
-   What runs by itself in the background, with a live bar each, and one line
-   that says plainly whether the page is still filling in. */
+/* -- Library activity strip (activity.js) ------------------------------------
+   One slim line above the grid: whether the page is still filling in, and a
+   small chip per running job with its own count and bar. The current file
+   lives in the chip's tooltip, not in a line of its own -- this must never
+   push the grid down by more than one line. */
 .activity {
   --activity-cyan: #1ee0f2;
-  margin: 0 0 18px; padding: 12px 16px 12px; border: 1px solid #b9d3ff16; border-radius: 16px;
-  background: linear-gradient(135deg, #1b2430b3, #131b27b3);
-  box-shadow: 0 10px 30px #0003, inset 0 1px #ffffff0a;
+  display: flex; align-items: center; gap: 8px 10px; flex-wrap: wrap;
+  min-height: 34px; margin: 0 0 14px; padding: 5px 12px; border: 1px solid #b9d3ff14; border-radius: 12px;
+  background: linear-gradient(135deg, #1b2430a6, #131b27a6);
+  font-size: .8rem; line-height: 1.2;
   transition: border-color .4s ease, box-shadow .4s ease;
 }
-.activity[data-state="busy"] { border-color: #1ee0f233; box-shadow: 0 10px 30px #0003, 0 0 24px #1ee0f214, inset 0 1px #ffffff0a; }
+.activity[data-state="busy"] { border-color: #1ee0f22e; box-shadow: 0 0 18px #1ee0f212; }
 .activity[data-state="error"] { border-color: #e5484d55; }
-
-.activity-summary { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; min-height: 22px; font-size: .86rem; }
-.activity-summary-text { font-weight: 650; color: var(--text); }
-.activity-summary-facts { color: var(--text-dim); font-variant-numeric: tabular-nums; }
-.activity-dot { width: 9px; height: 9px; border-radius: 50%; flex: none; background: var(--text-dim); }
-.activity[data-state="busy"] .activity-dot { background: var(--activity-cyan); box-shadow: 0 0 0 0 #1ee0f288; animation: activity-pulse 1.6s ease-out infinite; }
-.activity[data-state="idle"] .activity-dot { background: var(--ok); box-shadow: 0 0 10px #35c46f88; }
+.activity-summary-text { font-weight: 650; color: var(--text); white-space: nowrap; }
+.activity-summary-facts { flex: 1 1 0; color: var(--text-dim); font-variant-numeric: tabular-nums; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.activity[data-state="busy"] .activity-summary-facts { display: none; }
+.activity-dot { width: 8px; height: 8px; border-radius: 50%; flex: none; background: var(--text-dim); }
+.activity[data-state="busy"] .activity-dot { background: var(--activity-cyan); animation: activity-pulse 1.6s ease-out infinite; }
+.activity[data-state="idle"] .activity-dot { background: var(--ok); box-shadow: 0 0 8px #35c46f88; }
 .activity[data-state="error"] .activity-dot { background: var(--danger); }
 
-.activity-rows { display: grid; gap: 10px; }
-.activity-rows:has(.activity-row:not([hidden])) { margin-top: 12px; }
+.activity-rows { display: contents; }
 .activity-row {
-  display: grid; grid-template-columns: 30px minmax(0, 1fr) auto; align-items: center; gap: 12px;
-  padding: 10px 12px; border-radius: 12px; background: #0b111a8c; border: 1px solid #ffffff0d;
+  display: inline-flex; align-items: center; gap: 6px; flex: none;
+  height: 24px; padding: 0 4px 0 8px; border-radius: 999px;
+  background: #0b111a99; border: 1px solid #ffffff12; color: var(--text); cursor: default;
 }
 .activity-row[hidden] { display: none; }
-.activity-row.is-new { animation: activity-in .35s cubic-bezier(.2,.8,.25,1); }
-.activity-icon { width: 30px; height: 30px; display: grid; place-items: center; border-radius: 9px; background: #4f8ef71f; color: #8db8ff; }
-.activity-icon svg { width: 18px; height: 18px; fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
-.activity-icon .ring-track { stroke: #ffffff1f; }
-.activity-row[data-state="running"] .activity-icon { color: var(--activity-cyan); background: #1ee0f21a; }
-.activity-row[data-task="scan"][data-state="running"] .activity-icon svg { animation: activity-spin 1.1s linear infinite; }
-.activity-row[data-state="done"] .activity-icon { color: var(--ok); background: #35c46f1f; }
-.activity-row[data-state="error"] .activity-icon { color: var(--danger-text); background: #e5484d1f; }
-
-.activity-main { min-width: 0; display: grid; gap: 6px; }
-.activity-line { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; min-width: 0; }
-.activity-title { font-size: .9rem; font-weight: 650; color: var(--text); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.activity-count { flex: none; font-size: .8rem; color: var(--text-dim); font-variant-numeric: tabular-nums; white-space: nowrap; }
+.activity-row.is-new { animation: activity-in .3s cubic-bezier(.2,.8,.25,1); }
+.activity-row:not(:has(.activity-action:not([hidden]))) { padding-right: 9px; }
+.activity-icon { width: 14px; height: 14px; flex: none; fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; color: #8db8ff; }
+.activity-icon .ring-track { stroke: #ffffff26; }
+.activity-row[data-state="running"] .activity-icon { color: var(--activity-cyan); }
+.activity-row[data-task="scan"][data-state="running"] .activity-icon { animation: activity-spin 1.1s linear infinite; }
+.activity-row[data-state="done"] { border-color: #35c46f40; }
+.activity-row[data-state="done"] .activity-icon { color: var(--ok); }
+.activity-row[data-state="error"] { border-color: #e5484d55; }
+.activity-row[data-state="error"] .activity-icon { color: var(--danger-text); }
+.activity-title { font-weight: 600; white-space: nowrap; }
+.activity-count { color: var(--text-dim); font-variant-numeric: tabular-nums; white-space: nowrap; }
 .activity-row[data-state="done"] .activity-count { color: #9be7b8; }
-.activity-detail { font-size: .76rem; color: var(--text-dim); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-height: 1em; }
-.activity-detail:empty { display: none; }
-.activity-row[data-state="error"] .activity-detail { color: var(--danger-text); white-space: normal; }
 
-.activity-bar { position: relative; height: 6px; border-radius: 999px; background: #ffffff0f; overflow: hidden; box-shadow: inset 0 1px #0006; }
+.activity-bar { position: relative; width: 64px; height: 4px; flex: none; border-radius: 999px; background: #ffffff14; overflow: hidden; }
+.activity-row:not([data-state="running"]) .activity-bar { display: none; }
 .activity-bar-fill {
   position: absolute; inset: 0 auto 0 0; width: 0; border-radius: inherit;
-  background: linear-gradient(90deg, #4f8ef7, var(--activity-cyan));
-  box-shadow: 0 0 12px #1ee0f266; transition: width .6s cubic-bezier(.2,.8,.25,1);
+  background: linear-gradient(90deg, #4f8ef7, var(--activity-cyan)); box-shadow: 0 0 8px #1ee0f266;
+  transition: width .6s cubic-bezier(.2,.8,.25,1);
 }
-.activity-row[data-state="running"] .activity-bar-fill::after {
-  content: ""; position: absolute; inset: 0;
-  background: linear-gradient(90deg, transparent, #ffffff55, transparent); background-size: 60px 100%;
-  animation: activity-sheen 1.2s linear infinite;
+.activity-bar.is-indeterminate .activity-bar-fill { width: 40%; transition: none; animation: activity-sweep 1.3s cubic-bezier(.45,.05,.55,.95) infinite; }
+.activity-action {
+  height: 18px; padding: 0 8px; border: 0; border-radius: 999px; cursor: pointer;
+  background: #ffffff14; color: var(--text); font: inherit; font-size: .72rem; font-weight: 600;
 }
-.activity-bar.is-indeterminate .activity-bar-fill { width: 38%; transition: none; animation: activity-sweep 1.4s cubic-bezier(.45,.05,.55,.95) infinite; }
-.activity-row[data-state="done"] .activity-bar-fill { background: linear-gradient(90deg, #2fae62, #7ef0a5); box-shadow: 0 0 12px #35c46f66; }
-.activity-row[data-state="info"] .activity-bar-fill { background: #9aa2ad66; box-shadow: none; }
-.activity-row[data-state="error"] .activity-bar-fill { background: linear-gradient(90deg, #b8383c, var(--danger)); box-shadow: none; }
-.activity-action { flex: none; }
+.activity-action:hover { background: #ffffff26; }
+.activity-action:disabled { opacity: .6; cursor: default; }
+.activity-action[hidden] { display: none; }
 
 /* A 3px line along the very top of the window whenever anything is still
-   loading -- visible however far down the grid you have scrolled. */
+   loading -- visible however far down the grid you have scrolled, and it
+   takes no room at all. */
 .activity-topline { position: fixed; inset: 0 0 auto 0; height: 3px; z-index: 60; pointer-events: none; overflow: hidden; }
 .activity-topline[hidden] { display: none; }
 .activity-topline span {
@@ -249,19 +247,17 @@ body {
 .activity-topline.is-indeterminate span { width: 30%; transition: none; animation: activity-sweep 1.4s cubic-bezier(.45,.05,.55,.95) infinite; }
 
 @keyframes activity-sweep { from { left: -40%; } to { left: 100%; } }
-@keyframes activity-sheen { from { background-position: -60px 0; } to { background-position: 200px 0; } }
 @keyframes activity-spin { to { transform: rotate(360deg); } }
-@keyframes activity-pulse { 0% { box-shadow: 0 0 0 0 #1ee0f288; } 70% { box-shadow: 0 0 0 8px #1ee0f200; } 100% { box-shadow: 0 0 0 0 #1ee0f200; } }
-@keyframes activity-in { from { opacity: 0; transform: translateY(-4px); } to { opacity: 1; transform: none; } }
+@keyframes activity-pulse { 0% { box-shadow: 0 0 0 0 #1ee0f288; } 70% { box-shadow: 0 0 0 7px #1ee0f200; } 100% { box-shadow: 0 0 0 0 #1ee0f200; } }
+@keyframes activity-in { from { opacity: 0; transform: translateY(-3px); } to { opacity: 1; transform: none; } }
 
+/* A phone gets the counts, not the bars: two chips then share a line, and
+   the 3px line along the top still shows the whole thing moving. */
 @media (max-width: 640px) {
-  .activity { padding: 10px 12px; }
-  .activity-row { grid-template-columns: 26px minmax(0, 1fr); }
-  .activity-row .activity-action { grid-column: 2; justify-self: start; }
-  .activity-icon { width: 26px; height: 26px; }
+  .activity { gap: 6px 8px; }
+  .activity-bar { display: none; }
 }
 @media (prefers-reduced-motion: reduce) {
   .activity-bar.is-indeterminate .activity-bar-fill, .activity-topline.is-indeterminate span { animation: none; left: 0; width: 100%; opacity: .5; }
-  .activity-row[data-state="running"] .activity-bar-fill::after, .activity-row .activity-icon svg,
-  .activity[data-state="busy"] .activity-dot, .activity-row.is-new { animation: none; }
+  .activity-row .activity-icon, .activity[data-state="busy"] .activity-dot, .activity-row.is-new { animation: none; }
 }

@@ -160,54 +160,34 @@
    already bind to. #}
 <div id="activity-topline" class="activity-topline" hidden><span></span></div>
 <section id="activity" class="activity" data-state="checking" aria-label="Background activity">
-  <div class="activity-summary" role="status" aria-live="polite">
-    <span class="activity-dot" aria-hidden="true"></span>
-    <span class="activity-summary-text">Checking what is still loading…</span>
-    <span class="activity-summary-facts"></span>
-  </div>
-  <div class="activity-rows">
-    <div class="activity-row" data-task="scan" hidden>
-      <span class="activity-icon" aria-hidden="true">
-        <svg viewBox="0 0 24 24"><circle class="ring-track" cx="12" cy="12" r="9"/><path class="ring-arc" d="M12 3a9 9 0 0 1 9 9"/></svg>
-      </span>
-      <div class="activity-main">
-        <div class="activity-line">
-          <strong class="activity-title">Scanning library</strong>
-          <span class="activity-count"></span>
-        </div>
-        <div class="activity-bar"><span class="activity-bar-fill"></span></div>
-        <div class="activity-detail" id="scan-status-text"></div>
-      </div>
-      <button id="scan-cancel-btn" class="btn btn-small activity-action" type="button" hidden>Stop</button>
-    </div>
-    <div class="activity-row" data-task="covers" hidden>
-      <span class="activity-icon" aria-hidden="true">
-        <svg viewBox="0 0 24 24"><rect x="3.5" y="4.5" width="17" height="15" rx="2.5"/><circle cx="9" cy="10" r="1.8"/><path d="M4 17l5-5 3.5 3.5L15 13l5 4.5"/></svg>
-      </span>
-      <div class="activity-main">
-        <div class="activity-line">
-          <strong class="activity-title">Covers</strong>
-          <span class="activity-count"></span>
-        </div>
-        <div class="activity-bar"><span class="activity-bar-fill"></span></div>
-        <div class="activity-detail" id="cover-status-text"></div>
-      </div>
-      <button id="cover-retry" class="btn btn-small activity-action" type="button" hidden>Retry covers</button>
-    </div>
-    <div class="activity-row" data-task="device" hidden>
-      <span class="activity-icon" aria-hidden="true">
-        <svg viewBox="0 0 24 24"><rect x="2.5" y="6" width="5" height="12" rx="2.5"/><rect x="16.5" y="6" width="5" height="12" rx="2.5"/><rect x="7.5" y="5" width="9" height="14" rx="1"/></svg>
-      </span>
-      <div class="activity-main">
-        <div class="activity-line">
-          <strong class="activity-title">Switch</strong>
-          <span class="activity-count"></span>
-        </div>
-        <div class="activity-bar"><span class="activity-bar-fill"></span></div>
-        <div class="activity-detail"></div>
-      </div>
-    </div>
-  </div>
+  <span class="activity-dot" aria-hidden="true"></span>
+  <span class="activity-summary-text" role="status" aria-live="polite">Checking…</span>
+  <span class="activity-summary-facts"></span>
+  <span class="activity-rows">
+    <span class="activity-row" data-task="scan" hidden>
+      <svg class="activity-icon" viewBox="0 0 24 24" aria-hidden="true"><circle class="ring-track" cx="12" cy="12" r="9"/><path class="ring-arc" d="M12 3a9 9 0 0 1 9 9"/></svg>
+      <span class="activity-title">Scanning</span>
+      <span class="activity-count"></span>
+      <span class="activity-bar"><span class="activity-bar-fill"></span></span>
+      <span class="activity-detail" id="scan-status-text" hidden></span>
+      <button id="scan-cancel-btn" class="activity-action" type="button" hidden>Stop</button>
+    </span>
+    <span class="activity-row" data-task="covers" hidden>
+      <svg class="activity-icon" viewBox="0 0 24 24" aria-hidden="true"><rect x="3.5" y="4.5" width="17" height="15" rx="2.5"/><circle cx="9" cy="10" r="1.8"/><path d="M4 17l5-5 3.5 3.5L15 13l5 4.5"/></svg>
+      <span class="activity-title">Covers</span>
+      <span class="activity-count"></span>
+      <span class="activity-bar"><span class="activity-bar-fill"></span></span>
+      <span class="activity-detail" id="cover-status-text" hidden></span>
+      <button id="cover-retry" class="activity-action" type="button" hidden>Retry</button>
+    </span>
+    <span class="activity-row" data-task="device" hidden>
+      <svg class="activity-icon" viewBox="0 0 24 24" aria-hidden="true"><rect x="2.5" y="6" width="5" height="12" rx="2.5"/><rect x="16.5" y="6" width="5" height="12" rx="2.5"/><rect x="7.5" y="5" width="9" height="14" rx="1"/></svg>
+      <span class="activity-title">Switch</span>
+      <span class="activity-count"></span>
+      <span class="activity-bar"><span class="activity-bar-fill"></span></span>
+      <span class="activity-detail" hidden></span>
+    </span>
+  </span>
 </section>
 
 {% if kind == "games" %}

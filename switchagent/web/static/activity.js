@@ -74,7 +74,9 @@
     row.querySelector(".activity-title").textContent = title;
     row.querySelector(".activity-count").textContent = count;
     row.querySelector(".activity-detail").textContent = detail;
-    row.querySelector(".activity-detail").title = detail;
+    // No line of its own -- the strip stays one line -- but never lost:
+    // hovering the chip says which file, how long, or what went wrong.
+    row.title = [title, count, detail].filter(Boolean).join(" · ");
     const bar = row.querySelector(".activity-bar");
     const fill = row.querySelector(".activity-bar-fill");
     const indeterminate = progress == null;
@@ -98,23 +100,23 @@
       const took = duration(scan.elapsed_seconds);
       if (scan.phase === "indexing" && scan.total) {
         show(rows.scan, {
-          state: "running", title: stopping ? "Stopping scan…" : "Scanning library",
+          state: "running", title: stopping ? "Stopping…" : "Scanning",
           count: `${number.format(scan.done)} / ${number.format(scan.total)}`,
           detail: [where, took].filter(Boolean).join(" · "), progress: scan.done / scan.total,
         });
       } else if (scan.phase === "finishing") {
-        show(rows.scan, { state: "running", title: "Scanning library", count: "almost done",
+        show(rows.scan, { state: "running", title: "Scanning", count: "almost done",
                           detail: took, progress: 1 });
       } else {
         show(rows.scan, {
-          state: "running", title: stopping ? "Stopping scan…" : "Looking through your folders",
+          state: "running", title: stopping ? "Stopping…" : "Looking through folders",
           count: scan.done ? plural(scan.done, "entry", "entries") : "",
           detail: [where, took].filter(Boolean).join(" · "),
         });
       }
       cancelBtn.hidden = false;
       cancelBtn.disabled = stopping;
-      cancelBtn.textContent = stopping ? "Stopping…" : "Stop";
+      cancelBtn.textContent = "Stop";
       return true;
     }
 
@@ -136,7 +138,7 @@
         const s = scan.summary || {};
         const parts = [`${s.new || 0} new`, `${s.updated || 0} updated`, `${s.removed || 0} removed`];
         if (s.relocated) parts.push(`${s.relocated} matched to a new path`);
-        show(rows.scan, { state: "done", title: "Library scanned", count: parts.join(" · "),
+        show(rows.scan, { state: "done", title: "Scanned", count: parts.join(" · "),
                           detail: duration(scan.elapsed_seconds), progress: 1 });
       }
     } else {
@@ -151,7 +153,7 @@
       retryBtn.hidden = true;
       const downloading = covers.phase === "Downloading covers" && covers.total;
       show(rows.covers, {
-        state: "running", title: "Loading covers",
+        state: "running", title: "Covers",
         count: covers.total ? `${number.format(covers.ready)} / ${number.format(covers.total)}` : "",
         detail: downloading ? "" : covers.phase, progress: downloading ? covers.ready / covers.total : null,
       });
@@ -178,8 +180,8 @@
     const reading = busy.phase === "Reading installed games";
     show(rows.device, {
       state: "running",
-      title: reading ? `Reading installed games from ${busy.label}` : `Checking ${busy.label}`,
-      count: duration(busy.busy_seconds),
+      title: busy.label,
+      count: `${reading ? "reading games" : "checking"} · ${duration(busy.busy_seconds)}`,
       detail: reading ? "“On Switch” badges appear once this is done." : "",
     });
     return true;
@@ -187,9 +189,7 @@
 
   function renderSummary(active, data) {
     panel.dataset.state = active ? "busy" : "idle";
-    summaryText.textContent = active
-      ? "Still loading — this page fills in by itself"
-      : "Everything is loaded";
+    summaryText.textContent = active ? "Loading…" : "Everything is loaded";
 
     const facts = [];
     const cards = document.querySelectorAll(".library-tiles > .game-group, .library-tiles > .card").length;
@@ -210,6 +210,7 @@
       }
     }
     summaryFacts.textContent = facts.join(" · ");
+    summaryFacts.title = summaryFacts.textContent;  // cut short on a narrow screen
 
     if (!topline) return;
     topline.hidden = !active;
@@ -224,6 +225,7 @@
   async function poll() {
     clearTimeout(timer);
     let active = false;
+    let unreachable = false;
     try {
       const response = await fetch("/api/activity", { cache: "no-store" });
       if (!response.ok) throw new Error(`HTTP ${response.status}`);
@@ -237,9 +239,12 @@
       panel.dataset.state = "error";
       summaryText.textContent = "Could not check background activity";
       summaryFacts.textContent = error.message;
+      unreachable = true;
     }
     const soon = active || Date.now() < scanResultUntil;
-    timer = setTimeout(poll, document.hidden ? 10000 : soon ? 1000 : 4000);
+    // An app that is not answering (stopped, restarting) is asked again
+    // gently rather than every second.
+    timer = setTimeout(poll, document.hidden || unreachable ? 10000 : soon ? 1000 : 4000);
   }
 
   cancelBtn.addEventListener("click", async () => {
