@@ -1508,17 +1508,22 @@ def create_and_confirm_jobs(conn, library_item_ids: list[int], target_device_id:
 
         try:
             report = preview.preview_path(Path(row["absolute_path"]), extract=True)
-        except extractor.ExtractionBackendMissingError:
+        except extractor.ExtractionBackendMissingError as exc:
             # RAR decompression needs an external unrar/7z/bsdtar on PATH
             # that this packaged build does not bundle (see
             # docs/PACKAGING.md's "RAR extraction" section) -- report
             # clearly per item rather than letting this propagate into an
-            # unhandled 500.
+            # unhandled 500. A .7z only gets here when py7zr cannot decode
+            # its method and no external tool is there to; its own message
+            # says exactly that.
+            is_rar = Path(row["absolute_path"]).suffix.lower() == ".rar"
             errors.append({
                 "library_item_id": item_id,
-                "error": "RAR extraction is unavailable on this machine (no unrar/7z/bsdtar found on PATH) "
-                         "-- see Settings for details.",
+                "error": ("RAR extraction is unavailable on this machine (no unrar/7z/bsdtar found on PATH) "
+                          "-- see Settings for details.") if is_rar else str(exc),
             })
+            if progress:
+                progress(item_id=item_id, phase="Failed", error=errors[-1]["error"])
             continue
         except (OSError, manifest_mod.ManifestError, extractor.ArchiveError, ValueError) as exc:
             errors.append({"library_item_id": item_id, "error": str(exc)})

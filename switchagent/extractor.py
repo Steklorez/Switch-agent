@@ -19,7 +19,10 @@ Two clearly separate operations:
 
 from __future__ import annotations
 
+import os
 import shutil
+import subprocess
+import sys
 import uuid
 import zipfile
 import zlib
@@ -379,7 +382,9 @@ def _extract_zip_streaming(
     return file_count, total_bytes
 
 
-def _extract_7z(archive_path: Path, dest_root: Path, limits: config.ExtractionLimits) -> None:
+def _extract_7z(
+    archive_path: Path, dest_root: Path, limits: config.ExtractionLimits, entries: list[ArchiveEntry],
+) -> None:
     import py7zr
     import py7zr.exceptions
 
@@ -393,6 +398,116 @@ def _extract_7z(archive_path: Path, dest_root: Path, limits: config.ExtractionLi
         # decompressed bytes -- the same "don't trust declared sizes" spirit
         # as the ZIP streaming path above, just enforced by the library.
         raise ExtractionLimitError(str(exc)) from exc
+    except py7zr.exceptions.UnsupportedCompressionMethodError as exc:
+        # A method py7zr cannot decode. Real case (2026-09-23): Mega Man X
+        # Regenesis' switch.7z, made by a current 7-Zip, compresses one of
+        # its two blocks as LZMA2 + the ARM64 branch filter (method 0x0A,
+        # added in 7-Zip 23). py7zr 1.1.3 lists it fine and then fails to
+        # unpack it with "Archive is compressed by an unsupported
+        # compression algorithm". 7-Zip itself and the tar.exe that ships
+        # with Windows (libarchive 3.8.8) both unpack it byte-for-byte, so
+        # the archive goes to one of those rather than failing the install.
+        _clear_directory(dest_root)
+        _extract_7z_with_external_tool(archive_path, dest_root, entries, reason=exc)
+
+
+def _clear_directory(path: Path) -> None:
+    """Drops whatever a failed attempt managed to write before giving up."""
+    shutil.rmtree(path, ignore_errors=True)
+    path.mkdir(parents=True, exist_ok=True)
+
+
+def external_7z_tools() -> list[tuple[str, str]]:
+    """(label, executable) for every tool on this machine that can unpack
+    what py7zr cannot, in the order they are tried: 7-Zip (on PATH, or
+    where its installer puts it), then Windows' own tar.exe -- libarchive,
+    on every Windows 10 1803+ and 11. Only the System32 tar is considered:
+    a `tar` on PATH may well be GNU tar (Git for Windows), which cannot
+    read 7z at all."""
+    candidates = [shutil.which(name) for name in ("7z", "7za", "7zz")]
+    for env in ("ProgramFiles", "ProgramW6432", "ProgramFiles(x86)"):
+        base = os.environ.get(env)
+        if base:
+            candidates.append(os.path.join(base, "7-Zip", "7z.exe"))
+    found: list[tuple[str, str]] = []
+    seen: set[str] = set()
+    for exe in candidates:
+        if exe and os.path.isfile(exe) and os.path.normcase(exe) not in seen:
+            seen.add(os.path.normcase(exe))
+            found.append(("7-Zip", exe))
+    if sys.platform == "win32":
+        tar = os.path.join(os.environ.get("SystemRoot", r"C:\Windows"), "System32", "tar.exe")
+        if os.path.isfile(tar):
+            found.append(("tar", tar))
+    return found
+
+
+def _external_7z_command(label: str, exe: str, archive_path: Path, dest_root: Path) -> list[str]:
+    if label == "7-Zip":
+        # -y: no prompts; -bd/-bso0/-bsp0: nothing on stdout. stdin is
+        # closed by the caller, so a password prompt cannot hang the job.
+        return [exe, "x", "-y", "-bd", "-bso0", "-bsp0", f"-o{dest_root}", "--", str(archive_path)]
+    return [exe, "-xf", str(archive_path), "-C", str(dest_root)]
+
+
+def _extract_7z_with_external_tool(archive_path: Path, dest_root: Path, entries: list[ArchiveEntry],
+                                   *, reason: Exception) -> None:
+    """Unpacks with the first external tool that manages it, then holds the
+    result to the archive's OWN listing: every file present, at its
+    declared size and CRC32. A tool this module does not control is not
+    trusted for anything the listing can check -- and safe_extract() still
+    runs its usual post-extraction check (no symlink, nothing outside
+    dest_root, limits) after this."""
+    tools = external_7z_tools()
+    if not tools:
+        raise ExtractionBackendMissingError(
+            f"{archive_path.name} uses a compression method the built-in 7z extractor cannot unpack "
+            f"(7-Zip's ARM64 filter, for one), and neither 7-Zip nor Windows' tar.exe was found to "
+            f"unpack it instead -- installing 7-Zip fixes this. ({reason})"
+        )
+    failures = []
+    for label, exe in tools:
+        try:
+            proc = subprocess.run(
+                _external_7z_command(label, exe, archive_path, dest_root),
+                stdin=subprocess.DEVNULL, capture_output=True, text=True, errors="replace",
+                # The desktop app has no console; without this every call
+                # would flash one up on screen.
+                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+            )
+        except OSError as exc:
+            failures.append(f"{label}: {exc}")
+            _clear_directory(dest_root)
+            continue
+        if proc.returncode == 0:
+            mismatch = _first_listing_mismatch(entries, dest_root)
+            if mismatch is None:
+                return
+            failures.append(f"{label}: {mismatch}")
+        else:
+            failures.append(f"{label}: exit {proc.returncode}: {(proc.stderr or proc.stdout).strip()[:200]}")
+        _clear_directory(dest_root)
+    raise ArchiveError(f"could not unpack {archive_path.name}: " + "; ".join(failures))
+
+
+def _first_listing_mismatch(entries: list[ArchiveEntry], dest_root: Path) -> Optional[str]:
+    for entry in entries:
+        if entry.is_dir:
+            continue
+        target = safe_relative_path(entry.name, dest_root)
+        if not target.is_file():
+            return f"'{entry.name}' was not unpacked"
+        size = target.stat().st_size
+        if size != entry.size:
+            return f"'{entry.name}' unpacked at {size} bytes, the archive says {entry.size}"
+        if entry.crc32 is not None:
+            crc = 0
+            with target.open("rb") as handle:
+                for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+                    crc = zlib.crc32(chunk, crc)
+            if crc & 0xFFFFFFFF != entry.crc32:
+                return f"'{entry.name}' does not match the archive's CRC32"
+    return None
 
 
 def rar_backend_available() -> bool:
@@ -489,7 +604,7 @@ def safe_extract(
         if ext == ".zip":
             file_count, total_size = _extract_zip_streaming(archive_path, dest_root, limits)
         elif ext == ".7z":
-            _extract_7z(archive_path, dest_root, limits)
+            _extract_7z(archive_path, dest_root, limits, entries)
             file_count, total_size = _post_check_extracted_dir(dest_root, limits)
         elif ext == ".rar":
             _extract_rar(archive_path, dest_root)

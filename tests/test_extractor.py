@@ -389,3 +389,70 @@ def test_conflicts_from_archive_entries_without_extracting(tmp_path):
     assert by_path["romfs/new_file.bin"] is ConflictState.NEW
     assert by_path["romfs/same_file.bin"] is ConflictState.SAME
     assert by_path["romfs/changed.bin"] is ConflictState.CONFLICT
+
+
+# ---------------------------------------------------------------------------
+# A 7z method py7zr cannot decode goes to 7-Zip / Windows tar instead.
+#
+# Real case (2026-09-23): Mega Man X Regenesis' switch.7z uses LZMA2 + the
+# ARM64 filter (7-Zip 23+). py7zr lists it and then refuses to unpack it,
+# which failed the install with "(b'\\n', 'Archive is compressed by an
+# unsupported compression algorithm.')". The fake tool below is Python
+# unpacking with the real py7zr -- only THIS process is made to refuse.
+# ---------------------------------------------------------------------------
+
+import sys
+
+import py7zr
+import py7zr.exceptions
+
+_UNPACK = (
+    "import sys, py7zr\n"
+    "with py7zr.SevenZipFile(sys.argv[1]) as z: z.extractall(path=sys.argv[2])\n"
+)
+_UNPACK_WRONG = _UNPACK + (
+    "import pathlib; next(p for p in pathlib.Path(sys.argv[2]).rglob('*') if p.is_file()).write_bytes(b'tampered')\n"
+)
+
+
+def _py7zr_refuses(monkeypatch):
+    def refuse(self, *args, **kwargs):
+        raise py7zr.exceptions.UnsupportedCompressionMethodError(b"\n", "unsupported compression algorithm")
+    monkeypatch.setattr(py7zr.SevenZipFile, "extractall", refuse)
+
+
+def _fake_tool(monkeypatch, script):
+    monkeypatch.setattr(extractor, "external_7z_tools", lambda: [("7-Zip", sys.executable)])
+    monkeypatch.setattr(
+        extractor, "_external_7z_command",
+        lambda _label, exe, archive, dest: [exe, "-c", script, str(archive), str(dest)],
+    )
+
+
+def test_an_unsupported_7z_method_is_unpacked_by_an_external_tool(tmp_path, monkeypatch):
+    path = build_7z(tmp_path / "switch.7z", {
+        "switch/mmxregenesis_nx/assets/a.ctex": b"asset a",
+        "switch/mmxregenesis_nx/assets/scripts/x.gd": b"script x",
+    })
+    _py7zr_refuses(monkeypatch)
+    _fake_tool(monkeypatch, _UNPACK)
+    result = extractor.safe_extract(path, "job", work_root=tmp_path / "work")
+    assert result.file_count == 2
+    assert (result.dest_root / "switch/mmxregenesis_nx/assets/scripts/x.gd").read_bytes() == b"script x"
+
+
+def test_an_external_tools_output_is_held_to_the_archives_own_crcs(tmp_path, monkeypatch):
+    path = build_7z(tmp_path / "switch.7z", {"switch/app/app.nro": b"the real bytes"})
+    _py7zr_refuses(monkeypatch)
+    _fake_tool(monkeypatch, _UNPACK_WRONG)
+    with pytest.raises(extractor.ArchiveError, match="unpacked at|CRC32"):
+        extractor.safe_extract(path, "job", work_root=tmp_path / "work")
+    assert not (tmp_path / "work" / "job").exists()
+
+
+def test_with_no_external_tool_the_error_says_what_would_fix_it(tmp_path, monkeypatch):
+    path = build_7z(tmp_path / "switch.7z", {"switch/app/app.nro": b"nro"})
+    _py7zr_refuses(monkeypatch)
+    monkeypatch.setattr(extractor, "external_7z_tools", lambda: [])
+    with pytest.raises(extractor.ExtractionBackendMissingError, match="7-Zip"):
+        extractor.safe_extract(path, "job", work_root=tmp_path / "work")
