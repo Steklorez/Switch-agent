@@ -110,10 +110,24 @@ body {
 .library-tiles .game-group:has(.game-variants[open]) { z-index: 10; transform: none; }
 .library-tiles .game-group:has(.game-variants[open]) > .game-details-link { visibility: hidden; }
 .library-tiles .game-details-link { margin-top: auto; }
+/* Tags wrap onto as many lines as they need. They used to stay on one line
+   and scroll sideways, and a fourth kind ("SD files") pushed every card
+   that had one into a horizontal scrollbar. */
 .library-tiles .game-variants summary, .library-tiles .extras-empty-row {
   min-height: 46px; padding: 10px 8px; display: flex; align-items: center; gap: 4px;
-  white-space: nowrap; overflow-x: auto;
+  flex-wrap: wrap; white-space: normal; overflow: visible;
 }
+/* A tile is three rows of its shelf -- the card, its tag strip, its link --
+   laid out on the shelf's own grid (subgrid), so every tile in a row takes
+   the height of the tallest one part by part: when one tile's tags need a
+   second line, the whole row grows those few pixels together and the tag
+   strips stay level, instead of one tile standing out. */
+.library-tiles .game-group { display: grid; grid-row: span 3; grid-template-rows: subgrid; row-gap: 0; }
+.library-tiles .game-group > .card { grid-row: 1; }
+.library-tiles .game-group > .game-variants,
+.library-tiles .game-group > .extras-empty-row { grid-row: 2; }
+.library-tiles .game-group > .game-details-link { grid-row: 3; }
+.library-tiles .game-variants summary { box-sizing: border-box; height: 100%; }
 .library-tiles .extras-empty-row { border-top: 1px solid var(--border); }
 .library-tiles .extras-empty-row::before { content: ''; width: 8px; flex: none; }
 .library-tiles .extras-pill { padding: 3px 5px; font-size: .68rem; }

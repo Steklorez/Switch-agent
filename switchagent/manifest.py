@@ -33,7 +33,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
 
-from . import config
+from . import config, sd_files
 from .model import ContentType
 from .preview import PreviewReport
 from .scanner import sha256_file
@@ -155,6 +155,8 @@ def build_manifest_and_stage(
         files = _build_package_files(report, payload_dir)
     elif report.content_type is ContentType.ATMOSPHERE_MOD:
         files = _build_mod_files(report, payload_dir)
+    elif report.content_type is ContentType.SD_FILES:
+        files = _build_sd_files(report, payload_dir)
     else:
         raise ManifestError(f"content type {report.content_type.value} is not eligible for transfer")
 
@@ -278,6 +280,49 @@ def _build_mod_files(report: PreviewReport, payload_dir: Path) -> list[ManifestF
         ))
     if not files:
         raise ManifestError(f"mod source has no files: {report.mod_source_dir}")
+    return files
+
+
+def _build_sd_files(report: PreviewReport, payload_dir: Path) -> list[ManifestFile]:
+    """Every file of a switch/ folder, each bound for the same path under
+    switch/ on the SD card (sd_files.destination_for) -- nowhere else, so an
+    SD_FILES job can never write outside the homebrew folder whatever its
+    source looked like. Frozen and verified exactly the way a mod is: a bare
+    folder under a scanned root is hashed in place and re-verified before
+    sending; an archive's extracted folder is moved into the payload dir."""
+    if report.sd_source_dir is None:
+        raise ManifestError(
+            "switch/ folder not staged locally yet -- call preview_path(path, extract=True) first"
+        )
+    if not report.sd_source_dir.is_dir():
+        raise ManifestError(f"switch/ folder does not exist: {report.sd_source_dir}")
+
+    bare_root: Optional[Path] = None
+    if report.work_dir is None:
+        walk_root = report.sd_source_dir
+        source_kind, bare_root = _classify_bare_source_root(walk_root)
+    else:
+        frozen_root = payload_dir / "sd"
+        if frozen_root.exists():
+            import uuid
+            frozen_root = payload_dir / ("sd-" + uuid.uuid4().hex)
+        shutil.move(str(report.sd_source_dir), str(frozen_root))
+        walk_root = frozen_root
+        source_kind = "frozen"
+
+    files = []
+    for f in sorted((p for p in walk_root.rglob("*") if p.is_file()), key=lambda p: p.as_posix()):
+        rel = f.relative_to(walk_root).as_posix()
+        source_rel = f.relative_to(payload_dir).as_posix() if source_kind == "frozen" else f.relative_to(bare_root).as_posix()
+        file_stat = f.stat()
+        files.append(ManifestFile(
+            dest_relative_path=sd_files.destination_for(rel), source_kind=source_kind,
+            source_relative_path=source_rel, size=file_stat.st_size, sha256=sha256_file(f),
+            source_root=str(bare_root) if source_kind == "library" else None,
+            mtime_ns=file_stat.st_mtime_ns,
+        ))
+    if not files:
+        raise ManifestError(f"switch/ folder has no files: {report.sd_source_dir}")
     return files
 
 

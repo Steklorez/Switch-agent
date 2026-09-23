@@ -1,7 +1,7 @@
 # SwitchAgent
 
-**Install NSP/NSZ/XCI/XCZ packages and Atmosphère mods onto a Nintendo
-Switch from Windows, over USB** -- a library browser, a job queue and a
+**Install NSP/NSZ/XCI/XCZ packages, Atmosphère mods and homebrew ports onto
+a Nintendo Switch from Windows, over USB** -- a library browser, a job queue and a
 local web UI on top of [DBI](https://github.com/rashevskyv/dbi)'s "MTP
 Responder" mode.
 
@@ -19,8 +19,8 @@ console through DBI.
 ## What it does
 
 A local, single-user Windows tool that turns a downloads folder full of
-Nintendo Switch content (NSP/NSZ/XCI/XCZ install packages and Atmosphère
-mod folders/archives) into a browsable library, lets you pick what to
+Nintendo Switch content (NSP/NSZ/XCI/XCZ install packages, Atmosphère
+mod folders/archives and homebrew ports) into a browsable library, lets you pick what to
 send to which physically-connected Switch (running the homebrew app
 [DBI](https://github.com/rashevskyv/dbi) in "MTP Responder" mode), and
 reliably delivers it over MTP with a persistent job queue that survives
@@ -36,6 +36,11 @@ a job was created for.
   download into and it scans, classifies and groups what it finds as
   **Base Game / Update / DLC / Mod**, including content still sitting
   inside a ZIP/7Z/RAR archive.
+- **A homebrew port is one game** -- the forwarder `.nsp` and its
+  `switch/` folder (as `switch.7z` or already unpacked) are one card.
+  Installing it sends the forwarder to DBI and copies `switch/` onto the
+  SD card as it is; the card warns you if the file its icon starts is not
+  among the game's files.
 - **A library that stays current** -- automatic folder scanning and live
   library updates, with game covers downloaded in the background and
   cached locally. Both automatic scanning and cover downloads can be
@@ -72,6 +77,7 @@ this is the same transport with the parts Explorer knows nothing about:
 |---|---|---|
 | Knows what a file actually is (Base/Update/DLC/Mod) | no | yes |
 | Content inside ZIP/7Z/RAR | unpack by hand first | listed, and extracted for you |
+| Homebrew port (forwarder + `switch/` folder) | copy `switch/` onto the card yourself | one card, both halves installed |
 | Transfer interrupted halfway | nothing remembers it | job kept as `INTERRUPTED`, retried when you say so |
 | Install order | your problem | Base -> Update -> DLC -> Mod |
 | More than one console | whichever drive letter you clicked | each job is bound to one device |
@@ -160,10 +166,12 @@ over MTP -- check the console's own screen to confirm.
   a signature doesn't always make this disappear immediately.
 - **RAR files won't install** -- SwitchAgent can list/classify `.rar`
   archives out of the box, but actually unpacking one needs an external
-  `unrar`, `7z`, or `bsdtar` tool on your `PATH` (e.g. install 7-Zip).
-  Check the **Settings** page -- it tells you plainly whether RAR
-  extraction is currently available. ZIP and 7Z always work with no
-  extra tool.
+  `unrar`, `7z`, or `bsdtar` tool on your `PATH` (e.g. install 7-Zip and
+  add its folder to `PATH` -- its installer does not). Check the
+  **Settings** page -- it tells you plainly whether RAR extraction is
+  currently available. ZIP and 7Z work with no extra tool; a 7Z packed by
+  a recent 7-Zip is unpacked with 7-Zip or with the `tar.exe` that comes
+  with Windows.
 - **Nothing happens when I double-click the EXE a second time** -- that's
   by design: SwitchAgent detected it's already running and just opened
   its existing web UI instead of starting a second copy.

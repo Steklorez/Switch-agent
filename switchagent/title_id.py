@@ -145,5 +145,14 @@ def classify_title_variant(title_id_value: str) -> TitleVariant:
         return TitleVariant("BASE", f"{value:016X}")
     if low12 == 0x800:
         return TitleVariant("UPDATE", f"{(value & ~0xFFF):016X}")
+    if not value & 0x1000:
+        # Not in any base's DLC block (base + 0x1000 always sets this bit,
+        # and a base's own id never has it -- every real family above
+        # agrees). Only a made-up id looks like this: homebrew ports pick
+        # their own, e.g. Undertale Yellow's 018DDBF896CAE6E0, which the
+        # DLC formula turned into "DLC of 018DDBF896CAD000, base game not
+        # in library" -- a game that does not exist. Such an id is its own
+        # family.
+        return TitleVariant("BASE", f"{value:016X}")
     dlc_family_base = value & ~0xFFF
     return TitleVariant("DLC", f"{(dlc_family_base - 0x1000):016X}")

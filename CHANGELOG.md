@@ -7,6 +7,14 @@ Entries are one sentence per change, three to five lines per release, and
 only what a user would notice — no internals, no reasoning, no history.
 Those belong in the commit message. See [CLAUDE.md](CLAUDE.md#how-to-write-an-entry).
 
+## v1.0.15
+
+- A homebrew port is one game now: its `switch/` folder, archived or unpacked, is part of the game's card and is copied to the SD card on install.
+- If a game's icon would start a file none of its files provide, its card says so.
+- Homebrew ports with a TITLE_ID of their own show as games, not as DLC of a missing game.
+- Card tags wrap onto a second line instead of scrolling sideways.
+- Archives packed by a recent 7-Zip install instead of failing with "unsupported compression algorithm".
+
 ## v1.0.14
 
 - Installing over a file already on the Switch now follows a Settings choice — skip it or replace it, the same way every time — instead of a Queue card waiting to be clicked.

@@ -270,7 +270,7 @@
 
   // role -> tag label shown on child/flat rows in the confirm list. "base"
   // and null are intentionally absent -- those rows never get a tag.
-  const CONFIRM_ROLE_LABELS = { update: "Update", dlc: "DLC", mod: "Mod", duplicate: "Other copy" };
+  const CONFIRM_ROLE_LABELS = { update: "Update", dlc: "DLC", mod: "Mod", sd: "SD files", duplicate: "Other copy" };
 
   // Cover-art loader for the confirm-list thumbnails. covers.js's own loader
   // can't be reused here -- it hard-depends on #cover-status-text existing on

@@ -42,6 +42,7 @@ from typing import Optional
 
 from . import db
 from . import manifest as manifest_mod
+from . import sd_files
 from . import title_id as title_id_mod
 from . import work_cleanup
 from .model import ContentType
@@ -86,7 +87,7 @@ class JobRunOutcome:
 def _target_storage_for(report: PreviewReport) -> str:
     if report.content_type is ContentType.GAME_PACKAGE:
         return STORAGE_SD_INSTALL
-    if report.content_type is ContentType.ATMOSPHERE_MOD:
+    if report.content_type in (ContentType.ATMOSPHERE_MOD, ContentType.SD_FILES):
         return STORAGE_SD_CARD
     raise manifest_mod.ManifestError(
         f"content type {report.content_type.value} is not eligible for transfer"
@@ -151,6 +152,11 @@ def create_job_from_report(
     return job_id
 
 
+# Content whose manifest title_id IS its game's family id rather than an id
+# of its own that the variant arithmetic would have to decode.
+_TAGGED_WITH_FAMILY_ID = (ContentType.ATMOSPHERE_MOD.value, ContentType.SD_FILES.value)
+
+
 def _base_title_id_for_dependency_check(manifest) -> Optional[str]:
     """The family/base TITLE_ID a job's manifest actually depends on for
     install ordering -- mods are tagged with the base's own TITLE_ID
@@ -163,7 +169,7 @@ def _base_title_id_for_dependency_check(manifest) -> Optional[str]:
     DLC's own TITLE_ID), not the base's, which is exactly backwards."""
     if not manifest.title_id:
         return None
-    if manifest.content_type == ContentType.ATMOSPHERE_MOD.value:
+    if manifest.content_type in _TAGGED_WITH_FAMILY_ID:
         return manifest.title_id
     return title_id_mod.classify_title_variant(manifest.title_id).base_title_id
 
@@ -207,8 +213,11 @@ def _dependency_status(conn: sqlite3.Connection, manifest, target_device_id: str
     if not manifest.title_id:
         return None
 
-    if manifest.content_type == ContentType.ATMOSPHERE_MOD.value:
-        base_title_id = manifest.title_id  # mods are tagged with the base's own TITLE_ID directly
+    if manifest.content_type in _TAGGED_WITH_FAMILY_ID:
+        # mods are tagged with the base's own TITLE_ID directly, and so is a
+        # game's switch/ folder (sd_files.assign_owners) -- neither is ever
+        # a base game itself, so both wait behind one that is in flight.
+        base_title_id = manifest.title_id
     else:
         variant, base_title_id = title_id_mod.classify_title_variant(manifest.title_id)
         if variant == "BASE":
@@ -469,6 +478,15 @@ def resolve_library_item_display_name(
     filename). See find_family_base_name_source's own docstring for why
     `library_items` matters at scale."""
     raw_name = Path(row["absolute_path"]).name
+    if row["content_type"] == ContentType.SD_FILES.value:
+        # "switch.7z" or a folder called "switch" names the SD layout, not
+        # the game: borrow the game's name when it belongs to one (exactly
+        # as a mod does), the release folder's otherwise.
+        if row["title_id"]:
+            source = find_family_base_name_source(conn, row["title_id"], library_items=library_items)
+            if source is not None:
+                return Path(source["absolute_path"]).name
+        return sd_files.display_name(row["absolute_path"])
     if row["item_type"] != "MOD_FOLDER" or not row["title_id"]:
         return raw_name
     source = find_family_base_name_source(conn, row["title_id"], library_items=library_items)
@@ -506,16 +524,20 @@ def display_name_for_job(
         row = db.get_library_item_by_id(conn, job_row["library_item_id"])
         if row is not None:
             name = resolve_library_item_display_name(conn, row, library_items=library_items)
-            return _with_mod_suffix(name, job_row) if mod_suffix else name
+            return _with_mod_suffix(name, job_row, row["content_type"]) if mod_suffix else name
     if job_row["inbox_item_id"] is not None:
         row = db.get_inbox_item_by_id(conn, job_row["inbox_item_id"])
         if row is not None:
             name = Path(row["relative_path"]).name
-            return _with_mod_suffix(name, job_row) if mod_suffix else name
+            return _with_mod_suffix(name, job_row, row["content_type"]) if mod_suffix else name
     return f"job {job_row['id']}"
 
 
-def _with_mod_suffix(name: str, job_row: sqlite3.Row) -> str:
+def _with_mod_suffix(name: str, job_row: sqlite3.Row, content_type: Optional[str] = None) -> str:
+    # A game's switch/ folder also goes to SD_CARD, and calling it a mod
+    # would be wrong: it is half of the game, not a change to one.
+    if content_type == ContentType.SD_FILES.value:
+        return f"{name} — SD files"
     if job_row["target_storage"] == STORAGE_SD_CARD:
         return f"{name} — Mod"
     return name

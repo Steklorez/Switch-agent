@@ -122,6 +122,11 @@ CLSID_PortableDeviceKeyCollection = "{DE2D022D-2480-43BE-97F0-D1FA2CF98F4F}"
 IID_IPortableDeviceKeyCollection = "{DADA2357-E0AD-492E-98DB-DD61C53BA353}"
 IID_IPortableDeviceContent = "{6A96ED84-7C73-4480-9938-BF5AF477D426}"
 IID_IEnumPortableDeviceObjectIDs = "{10ECE955-CF41-4728-BFA0-41EEDF1BBF19}"
+# Not in this machine's type libraries (PortableDeviceApi.dll's embedded
+# library stops at IPortableDeviceContent2), so this one is from
+# PortableDeviceApi.h. A wrong value can only make QueryInterface refuse,
+# which stream_object_id() treats as "unknown" -- never a crash.
+IID_IPortableDeviceDataStream = "{88E04DB3-1012-4D64-9996-F703A950D3F4}"
 IID_IPortableDeviceProperties = "{7F6D695C-03DF-4439-A809-59266BEEE3A6}"
 IID_IPortableDeviceResources = "{FD8878AC-D841-4D17-891C-E6829CDB6934}"
 IID_IStream = "{0000000C-0000-0000-C000-000000000046}"
@@ -407,6 +412,25 @@ def stream_commit(stream):
     vcall(stream, 8, (DWORD,), 0, what="IStream::Commit")
 
 
+def stream_object_id(stream):
+    """The object id the device gave the file just committed through
+    `stream` (IPortableDeviceDataStream::GetObjectID, vtable slot 14: after
+    IUnknown's 3, ISequentialStream's 2 and IStream's 9), or None when the
+    stream will not say. Read-only."""
+    try:
+        data_stream = query_interface(stream, IID_IPortableDeviceDataStream)
+    except ComError:
+        return None
+    try:
+        out = c_void_p()
+        vcall(data_stream, 14, (POINTER(c_void_p),), byref(out), what="IPortableDeviceDataStream::GetObjectID")
+        return _take_string(out) if out.value else None
+    except ComError:
+        return None
+    finally:
+        release(data_stream)
+
+
 def create_folder(content, parent_object_id, name):
     """CreateObjectWithPropertiesOnly for a folder. WRITES to the device."""
     values = values_new()
@@ -599,7 +623,7 @@ class WpdSession:
         return current
 
     def send_file(self, parent_object_id, filename, source_path, *, progress=None,
-                  progress_interval_seconds=DEFAULT_PROGRESS_INTERVAL_SECONDS):
+                  progress_interval_seconds=DEFAULT_PROGRESS_INTERVAL_SECONDS, remember=False):
         """Streams `source_path` into `parent_object_id` as `filename`.
 
         Returns a TransferTiming. `progress(bytes_done, bytes_total)` is
@@ -612,6 +636,15 @@ class WpdSession:
         nothing about what DBI then did with those bytes -- see
         verify_install_transport() in windows.py for why that distinction is
         preserved rather than upgraded to COMPLETED.
+
+        remember=True records the new object in the parent's cached listing
+        instead of dropping that listing. Only for a real filesystem: DBI's
+        install node deletes its objects on completion, and there the next
+        lookup has to ask the device again. Forgetting cost a full
+        re-enumeration of the destination folder per file -- quadratic in
+        the folder's size, and a homebrew port's data folder can hold 1,420
+        files (Mega Man X Regenesis, measured 2026-09-23 at ~0.3-2 ms per
+        listed child: minutes of listing for one folder).
         """
         size = source_path.stat().st_size
         started = time.perf_counter()
@@ -649,9 +682,17 @@ class WpdSession:
                     raise
                 timed_out = True
             committed = time.perf_counter()
+            new_object_id = stream_object_id(stream) if remember and not timed_out else None
         finally:
             release(stream)
-        self.forget_children(parent_object_id)
+        known = self._children_cache.get(parent_object_id)
+        if new_object_id and known is not None and filename not in known:
+            # Only ever added to a listing that was already read in full --
+            # a listing that held just this file would hide its siblings
+            # from every existence check after it.
+            known[filename] = new_object_id
+        else:
+            self.forget_children(parent_object_id)
         return TransferTiming(created - started, streamed - created, committed - streamed, written,
                               finalise_timed_out=timed_out)
 

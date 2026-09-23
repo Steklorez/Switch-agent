@@ -10,15 +10,37 @@ CLI command). Nothing in this module writes to the Switch.
 from __future__ import annotations
 
 import hashlib
+import json
 import re
 import time
 from pathlib import Path
 from typing import Callable, Optional
 
-from . import config, db, extractor, title_id
+from . import config, db, extractor, sd_files, title_id
 from .model import ContentType
 
 TITLE_ID_DIR_RE = re.compile(rf"^{config.TITLE_ID_RE}$")
+
+# Which version of classify_file() indexed a row, stored in its details_json.
+# Bump it whenever classification learns to recognise something it used to
+# miss: a file whose size and mtime have not changed is otherwise never
+# looked at again, so without this an archive indexed as UNKNOWN before
+# switch/ folders were understood would stay a NEEDS REVIEW card called
+# "switch" for good -- on exactly the libraries the change was made for.
+#   1  (no marker) -- before SD_FILES
+#   2  switch/ folders, forwarder launch paths
+CLASSIFICATION_REVISION = 2
+
+
+def _details_json(**parts) -> str:
+    return json.dumps(
+        {"classified": CLASSIFICATION_REVISION, **sd_files.details(**parts)}, ensure_ascii=False,
+    )
+
+
+def classified_revision(row) -> int:
+    value = sd_files.row_details(row).get("classified")
+    return value if isinstance(value, int) else 1
 
 
 def sha256_file(path: Path, chunk_size: int = 1024 * 1024) -> str:
@@ -77,6 +99,10 @@ def _classify_package_file(abs_path: Path, ext: str, *, hash_content: bool = Tru
     fmt = ext.lstrip(".").upper()
     guess = title_id.from_filename(abs_path.name)
     content_hash = sha256_file(abs_path) if hash_content else None
+    # A homebrew forwarder names the .nro it starts; that is how its switch/
+    # folder is found and checked (see sd_files.py). Only packages small
+    # enough to be one are read at all.
+    details_json = _details_json(launches=sd_files.forwarder_launch_path(abs_path))
 
     if guess.title_id is None:
         # Never trust the filename alone -- if TITLE_ID cannot be
@@ -90,7 +116,7 @@ def _classify_package_file(abs_path: Path, ext: str, *, hash_content: bool = Tru
             title_id=None, title_id_source=None, title_id_confident=False,
             status="NEEDS_REVIEW", suggested_action=None, suggested_target=None,
             note="could not unambiguously determine TITLE_ID from the filename -- needs human review",
-            error=None, details_json=None,
+            error=None, details_json=details_json,
         )
 
     return dict(
@@ -99,7 +125,7 @@ def _classify_package_file(abs_path: Path, ext: str, *, hash_content: bool = Tru
         title_id=guess.title_id, title_id_source=guess.source, title_id_confident=guess.confident,
         status="ANALYZED", suggested_action="INSTALL_VIA_DBI", suggested_target="SD_INSTALL",
         note="TITLE_ID taken from the filename -- a release label, not a confirmed value from the package",
-        error=None, details_json=None,
+        error=None, details_json=details_json,
     )
 
 
@@ -119,6 +145,10 @@ def _classify_archive_file(abs_path: Path, ext: str) -> dict:
 
     content_hash = extractor.hash_entries(entries)
     cls = extractor.classify_entries(entries)
+    # A package or mod archive can carry a switch/ folder as well; it is
+    # installed alongside (see services.create_and_confirm_jobs), and the
+    # row says so rather than keeping it out of sight.
+    sd_details = _details_json(sd=cls.sd_summary)
 
     common = dict(
         item_type="FILE", file_type=archive_format, content_hash=content_hash,
@@ -133,7 +163,7 @@ def _classify_archive_file(abs_path: Path, ext: str) -> dict:
             title_id=title, title_id_source="archive", title_id_confident=False,
             status="NEEDS_REVIEW", suggested_action=None, suggested_target=None,
             note="archive contains both an installable package and an atmosphere mod -- MIXED, needs a human decision",
-            details_json=None,
+            details_json=sd_details,
         )
 
     if cls.content_type is ContentType.GAME_PACKAGE:
@@ -144,7 +174,7 @@ def _classify_archive_file(abs_path: Path, ext: str) -> dict:
             title_id_confident=cls.package_title_id_guess.confident,
             status="ANALYZED", suggested_action="INSTALL_VIA_DBI", suggested_target="SD_INSTALL",
             note="archive contains an installable package, will be safely extracted before sending",
-            details_json=None,
+            details_json=sd_details,
         )
 
     if cls.content_type is ContentType.ATMOSPHERE_MOD:
@@ -155,15 +185,29 @@ def _classify_archive_file(abs_path: Path, ext: str) -> dict:
             title_id_confident=cls.atmosphere_title_id_guess.confident,
             status="ANALYZED", suggested_action="COPY_MERGE", suggested_target="SD_CARD",
             note="archive contains an atmosphere mod, will be safely extracted before sending",
-            details_json=None,
+            details_json=sd_details,
+        )
+
+    if cls.content_type is ContentType.SD_FILES:
+        # No TITLE_ID inside a switch/ folder. A bracketed one in the
+        # archive's own name is taken as the label it is; otherwise which
+        # game this belongs to is decided once the whole library is known
+        # (sd_files.assign_owners, run at the end of scan_library_once).
+        guess = title_id.from_filename(abs_path.name)
+        return dict(
+            **common,
+            title_id=guess.title_id, title_id_source=guess.source, title_id_confident=False,
+            status="ANALYZED", suggested_action="COPY_MERGE", suggested_target="SD_CARD",
+            note="archive contains a switch/ folder for the SD card, will be safely extracted before sending",
+            details_json=sd_details,
         )
 
     return dict(
         **common,
         title_id=None, title_id_source=None, title_id_confident=False,
         status="NEEDS_REVIEW", suggested_action=None, suggested_target=None,
-        note="archive contains neither an nsp/nsz/xci/xcz package nor an atmosphere structure",
-        details_json=None,
+        note="archive contains neither an nsp/nsz/xci/xcz package, an atmosphere structure nor a switch/ folder",
+        details_json=sd_details,
     )
 
 
@@ -523,17 +567,72 @@ def scan_library_once(
     # Downloads directory this enumeration alone is most of the wait, and a
     # cancel that only took effect afterwards would not feel like a cancel.
     candidate_files: list[Path] = []
+    # Folders called "switch" are noted during the SAME walk rather than a
+    # second one: on a network share this enumeration is most of a scan.
+    switch_dirs: list[Path] = []
     for root in library_dirs:
         if not root.is_dir():
             continue
         for candidate in root.rglob("*"):
             if _stopped():
                 return _cancelled()
-            if (candidate.is_file()
-                    and candidate.suffix.lower() in config.ALL_TRACKED_EXTENSIONS
+            if candidate.name.lower() == sd_files.SD_ROOT_DIR:
+                if candidate.is_dir():
+                    switch_dirs.append(candidate)
+                continue
+            if (candidate.suffix.lower() in config.ALL_TRACKED_EXTENSIONS
+                    and candidate.is_file()
                     and not path_is_inside_any(candidate, mod_folders)):
                 candidate_files.append(candidate)
     candidate_files = list(dict.fromkeys(candidate_files))
+
+    # switch/ folders already unpacked in the library (a homebrew port's
+    # .nro often ships that way, next to an archive of its data): each is
+    # one SD_FILES item, fingerprinted exactly like a mod folder.
+    for folder in sd_files.find_sd_folders(switch_dirs, exclude=mod_folders):
+        if _stopped():
+            return _cancelled()
+        abs_path = str(folder)
+        seen_absolute_paths.add(abs_path)
+        if on_file is not None:
+            on_file(abs_path)
+
+        existing = db.get_library_item(conn, abs_path)
+        content_hash, total_size, max_mtime = hash_mod_folder(folder)
+        if (existing is not None and existing["status"] != db.LIBRARY_ITEM_RETIRED
+                and existing["content_hash"] == content_hash):
+            db.touch_library_item_scanned(conn, existing["id"])
+            unchanged_count += 1
+            continue
+
+        # item_type is the folder kind the schema has (a CHECK constraint
+        # allows FILE and MOD_FOLDER only); content_type is what says this
+        # folder is SD card files rather than a mod.
+        db.upsert_library_item(
+            conn,
+            absolute_path=abs_path,
+            item_type="MOD_FOLDER",
+            file_type=ContentType.SD_FILES.value,
+            size=total_size,
+            mtime=max_mtime,
+            content_hash=content_hash,
+            content_type=ContentType.SD_FILES.value,
+            package_format=None,
+            title_id=None,
+            title_id_source=None,
+            title_id_confident=False,
+            status="AVAILABLE",
+            suggested_action="COPY_MERGE",
+            suggested_target="SD_CARD",
+            note=None,
+            error=None,
+            details_json=_details_json(sd=sd_files.folder_summary(folder)),
+        )
+        if existing is None:
+            new_count += 1
+            newly_indexed_paths.add(abs_path)
+        else:
+            updated_count += 1
 
     for abs_path_obj in candidate_files:
         if _stopped():
@@ -552,14 +651,18 @@ def scan_library_once(
         existing = db.get_library_item(conn, abs_path)
         # Same rule as the mod-folder loop above: a retired row must be
         # re-indexed rather than recognised as unchanged.
-        if (existing is not None and existing["status"] != db.LIBRARY_ITEM_RETIRED
-                and existing["size"] == st.st_size and existing["mtime"] == st.st_mtime):
+        same_file = (existing is not None and existing["status"] != db.LIBRARY_ITEM_RETIRED
+                     and existing["size"] == st.st_size and existing["mtime"] == st.st_mtime)
+        if same_file and classified_revision(existing) >= CLASSIFICATION_REVISION:
             db.touch_library_item_scanned(conn, existing["id"])
             unchanged_count += 1
             continue
 
         is_package = abs_path_obj.suffix.lower() in config.PACKAGE_EXTENSIONS
-        if not is_package and not is_file_stable(abs_path_obj):
+        # A file only being classified again by a newer revision has not
+        # changed since it was last read whole, so it is not mid-download
+        # and needs no stability wait (2s a file, on every archive at once).
+        if not is_package and not same_file and not is_file_stable(abs_path_obj):
             skipped_unstable += 1
             continue
 
@@ -645,8 +748,34 @@ def scan_library_once(
             seen_absolute_paths.add(row["absolute_path"])
     removed_count = db.delete_library_items_missing_from(conn, seen_absolute_paths)
 
+    # Last, with the whole library known: which game each switch/ folder
+    # belongs to. Needs every package's final row, which is why it cannot
+    # happen while the files are still being read.
+    assign_sd_file_owners(conn)
+
     return dict(
         new=new_count, updated=updated_count, unchanged=unchanged_count,
         skipped_unstable=skipped_unstable, duplicates=duplicate_count,
         errors=errors, removed=removed_count, relocated=relocated_count,
     )
+
+
+def assign_sd_file_owners(conn) -> int:
+    """Records, on every SD_FILES row, the game it belongs to (see
+    sd_files.assign_owners for the rules) as that row's title_id. Rows whose
+    answer did not change are not written. Returns how many changed.
+
+    Stored rather than worked out on every read because everything
+    downstream already keys off library_items.title_id -- Library's grouping,
+    the install order a job waits in, Queue and History's names -- and the
+    answer only changes when the library does, i.e. on a scan."""
+    rows = [row for row in db.list_library_items(conn) if row["status"] != db.LIBRARY_ITEM_RETIRED]
+    by_id = {row["id"]: row for row in rows}
+    changed = 0
+    for row_id, (owner, source) in sd_files.assign_owners(rows).items():
+        row = by_id[row_id]
+        if row["title_id"] == owner and row["title_id_source"] == source:
+            continue
+        db.set_library_item_title_id(conn, row_id, title_id=owner, source=source)
+        changed += 1
+    return changed

@@ -13,7 +13,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional
 
-from . import config, extractor, scanner, title_id
+from . import config, extractor, scanner, sd_files, title_id
 from .model import ConflictEntry, ConflictState, ContentType
 
 
@@ -53,6 +53,11 @@ class PreviewReport:
     # deliberately NOT responsible for extracting archives itself.
     package_relative_path: Optional[str] = None  # GAME_PACKAGE: path of the package file, relative to `source` (bare file) or `work_dir` (extracted archive)
     mod_source_dir: Optional[Path] = None         # ATMOSPHERE_MOD: local folder containing the mod's romfs/exefs tree, ready to walk
+    # The local switch/ folder whose contents go to switch/ on the SD card
+    # (see sd_files.py): the whole payload of an SD_FILES report, and, once
+    # extracted, the part of a package or mod archive that ships one too.
+    sd_source_dir: Optional[Path] = None
+    sd_summary: Optional[sd_files.SdSummary] = None
 
     # GAME_PACKAGE archives only: every installable entry found (Base,
     # Update, any number of DLC), in listing order. The singular fields
@@ -152,6 +157,8 @@ def _preview_archive(path: Path, *, extract: bool) -> PreviewReport:
                 extracted_file = result.dest_root / pe.relative_path
                 if extracted_file.is_file():
                     pe.size = extracted_file.stat().st_size
+            _attach_sd_part(report, cls, result.dest_root)
+        report.sd_summary = cls.sd_summary
         return report
 
     if cls.content_type is ContentType.ATMOSPHERE_MOD:
@@ -177,16 +184,62 @@ def _preview_archive(path: Path, *, extract: bool) -> PreviewReport:
             if mod_source.is_dir():
                 report.conflicts = extractor.compute_conflicts_from_folder(mod_source, dest_dir)
                 report.mod_source_dir = mod_source
+            _attach_sd_part(report, cls, result.dest_root)
+        report.sd_summary = cls.sd_summary
+        return report
+
+    if cls.content_type is ContentType.SD_FILES:
+        guess = title_id.from_filename(path.name)
+        report = PreviewReport(
+            content_type=ContentType.SD_FILES, source=str(path),
+            size=cls.sd_summary.size, file_count=cls.sd_summary.files,
+            title_id=guess.title_id, title_id_confident=False,
+            destination="SD Card (switch/)", mode="MERGE", sd_summary=cls.sd_summary,
+        )
+        if extract:
+            job_id = extractor.new_job_id()
+            result = extractor.safe_extract(path, job_id)
+            report.job_id = job_id
+            report.work_dir = result.dest_root
+            _attach_sd_part(report, cls, result.dest_root)
+            if report.sd_source_dir is not None:
+                report.sd_summary = sd_files.folder_summary(report.sd_source_dir) or report.sd_summary
+                report.size = report.sd_summary.size
+                report.file_count = report.sd_summary.files
         return report
 
     return PreviewReport(
         content_type=ContentType.UNKNOWN, source=str(path),
         size=size, file_count=file_count,
-        note="archive contains neither an nsp/nsz/xci/xcz package nor an atmosphere structure",
+        note="archive contains neither an nsp/nsz/xci/xcz package, an atmosphere structure nor a switch/ folder",
+    )
+
+
+def _attach_sd_part(report: PreviewReport, cls, dest_root: Path) -> None:
+    """Points the report at the extracted switch/ folder, if the archive had
+    one. Resolved against the real extraction, never the listing alone."""
+    if cls.sd_root is None:
+        return
+    extracted = dest_root.joinpath(*cls.sd_root)
+    if extracted.is_dir():
+        report.sd_source_dir = extracted
+
+
+def _preview_sd_folder(path: Path, summary: sd_files.SdSummary) -> PreviewReport:
+    return PreviewReport(
+        content_type=ContentType.SD_FILES, source=str(path),
+        size=summary.size, file_count=summary.files,
+        destination="SD Card (switch/)", mode="MERGE",
+        sd_source_dir=path, sd_summary=summary,
     )
 
 
 def _preview_directory(path: Path) -> PreviewReport:
+    if path.name.lower() == sd_files.SD_ROOT_DIR:
+        summary = sd_files.folder_summary(path)
+        if summary is not None:
+            return _preview_sd_folder(path, summary)
+
     if scanner.TITLE_ID_DIR_RE.fullmatch(path.name):
         title_id_value = path.name.upper()
         size = sum(f.stat().st_size for f in path.rglob("*") if f.is_file())
@@ -210,9 +263,20 @@ def _preview_directory(path: Path) -> PreviewReport:
             note=f"found {len(mod_folders)} different atmosphere/contents/<TITLE_ID> folders inside -- specify a more precise path",
         )
 
+    sd_folders = sd_files.find_sd_folders(
+        (p for p in path.rglob("*") if p.name.lower() == sd_files.SD_ROOT_DIR and p.is_dir()),
+    )
+    if len(sd_folders) == 1:
+        return _preview_directory(sd_folders[0])
+    if len(sd_folders) > 1:
+        return PreviewReport(
+            content_type=ContentType.MIXED, source=str(path),
+            note=f"found {len(sd_folders)} different switch/ folders inside -- specify a more precise path",
+        )
+
     return PreviewReport(
         content_type=ContentType.UNKNOWN, source=str(path),
-        note="folder contains neither a package nor an atmosphere/contents/<TITLE_ID> structure",
+        note="folder contains neither a package, an atmosphere/contents/<TITLE_ID> structure nor a switch/ folder",
     )
 
 

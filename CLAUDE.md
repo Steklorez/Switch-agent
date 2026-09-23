@@ -121,3 +121,37 @@ Local time, never the stored UTC. Human wording from `classify_activity()`,
 never a raw enum. The same name Library shows, via the same
 `strip_release_tags` — one object must not read as two different things
 depending on which page you are on.
+
+## A game is its folder: SD files
+
+A homebrew port ships as a small **forwarder** `.nsp` (installed through DBI,
+it only puts an icon on the home menu) plus a **`switch/` folder** that has to
+land on the SD card verbatim — the forwarder launches e.g.
+`sdmc:/switch/zumaportable/dbc17o.nro`, stored in plain text inside it. The
+`switch/` folder comes as an archive (`switch.7z`) or already unpacked
+(`Homebrew (1.0.0)/switch/...`), and a port can need both (Mega Man X
+Regenesis: data in the archive, the `.nro` in the unpacked folder). All of it
+is `ContentType.SD_FILES`; the rules live in `switchagent/sd_files.py`.
+
+What must stay true — `tests/test_sd_files.py` encodes each of these against
+the real Zuma / Mega Man layouts, so change a test on purpose or not at all:
+
+- **It belongs to its game, never a card called "switch".** Owner, in order:
+  a `[TITLE_ID]` in its own name; a forwarder in the library that launches an
+  `.nro` inside it; the nearest folder above it holding any game — only if
+  that is exactly one game. Two games in one folder: it stays its own card
+  (named after the folder), never guessed onto either.
+- **Only `switch/`, only verbatim.** Every destination is `switch/<path as in
+  the release>`; nothing else of a release (a README beside it) is copied to
+  the card. A `switch` folder holding packages is a downloads category, one
+  under `atmosphere/` belongs to a mod, one deeper than a single wrapper folder
+  inside an archive is game data — none of them is SD content.
+- **Nothing an archive ships silently stays behind.** A package or mod archive
+  that also carries `switch/` gets one more job for it.
+- **Bump `scanner.CLASSIFICATION_REVISION` whenever classification learns to
+  recognise something new.** Unchanged files are otherwise never looked at
+  again, and the change would not reach the very libraries it was made for.
+- The forwarder's launch path is checked against the game's own SD files; a
+  missing `.nro` is said on the card, not discovered on the console.
+- DBI's installed list cannot confirm SD files (like mods): no "On Switch" for
+  them, and DBI itself only refreshes that list when reopened on the console.
