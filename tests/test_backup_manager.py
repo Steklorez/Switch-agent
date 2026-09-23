@@ -1,29 +1,30 @@
 """Public service seams: inventory, durable snapshots, interchange, restore."""
 
 from pathlib import Path
+from dataclasses import replace
 import json
 import zipfile
 
 import pytest
 
 from switchagent.mtp.mock import MockMtpBackend
-from switchagent.backup_manager import BackupManager, BackupError
+from switchagent.backup_manager import BackupManager, BackupError, BackupLimits
 
 
 def populated_backend():
     backend = MockMtpBackend()
     saves = backend.add_storage('SAVES')
-    saves.ensure_directory('Installed games/Game A/Profile A/Default')
-    saves.write_file('Installed games/Game A/Profile A/Default/main.dat', b'original progress')
-    saves.ensure_directory('Installed games/Game B/Profile B/Default')
-    saves.write_file('Installed games/Game B/Profile B/Default/main.dat', b'other')
+    saves.ensure_directory('Installed games/Game A/Profile A')
+    saves.write_file('Installed games/Game A/Profile A/main.dat', b'original progress')
+    saves.ensure_directory('Installed games/Game B/Profile B')
+    saves.write_file('Installed games/Game B/Profile B/main.dat', b'other')
     games = backend.add_storage('INSTALLED_GAMES')
     games.write_file('Game A.nsp', b'package')
     backend.connect()
-    backend.set_save_identity('SAVES', 'Installed games/Game A/Profile A/Default',
+    backend.set_save_identity('SAVES', 'Installed games/Game A/Profile A',
                               title_id='0100000000000001', user_id='uid-a',
                               environment_id='installation-a')
-    backend.set_save_identity('SAVES', 'Installed games/Game B/Profile B/Default',
+    backend.set_save_identity('SAVES', 'Installed games/Game B/Profile B',
                               title_id='0100000000000002', user_id='uid-b',
                               environment_id='installation-a')
     return backend
@@ -35,8 +36,8 @@ def test_inventory_reports_verified_account_saves_and_game_packages(tmp_path):
     saves = service.inventory_saves(backend)
     games = service.inventory_games(backend)
     assert [(item['path'], item['size'], item['identity']['user_id']) for item in saves] == [
-        ('Installed games/Game A/Profile A/Default', 17, 'uid-a'),
-        ('Installed games/Game B/Profile B/Default', 5, 'uid-b'),
+        ('Installed games/Game A/Profile A', 17, 'uid-a'),
+        ('Installed games/Game B/Profile B', 5, 'uid-b'),
     ]
     assert [(item['path'], item['size']) for item in games] == [('Game A.nsp', 7)]
 
@@ -44,7 +45,7 @@ def test_inventory_reports_verified_account_saves_and_game_packages(tmp_path):
 def test_snapshot_persists_files_and_hashes_without_device_writes(tmp_path):
     backend = populated_backend()
     service = BackupManager(tmp_path / 'backups')
-    path = 'Installed games/Game A/Profile A/Default'
+    path = 'Installed games/Game A/Profile A'
     snapshot = service.create_snapshot(backend, path)
     assert snapshot['state'] == 'ready'
     assert snapshot['identity']['user_id'] == 'uid-a'
@@ -60,10 +61,10 @@ def test_snapshot_persists_files_and_hashes_without_device_writes(tmp_path):
 def test_short_device_read_retains_incomplete_marker_and_never_publishes(tmp_path):
     backend = populated_backend()
     backend.arm_read_failure('short', storage='SAVES',
-                             source_path='Installed games/Game A/Profile A/Default/main.dat')
+                             source_path='Installed games/Game A/Profile A/main.dat')
     service = BackupManager(tmp_path / 'backups')
     with pytest.raises(Exception, match='short source'):
-        service.create_snapshot(backend, 'Installed games/Game A/Profile A/Default')
+        service.create_snapshot(backend, 'Installed games/Game A/Profile A')
     assert service.list_snapshots() == []
     assert len(service.list_incomplete()) == 1
     assert service.list_incomplete()[0]['state'] == 'incomplete'
@@ -72,8 +73,8 @@ def test_short_device_read_retains_incomplete_marker_and_never_publishes(tmp_pat
 def test_group_zip_is_flat_and_imports_verified_snapshots(tmp_path):
     backend = populated_backend()
     service = BackupManager(tmp_path / 'store')
-    paths = ['Installed games/Game A/Profile A/Default',
-             'Installed games/Game B/Profile B/Default']
+    paths = ['Installed games/Game A/Profile A',
+             'Installed games/Game B/Profile B']
     originals = service.create_snapshots(backend, paths)
     archive = service.create_archive([item['id'] for item in originals], tmp_path / 'group.zip')
     with zipfile.ZipFile(archive) as bundle:
@@ -90,7 +91,7 @@ def test_group_zip_is_flat_and_imports_verified_snapshots(tmp_path):
 def test_archive_keeps_existing_destination_untouched(tmp_path):
     backend = populated_backend()
     service = BackupManager(tmp_path / 'store')
-    snapshot = service.create_snapshot(backend, 'Installed games/Game A/Profile A/Default')
+    snapshot = service.create_snapshot(backend, 'Installed games/Game A/Profile A')
     destination = tmp_path / 'existing.zip'
     destination.write_bytes(b'user owned archive')
     with pytest.raises(FileExistsError):
@@ -100,7 +101,7 @@ def test_archive_keeps_existing_destination_untouched(tmp_path):
 
 def test_imported_snapshot_restores_exact_mock_target_after_prebackup(tmp_path):
     backend = populated_backend()
-    path = 'Installed games/Game A/Profile A/Default'
+    path = 'Installed games/Game A/Profile A'
     original = BackupManager(tmp_path / 'first')
     source = original.create_snapshot(backend, path)
     archive = original.create_archive([source['id']], tmp_path / 'save.zip')
@@ -131,7 +132,7 @@ def test_selected_game_package_exports_to_local_store(tmp_path):
 def test_restore_refuses_unlisted_file_in_snapshot_tree(tmp_path):
     backend = populated_backend()
     service = BackupManager(tmp_path / 'store')
-    source = service.create_snapshot(backend, 'Installed games/Game A/Profile A/Default')
+    source = service.create_snapshot(backend, 'Installed games/Game A/Profile A')
     extra = tmp_path / 'store' / 'snapshots' / source['id'] / 'files' / 'rogue.dat'
     extra.write_bytes(b'not in manifest')
     with pytest.raises(BackupError, match='unlisted'):
@@ -161,7 +162,7 @@ def test_import_rejects_manifest_missing_parent_directory(tmp_path):
 def test_operation_journal_survives_manager_restart(tmp_path):
     backend = populated_backend()
     service = BackupManager(tmp_path / 'store')
-    snapshot = service.create_snapshot(backend, 'Installed games/Game A/Profile A/Default')
+    snapshot = service.create_snapshot(backend, 'Installed games/Game A/Profile A')
     events = BackupManager(tmp_path / 'store').list_events()
     assert any(event['kind'] == 'snapshot' and event['state'] == 'ready'
                and event['snapshot_id'] == snapshot['id'] for event in events)
@@ -170,7 +171,7 @@ def test_operation_journal_survives_manager_restart(tmp_path):
 def test_source_changed_during_target_recheck_refuses_before_write(tmp_path, monkeypatch):
     backend = populated_backend()
     service = BackupManager(tmp_path / 'store')
-    path = 'Installed games/Game A/Profile A/Default'
+    path = 'Installed games/Game A/Profile A'
     source = service.create_snapshot(backend, path)
     plan = service.prepare_restore(backend, source['id'])
     source_file = tmp_path / 'store' / 'snapshots' / source['id'] / 'files' / 'main.dat'
@@ -187,9 +188,9 @@ def test_source_changed_during_target_recheck_refuses_before_write(tmp_path, mon
 
 def test_restore_diagnostics_names_unproven_identity_and_capability(tmp_path):
     backend = populated_backend()
-    path = 'Installed games/Game A/Profile A/Default'
+    path = 'Installed games/Game A/Profile A'
     backend.set_save_identity('SAVES', path, title_id=None, user_id=None,
-                              environment_id=None, verified=False)
+                              environment_id=None, save_type=None, verified=False)
     diagnostics = BackupManager(tmp_path / 'store').restore_diagnostics(backend, path)
     assert diagnostics['eligible'] is False
     assert {'title_id', 'user_id', 'environment_id'} <= set(diagnostics['missing'])
@@ -199,7 +200,7 @@ def test_snapshot_remains_ready_when_journal_fails_after_publish(tmp_path, monke
     backend = populated_backend()
     service = BackupManager(tmp_path / 'store')
     monkeypatch.setattr(service, '_record', lambda *args, **kwargs: (_ for _ in ()).throw(OSError('journal full')))
-    snapshot = service.create_snapshot(backend, 'Installed games/Game A/Profile A/Default')
+    snapshot = service.create_snapshot(backend, 'Installed games/Game A/Profile A')
     assert snapshot['state'] == 'ready'
     assert [item['id'] for item in service.list_snapshots()] == [snapshot['id']]
     assert service.list_incomplete() == []
@@ -208,7 +209,7 @@ def test_snapshot_remains_ready_when_journal_fails_after_publish(tmp_path, monke
 def test_target_changed_after_first_recheck_refuses_before_write(tmp_path, monkeypatch):
     backend = populated_backend()
     service = BackupManager(tmp_path / 'store')
-    path = 'Installed games/Game A/Profile A/Default'
+    path = 'Installed games/Game A/Profile A'
     source = service.create_snapshot(backend, path)
     plan = service.prepare_restore(backend, source['id'])
     original_identity = backend.save_identity
@@ -231,7 +232,7 @@ def test_target_changed_after_first_recheck_refuses_before_write(tmp_path, monke
 def test_import_rejects_crc_tampering_as_backup_error(tmp_path):
     backend = populated_backend()
     service = BackupManager(tmp_path / 'source')
-    snapshot = service.create_snapshot(backend, 'Installed games/Game A/Profile A/Default')
+    snapshot = service.create_snapshot(backend, 'Installed games/Game A/Profile A')
     valid = service.create_archive([snapshot['id']], tmp_path / 'valid.zip')
     tampered = tmp_path / 'tampered.zip'
     with zipfile.ZipFile(valid) as reader, zipfile.ZipFile(tampered, 'w', compression=zipfile.ZIP_STORED) as writer:
@@ -275,7 +276,7 @@ def test_journal_symlink_cannot_redirect_writes_outside_store(tmp_path):
     except (OSError, NotImplementedError) as exc:
         pytest.skip(f'file symlinks unavailable: {exc}')
     snapshot = service.create_snapshot(populated_backend(),
-                                       'Installed games/Game A/Profile A/Default')
+                                       'Installed games/Game A/Profile A')
     assert snapshot['state'] == 'ready'
     assert outside.read_text(encoding='utf-8') == 'sentinel'
     assert snapshot['journal_warning'] == 'event journal unavailable'
@@ -290,7 +291,7 @@ def test_journal_reparse_path_is_rejected_before_write(tmp_path, monkeypatch):
     monkeypatch.setattr(module, 'is_link_or_reparse',
                         lambda path: Path(path) == journal or original_predicate(path))
     snapshot = service.create_snapshot(populated_backend(),
-                                       'Installed games/Game A/Profile A/Default')
+                                       'Installed games/Game A/Profile A')
     assert snapshot['state'] == 'ready'
     assert snapshot['journal_warning'] == 'event journal unavailable'
     assert journal.read_bytes() == b''
@@ -305,7 +306,7 @@ def test_journal_reparse_path_is_rejected_before_write(tmp_path, monkeypatch):
 def test_restore_refuses_foreign_target_identity_before_prebackup(tmp_path, field, replacement):
     backend = populated_backend()
     service = BackupManager(tmp_path / 'store')
-    path = 'Installed games/Game A/Profile A/Default'
+    path = 'Installed games/Game A/Profile A'
     source = service.create_snapshot(backend, path)
     identity = backend.save_identity('SAVES', path)
     identity[field] = replacement
@@ -321,7 +322,7 @@ def test_restore_refuses_foreign_target_identity_before_prebackup(tmp_path, fiel
 def test_reconnect_consumes_restore_plan_without_writing(tmp_path):
     backend = populated_backend()
     service = BackupManager(tmp_path / 'store')
-    path = 'Installed games/Game A/Profile A/Default'
+    path = 'Installed games/Game A/Profile A'
     source = service.create_snapshot(backend, path)
     plan = service.prepare_restore(backend, source['id'])
     backend.disconnect()
@@ -336,7 +337,7 @@ def test_reconnect_consumes_restore_plan_without_writing(tmp_path):
 def test_restore_disconnect_attempts_write_once_and_keeps_prebackup(tmp_path):
     backend = populated_backend()
     service = BackupManager(tmp_path / 'store')
-    path = 'Installed games/Game A/Profile A/Default'
+    path = 'Installed games/Game A/Profile A'
     source = service.create_snapshot(backend, path)
     plan = service.prepare_restore(backend, source['id'])
     backend.arm_failure('disconnect', storage='SAVES', dest_path=path)
@@ -353,7 +354,7 @@ def test_restore_disconnect_attempts_write_once_and_keeps_prebackup(tmp_path):
 def test_snapshot_cancel_after_first_file_stays_incomplete(tmp_path):
     from switchagent.mtp.errors import OperationCancelledError
     backend = populated_backend()
-    path = 'Installed games/Game A/Profile A/Default'
+    path = 'Installed games/Game A/Profile A'
     backend.storage_tree('SAVES').write_file(path + '/second.dat', b'second')
     service = BackupManager(tmp_path / 'store')
     stopped = False
@@ -380,7 +381,7 @@ def test_local_disk_fault_does_not_publish_partial_snapshot(tmp_path, monkeypatc
 
     monkeypatch.setattr(backend, 'receive_file', fail_local_write)
     with pytest.raises(OSError, match='disk full'):
-        service.create_snapshot(backend, 'Installed games/Game A/Profile A/Default')
+        service.create_snapshot(backend, 'Installed games/Game A/Profile A')
     assert service.list_snapshots() == []
     assert len(service.list_incomplete()) == 1
     assert not any(item.operation == 'REPLACE_SAVE_TREE' for item in backend.operation_log)
@@ -393,7 +394,7 @@ def test_local_disk_fault_does_not_publish_partial_snapshot(tmp_path, monkeypatc
 def test_import_rejects_escape_and_case_colliding_members(tmp_path, extra_name):
     backend = populated_backend()
     source_service = BackupManager(tmp_path / 'source')
-    snapshot = source_service.create_snapshot(backend, 'Installed games/Game A/Profile A/Default')
+    snapshot = source_service.create_snapshot(backend, 'Installed games/Game A/Profile A')
     valid = source_service.create_archive([snapshot['id']], tmp_path / 'valid.zip')
     invalid = tmp_path / 'invalid.zip'
     with zipfile.ZipFile(valid) as reader, zipfile.ZipFile(invalid, 'w') as writer:
@@ -409,7 +410,7 @@ def test_import_rejects_escape_and_case_colliding_members(tmp_path, extra_name):
 def test_published_archive_import_and_game_survive_journal_fault(tmp_path, monkeypatch):
     backend = populated_backend()
     source = BackupManager(tmp_path / 'source')
-    snapshot = source.create_snapshot(backend, 'Installed games/Game A/Profile A/Default')
+    snapshot = source.create_snapshot(backend, 'Installed games/Game A/Profile A')
     monkeypatch.setattr(source, '_record', lambda *args, **kwargs: (_ for _ in ()).throw(OSError('journal full')))
     archive = source.create_archive([snapshot['id']], tmp_path / 'ready.zip')
     assert archive.is_file()
@@ -424,3 +425,241 @@ def test_published_archive_import_and_game_survive_journal_fault(tmp_path, monke
     exported = game_store.export_games(backend, ['Game A.nsp'])
     assert exported[0]['journal_warning'] == 'event journal unavailable'
     assert game_store.game_export_path(exported[0]['id']).read_bytes() == b'package'
+
+
+def test_individual_save_only_and_unknown_type_is_exportable(tmp_path):
+    backend = populated_backend()
+    service = BackupManager(tmp_path / 'store')
+    path = 'Installed games/Game A/Profile A'
+    backend.set_save_identity('SAVES', path, title_id=None, user_id=None,
+                              environment_id=None, save_type=None, verified=False)
+    with pytest.raises(BackupError, match='individual save'):
+        service.create_snapshot(backend, 'Installed games/Game A')
+    with pytest.raises(BackupError, match='individual save'):
+        service.create_snapshots(backend, ['Installed games'])
+    snapshot = service.create_snapshots(backend, [path])[0]
+    assert snapshot['identity']['save_type'] is None
+    assert snapshot['state'] == 'ready'
+    with pytest.raises(BackupError, match='identity'):
+        service.prepare_restore(backend, snapshot['id'])
+
+
+def test_inventory_all_includes_non_account_individual_saves_only(tmp_path):
+    backend = populated_backend()
+    path = 'Installed games/Game A/Profile A'
+    backend.storage_tree('SAVES').ensure_directory(path + '/nested')
+    backend.storage_tree('SAVES').write_file(path + '/nested/progress.dat', b'progress')
+    backend.set_save_identity('SAVES', path, title_id=None, user_id=None,
+                              environment_id=None, save_type='Device', verified=False)
+    service = BackupManager(tmp_path / 'store')
+    rows = service.inventory_saves(backend)
+    assert [row['path'] for row in rows] == [
+        'Installed games/Game A/Profile A', 'Installed games/Game B/Profile B']
+    assert rows[0]['selectable'] is True
+    snapshot = service.create_snapshot(backend, path)
+    assert snapshot['identity']['save_type'] == 'Device'
+    assert snapshot['files'][-1]['path'] == 'nested/progress.dat'
+    with pytest.raises(BackupError, match='identity'):
+        service.prepare_restore(backend, snapshot['id'])
+
+
+def test_arbitrary_root_group_is_not_an_individual_save(tmp_path):
+    backend = populated_backend()
+    path = 'Unexpected group/Game X/Profile X'
+    backend.storage_tree('SAVES').ensure_directory(path)
+    backend.storage_tree('SAVES').write_file(path + '/progress.dat', b'x')
+    service = BackupManager(tmp_path / 'store')
+    assert path not in {row['path'] for row in service.inventory_saves(backend)}
+    with pytest.raises(BackupError, match='individual save'):
+        service.create_snapshot(backend, path)
+    assert service.list_snapshots() == []
+
+
+def test_unknown_device_size_respects_actual_snapshot_and_game_limits(tmp_path, monkeypatch):
+    backend = populated_backend()
+    original_stat = backend.stat
+    original_list = backend.list_directory
+    monkeypatch.setattr(backend, 'stat', lambda *args, **kwargs:
+                        replace(original_stat(*args, **kwargs), size=None))
+    monkeypatch.setattr(backend, 'list_directory', lambda *args, **kwargs:
+                        [replace(entry, size=None) for entry in original_list(*args, **kwargs)])
+    service = BackupManager(tmp_path / 'store', limits=BackupLimits(max_file_bytes=8,
+                                                                    max_total_bytes=6))
+    with pytest.raises(BackupError, match='actual source size limit'):
+        service.create_snapshot(backend, 'Installed games/Game A/Profile A')
+    assert service.list_snapshots() == []
+    with pytest.raises(BackupError, match='actual game export size limit'):
+        service.export_games(backend, ['Game A.nsp'])
+    assert service.list_game_exports() == []
+
+
+def test_snapshot_identity_change_during_read_keeps_incomplete(tmp_path, monkeypatch):
+    backend = populated_backend()
+    path = 'Installed games/Game A/Profile A'
+    original_receive = backend.receive_file
+
+    def change_uid(*args, **kwargs):
+        received = original_receive(*args, **kwargs)
+        backend.set_save_identity('SAVES', path, title_id='0100000000000001',
+                                  user_id='uid-other', environment_id='installation-a')
+        return received
+
+    monkeypatch.setattr(backend, 'receive_file', change_uid)
+    service = BackupManager(tmp_path / 'store')
+    with pytest.raises(BackupError, match='identity changed'):
+        service.create_snapshot(backend, path)
+    assert service.list_snapshots() == []
+    assert len(service.list_incomplete()) == 1
+
+
+def test_import_rejects_incomplete_snapshot_manifest(tmp_path):
+    source = BackupManager(tmp_path / 'source')
+    backend = populated_backend()
+    snapshot = source.create_snapshot(backend, 'Installed games/Game A/Profile A')
+    archive = source.create_archive([snapshot['id']], tmp_path / 'ready.zip')
+    incomplete = tmp_path / 'incomplete.zip'
+    with zipfile.ZipFile(archive) as reader, zipfile.ZipFile(incomplete, 'w') as writer:
+        for name in reader.namelist():
+            data = reader.read(name)
+            if name == 'manifest.json':
+                manifest = json.loads(data)
+                manifest['snapshots'][0]['state'] = 'incomplete'
+                data = json.dumps(manifest).encode()
+            writer.writestr(name, data)
+    imported = BackupManager(tmp_path / 'imported')
+    with pytest.raises(BackupError, match='non-ready'):
+        imported.import_archive(incomplete)
+    assert imported.list_snapshots() == []
+
+
+def test_group_import_rolls_back_first_published_snapshot(tmp_path, monkeypatch):
+    from switchagent import backup_manager as module
+    source = BackupManager(tmp_path / 'source')
+    backend = populated_backend()
+    paths = ['Installed games/Game A/Profile A', 'Installed games/Game B/Profile B']
+    snapshots = source.create_snapshots(backend, paths)
+    archive = source.create_archive([item['id'] for item in snapshots], tmp_path / 'group.zip')
+    imported = BackupManager(tmp_path / 'imported')
+    original_replace = module.os.replace
+    calls = 0
+
+    def fail_second_publish(src, dst):
+        nonlocal calls
+        calls += 1
+        if calls == 2:
+            raise OSError('second publish failed')
+        return original_replace(src, dst)
+
+    monkeypatch.setattr(module.os, 'replace', fail_second_publish)
+    with pytest.raises(OSError, match='second publish failed'):
+        imported.import_archive(archive)
+    assert imported.list_snapshots() == []
+    assert not list((imported.root / 'snapshots').iterdir())
+
+
+def test_restore_result_survives_journal_failure_after_write(tmp_path, monkeypatch):
+    backend = populated_backend()
+    service = BackupManager(tmp_path / 'store')
+    path = 'Installed games/Game A/Profile A'
+    source = service.create_snapshot(backend, path)
+    plan = service.prepare_restore(backend, source['id'])
+    original_record = service._record
+
+    def fail_completed(kind, state, **details):
+        if kind == 'restore' and state == 'completed':
+            raise OSError('journal full')
+        return original_record(kind, state, **details)
+
+    monkeypatch.setattr(service, '_record', fail_completed)
+    outcome = service.confirm_restore(backend, plan['id'])
+    assert outcome['state'] == 'completed'
+    assert outcome['journal_warning'] == 'event journal unavailable'
+    assert plan['prebackup_id'] in {item['id'] for item in service.list_snapshots()}
+
+
+def test_final_source_recheck_after_last_target_read(tmp_path, monkeypatch):
+    backend = populated_backend()
+    service = BackupManager(tmp_path / 'store')
+    path = 'Installed games/Game A/Profile A'
+    source = service.create_snapshot(backend, path)
+    plan = service.prepare_restore(backend, source['id'])
+    source_file = service.root / 'snapshots' / source['id'] / 'files' / 'main.dat'
+    original_receive = backend.receive_file
+    original_identity = backend.save_identity
+    target_was_read = False
+    identity_rechecked = False
+    mutated = False
+
+    def track_target_read(*args, **kwargs):
+        nonlocal target_was_read, mutated
+        received = original_receive(*args, **kwargs)
+        if identity_rechecked and not mutated:
+            source_file.write_bytes(b'x' * 17)
+            mutated = True
+        else:
+            target_was_read = True
+        return received
+
+    def track_identity(*args, **kwargs):
+        nonlocal identity_rechecked
+        identity = original_identity(*args, **kwargs)
+        if target_was_read:
+            identity_rechecked = True
+        return identity
+
+    monkeypatch.setattr(backend, 'receive_file', track_target_read)
+    monkeypatch.setattr(backend, 'save_identity', track_identity)
+    with pytest.raises(BackupError, match='source changed'):
+        service.confirm_restore(backend, plan['id'])
+    assert mutated
+    assert not any(item.operation == 'REPLACE_SAVE_TREE' for item in backend.operation_log)
+
+
+@pytest.mark.parametrize('zone', ['snapshots', 'import', 'game-exports'])
+def test_publication_rejects_reparse_destination_parent(tmp_path, monkeypatch, zone):
+    from switchagent import backup_manager as module
+    backend = populated_backend()
+    service = BackupManager(tmp_path / 'store')
+    original_predicate = module.is_link_or_reparse
+    if zone == 'snapshots':
+        parent = service.root / 'snapshots'
+        parent.mkdir()
+        action = lambda: service.create_snapshot(backend, 'Installed games/Game A/Profile A')
+    elif zone == 'import':
+        source = BackupManager(tmp_path / 'source')
+        snapshot = source.create_snapshot(backend, 'Installed games/Game A/Profile A')
+        archive = source.create_archive([snapshot['id']], tmp_path / 'group.zip')
+        parent = service.root / 'snapshots'
+        parent.mkdir()
+        action = lambda: service.import_archive(archive)
+    else:
+        parent = service.root / 'game-exports'
+        parent.mkdir()
+        action = lambda: service.export_games(backend, ['Game A.nsp'])
+    monkeypatch.setattr(module, 'is_link_or_reparse',
+                        lambda path: Path(path) == parent or original_predicate(path))
+    with pytest.raises(BackupError, match='reparse'):
+        action()
+    assert list(parent.iterdir()) == []
+
+
+def test_unknown_restore_outcome_survives_journal_failure(tmp_path, monkeypatch):
+    backend = populated_backend()
+    service = BackupManager(tmp_path / 'store')
+    path = 'Installed games/Game A/Profile A'
+    source = service.create_snapshot(backend, path)
+    plan = service.prepare_restore(backend, source['id'])
+    backend.arm_failure('disconnect', storage='SAVES', dest_path=path)
+    original_record = service._record
+
+    def fail_unknown(kind, state, **details):
+        if kind == 'restore' and state == 'unknown':
+            raise OSError('journal full')
+        return original_record(kind, state, **details)
+
+    monkeypatch.setattr(service, '_record', fail_unknown)
+    with pytest.raises(BackupError, match='target state is unknown'):
+        service.confirm_restore(backend, plan['id'])
+    assert [item.operation for item in backend.operation_log].count('REPLACE_SAVE_TREE') == 1
+    assert plan['prebackup_id'] in {item['id'] for item in service.list_snapshots()}
+    assert any('restore unknown:' in warning for warning in service.journal_warnings)

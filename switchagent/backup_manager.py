@@ -41,6 +41,7 @@ class BackupLimits:
 
 
 FORMAT_VERSION = 1
+_SAVE_GROUPS = frozenset({'Installed games', 'Uninstalled games'})
 _CHUNK = 1024 * 1024
 _RESERVED = re.compile(
     r'^(?:CON|PRN|AUX|NUL|CONIN\$|CONOUT\$|'
@@ -167,13 +168,14 @@ class BackupManager:
             files = [c for c in children if not c.is_dir]
             subdirs = [c for c in children if c.is_dir]
             depth = len(path.split('/'))
-            if not files and (subdirs or depth < 3):
+            if depth != 3 or path.split('/', 1)[0] not in _SAVE_GROUPS:
                 continue
             identity = backend.save_identity(storage, path, expected_session=session)
-            size = sum(c.size for c in files) if all(c.size is not None for c in files) else None
+            size = (sum(c.size for c in files)
+                    if not subdirs and all(c.size is not None for c in files) else None)
             rows.append({'path': path, 'name': path.rsplit('/', 1)[-1],
                          'size': size, 'file_count': len(files), 'identity': identity,
-                         'selectable': identity.get('save_type') in ('Account', None),
+                         'selectable': True,
                          'session_token': session})
         return rows
 
@@ -268,8 +270,9 @@ class BackupManager:
         if kind != 'save' or storage != 'SAVES':
             raise BackupError('snapshot kind/storage mismatch')
         path = read_path(path)
-        if not path:
-            raise BackupError('select one save')
+        parts = path.split('/')
+        if len(parts) != 3 or parts[0] not in _SAVE_GROUPS:
+            raise BackupError('select an individual save folder')
         session = backend.session_token
         identity = backend.save_identity(storage, path, expected_session=session)
         files, directories = self._enumerate_tree(backend, storage, path, session, cancel)
@@ -295,17 +298,25 @@ class BackupManager:
                 _check_cancel(cancel)
                 destination = content / Path(*relative.split('/'))
                 destination.parent.mkdir(parents=True, exist_ok=True)
+                def check_transfer_size(received, _total):
+                    if received > self.limits.max_file_bytes or done + received > self.limits.max_total_bytes:
+                        raise BackupError('actual source size limit exceeded')
                 backend.receive_file(storage, entry.path, destination,
-                                     expected_session=session, cancel=cancel)
+                                     expected_session=session, cancel=cancel,
+                                     progress=check_transfer_size)
                 digest, size = _hash_file(destination, cancel)
                 if entry.size is not None and entry.size != size:
                     raise BackupError('source file size changed during copy')
+                if size > self.limits.max_file_bytes or done + size > self.limits.max_total_bytes:
+                    raise BackupError('actual source size limit exceeded')
                 manifest['files'].append({'path': relative, 'size': size, 'sha256': digest})
                 done += size
                 if progress:
                     progress(done, known_size if all(e.size is not None for _, e in files) else None)
             _check_cancel(cancel)
             backend._check_read_session(session)
+            if backend.save_identity(storage, path, expected_session=session) != identity:
+                raise BackupError('save identity changed during copy')
             manifest['state'] = 'ready'
             payload = json.dumps(manifest, ensure_ascii=False, sort_keys=True).encode('utf-8')
             if len(payload) > self.limits.max_manifest_bytes:
@@ -315,7 +326,9 @@ class BackupManager:
                 out.flush()
                 os.fsync(out.fileno())
             target = self._snapshot_dir(snapshot_id)
+            _ensure_plain_path(target)
             target.parent.mkdir(exist_ok=True)
+            _ensure_plain_path(target)
             os.replace(staging, target)
         except BaseException as exc:
             # An incomplete staging tree is intentionally retained for diagnosis.
@@ -486,6 +499,7 @@ class BackupManager:
         _ensure_plain_path(stage_root.parent)
         stage_root.mkdir(parents=True)
         imported = []
+        published: list[Path] = []
         try:
             with zipfile.ZipFile(source, 'r', allowZip64=True) as archive:
                 infos = archive.infolist()
@@ -528,6 +542,8 @@ class BackupManager:
                 originals = set()
                 for snapshot in snapshots:
                     self._validate_file_table(snapshot)
+                    if snapshot.get('state') != 'ready':
+                        raise BackupError('archive contains a non-ready snapshot')
                     old_id = snapshot.get('id')
                     if not isinstance(old_id, str) or not re.fullmatch(r'[0-9a-f]{32}', old_id) \
                             or old_id in originals:
@@ -577,16 +593,31 @@ class BackupManager:
                         json.dumps(local, ensure_ascii=False, sort_keys=True), encoding='utf-8')
                     imported.append(local)
             destination = self.root / 'snapshots'
+            _ensure_plain_path(destination)
             destination.mkdir(exist_ok=True)
+            _ensure_plain_path(destination)
             for item in imported:
-                os.replace(stage_root / item['id'], destination / item['id'])
+                target = destination / item['id']
+                _ensure_plain_path(target)
+                os.replace(stage_root / item['id'], target)
+                published.append(target)
         except BaseException as exc:
+            rollback_errors = []
+            for target in published:
+                try:
+                    _ensure_plain_path(target)
+                    shutil.rmtree(target)
+                except (OSError, BackupError) as cleanup_error:
+                    exc.add_note(f'could not roll back imported snapshot: {cleanup_error}')
+                    rollback_errors.append(str(target))
             # This directory was generated under our private .partial root.
             if stage_root.resolve().is_relative_to((self.root / '.partial').resolve()):
                 shutil.rmtree(stage_root, ignore_errors=True)
             if isinstance(exc, (zipfile.BadZipFile, EOFError, UnicodeError,
                                 json.JSONDecodeError, zlib.error)):
                 raise BackupError('invalid or corrupted ZIP archive') from exc
+            if rollback_errors:
+                raise BackupError(f'import partially published; recovery required: {rollback_errors}') from exc
             raise
         try:
             stage_root.rmdir()
@@ -639,15 +670,25 @@ class BackupManager:
                                  *, cancel=None) -> str:
         files, directories = self._enumerate_tree(backend, 'SAVES', path, session, cancel)
         parent = self.root / '.partial'
+        _ensure_plain_path(parent)
         parent.mkdir(exist_ok=True)
+        _ensure_plain_path(parent)
         fingerprints = []
+        total = 0
         with tempfile.TemporaryDirectory(prefix='verify-', dir=parent) as temporary:
             for relative, entry in files:
                 _check_cancel(cancel)
                 destination = Path(temporary) / uuid.uuid4().hex
+                def check_transfer_size(received, _expected):
+                    if received > self.limits.max_file_bytes or total + received > self.limits.max_total_bytes:
+                        raise BackupError('actual target size limit exceeded')
                 backend.receive_file('SAVES', entry.path, destination,
-                                     expected_session=session, cancel=cancel)
+                                     expected_session=session, cancel=cancel,
+                                     progress=check_transfer_size)
                 digest, size = _hash_file(destination, cancel)
+                if size > self.limits.max_file_bytes or total + size > self.limits.max_total_bytes:
+                    raise BackupError('actual target size limit exceeded')
+                total += size
                 fingerprints.append({'path': relative, 'size': size, 'sha256': digest})
         return self._content_digest(fingerprints, directories)
 
@@ -740,6 +781,14 @@ class BackupManager:
             backend, plan['target_path'], plan['session_token'], cancel=cancel)
         if final_target_digest != plan['target_digest']:
             raise BackupError('target progress changed before write')
+        try:
+            self._verify_snapshot(source, cancel)
+        except BackupError as exc:
+            raise BackupError('restore source changed before write') from exc
+        identity = backend.save_identity('SAVES', plan['target_path'],
+                                         expected_session=plan['session_token'])
+        if identity != plan['identity'] or not self._identity_matches(source['identity'], identity):
+            raise BackupError('target identity changed before write')
         # All checks above precede the first possible device write. Any failure
         # below must be reported as an uncertain target; no retry or rollback.
         try:
@@ -753,14 +802,26 @@ class BackupManager:
             if readback != plan['source_digest']:
                 raise BackupError('restore readback differs from source')
         except BaseException as exc:
-            self._record('restore', 'unknown', plan_id=plan_id,
-                         prebackup_id=prebackup['id'])
+            try:
+                self._record('restore', 'unknown', plan_id=plan_id,
+                             prebackup_id=prebackup['id'])
+            except (OSError, BackupError) as journal_error:
+                self.journal_warnings.append(f'restore unknown: {journal_error}')
+                exc.add_note(f'could not write restore outcome event: {journal_error}')
             raise BackupError('restore failed; target state is unknown; prebackup remains ready') from exc
-        self._record('restore', 'completed', plan_id=plan_id,
-                     snapshot_id=source['id'], prebackup_id=prebackup['id'])
-        return {'state': 'completed', 'verification': 'readback-hash',
+        try:
+            self._record('restore', 'completed', plan_id=plan_id,
+                         snapshot_id=source['id'], prebackup_id=prebackup['id'])
+            recorded = True
+        except (OSError, BackupError) as journal_error:
+            self.journal_warnings.append(f'restore completed: {journal_error}')
+            recorded = False
+        result = {'state': 'completed', 'verification': 'readback-hash',
                 'snapshot_id': source['id'], 'prebackup_id': prebackup['id'],
                 'target_path': plan['target_path']}
+        if not recorded:
+            result['journal_warning'] = 'event journal unavailable'
+        return result
 
     def export_games(self, backend: MtpBackend, paths: Iterable[str], *,
                      storage: str = 'INSTALLED_GAMES', cancel=None,
@@ -792,14 +853,21 @@ class BackupManager:
             _check_cancel(cancel)
             export_id = uuid.uuid4().hex
             stage = self.root / '.partial' / ('game-' + export_id)
+            _ensure_plain_path(stage)
             stage.mkdir(parents=True)
             target = stage / entry.name
             try:
+                def check_transfer_size(received, _expected):
+                    if received > self.limits.max_file_bytes or done + received > self.limits.max_total_bytes:
+                        raise BackupError('actual game export size limit exceeded')
                 backend.receive_file(storage, entry.path, target,
-                                     expected_session=session, cancel=cancel)
+                                     expected_session=session, cancel=cancel,
+                                     progress=check_transfer_size)
                 digest, size = _hash_file(target, cancel)
                 if entry.size is not None and size != entry.size:
                     raise BackupError('game package size changed')
+                if size > self.limits.max_file_bytes or done + size > self.limits.max_total_bytes:
+                    raise BackupError('actual game export size limit exceeded')
                 done += size
                 if progress:
                     progress(done, total)
@@ -809,8 +877,11 @@ class BackupManager:
                 (stage / 'manifest.json').write_text(json.dumps(item, sort_keys=True),
                                                      encoding='utf-8')
                 destination = self.root / 'game-exports'
+                _ensure_plain_path(destination)
                 destination.mkdir(exist_ok=True)
-                os.replace(stage, destination / export_id)
+                final = destination / export_id
+                _ensure_plain_path(final)
+                os.replace(stage, final)
             except BaseException as exc:
                 try:
                     (stage / 'incomplete.json').write_text(json.dumps({
