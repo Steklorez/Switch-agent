@@ -25,6 +25,9 @@
      which both keep pure --ok. Same green family, genuinely distinguishable. */
   --ok-soft: #2dd4bf;
   --warn: #f5a623;
+  /* A game's switch/ folder for the SD card -- a kind of its own, so a
+     colour of its own rather than one of the four above. */
+  --sd: #b392f0;
   --topbar-h: 52px;
   --nav-h: 60px;
 }
@@ -249,6 +252,12 @@ a { color: var(--accent); text-decoration: none; }
 .game-group { display: flex; flex-direction: column; }
 .card-no-base { display: flex; flex-direction: column; justify-content: center; min-height: 64px; }
 .card-no-base .card-meta { color: var(--text-dim); font-size: 0.75rem; }
+/* A forwarder whose .nro nothing in its folder provides (see
+   services._finish_family's launch_checks): worth reading before
+   installing, not an error -- the files may already be on the card. */
+.card-warning { margin: 6px 0 0; padding: 6px 9px; border-radius: 8px; background: rgba(245,166,35,.12);
+  color: var(--warn); font-size: 0.75rem; line-height: 1.35; overflow-wrap: anywhere; }
+.sd-destination { color: var(--sd); overflow-wrap: anywhere; }
 
 .game-variants {
   margin-top: 4px; background: var(--surface); border: 1px solid var(--border); border-radius: 0 0 12px 12px;
@@ -451,6 +460,7 @@ a { color: var(--accent); text-decoration: none; }
 #confirm-modal .confirm-tag-update    { background: var(--accent); }
 #confirm-modal .confirm-tag-dlc       { background: var(--ok); }
 #confirm-modal .confirm-tag-mod       { background: var(--warn); }
+#confirm-modal .confirm-tag-sd        { background: var(--sd); }
 #confirm-modal .confirm-tag-duplicate { background: var(--danger); }
 
 /* Tree line for nested Update/DLC/Mod/duplicate rows: a continuous vertical
@@ -580,6 +590,7 @@ a { color: var(--accent); text-decoration: none; }
 .job-tag-update { background: var(--accent); }
 .job-tag-dlc    { background: var(--ok); }
 .job-tag-mod    { background: var(--warn); }
+.job-tag-sd     { background: var(--sd); }
 .job-meta, .history-meta { color: var(--text-dim); font-size: 0.8rem; margin-top: 2px; }
 .job-progress-text { color: var(--accent); font-size: 0.8rem; font-weight: 600; margin-top: 2px; }
 .job-error, .history-error {

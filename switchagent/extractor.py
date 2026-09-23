@@ -27,7 +27,7 @@ from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import Optional
 
-from . import config, title_id
+from . import config, sd_files, title_id
 from .model import ArchiveEntry, ConflictEntry, ConflictState, ContentType
 
 
@@ -195,6 +195,11 @@ class ClassifiedArchive:
     # this dataclass's callers in preview.py for the actual multi-entry
     # (Base+Update+DLC) fan-out this enables).
     package_entries: list[PackageArchiveEntry] = field(default_factory=list)
+    # The archive's switch/ folder, if it has one (see sd_files.py): the
+    # whole of an SD_FILES archive, or the part of a package/mod archive
+    # that goes onto the SD card next to what it installs.
+    sd_root: Optional[tuple[str, ...]] = None
+    sd_summary: Optional[sd_files.SdSummary] = None
 
 
 def classify_entries(entries: list[ArchiveEntry]) -> ClassifiedArchive:
@@ -228,6 +233,10 @@ def classify_entries(entries: list[ArchiveEntry]) -> ClassifiedArchive:
 
     has_package = package_entry_name is not None
     has_atmosphere = atmosphere_root is not None
+    sd_root = sd_files.archive_sd_root(entries)
+    sd_summary = sd_files.archive_summary(entries, sd_root) if sd_root is not None else None
+    if sd_summary is None:
+        sd_root = None
 
     if has_package and has_atmosphere:
         content_type = ContentType.MIXED
@@ -235,6 +244,8 @@ def classify_entries(entries: list[ArchiveEntry]) -> ClassifiedArchive:
         content_type = ContentType.GAME_PACKAGE
     elif has_atmosphere:
         content_type = ContentType.ATMOSPHERE_MOD
+    elif sd_root is not None:
+        content_type = ContentType.SD_FILES
     else:
         content_type = ContentType.UNKNOWN
 
@@ -246,6 +257,8 @@ def classify_entries(entries: list[ArchiveEntry]) -> ClassifiedArchive:
         atmosphere_title_id_guess=atmosphere_title_id_guess,
         atmosphere_root=atmosphere_root,
         package_entries=package_entries,
+        sd_root=sd_root,
+        sd_summary=sd_summary,
     )
 
 

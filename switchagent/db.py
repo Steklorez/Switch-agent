@@ -1136,6 +1136,19 @@ def upsert_library_item(
     return existing["id"]
 
 
+def set_library_item_title_id(
+    conn: sqlite3.Connection, item_id: int, *, title_id: Optional[str], source: Optional[str],
+) -> None:
+    """Which game an SD_FILES row belongs to, decided after a scan has seen
+    the whole library (scanner.assign_sd_file_owners). Never confident: it
+    is inferred from where the files sit, not read from them."""
+    conn.execute(
+        "UPDATE library_items SET title_id = ?, title_id_source = ?, title_id_confident = 0 WHERE id = ?",
+        (title_id, source, item_id),
+    )
+    conn.commit()
+
+
 def touch_library_item_scanned(conn: sqlite3.Connection, item_id: int) -> None:
     conn.execute(
         "UPDATE library_items SET last_scanned_at = ? WHERE id = ?", (now_iso(), item_id),

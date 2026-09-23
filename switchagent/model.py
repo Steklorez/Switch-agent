@@ -15,6 +15,9 @@ from typing import Optional
 class ContentType(str, Enum):
     GAME_PACKAGE = "GAME_PACKAGE"
     ATMOSPHERE_MOD = "ATMOSPHERE_MOD"
+    # A `switch/` folder copied verbatim onto the SD card -- a homebrew
+    # port's .nro and its data (see switchagent/sd_files.py).
+    SD_FILES = "SD_FILES"
     MIXED = "MIXED"
     UNKNOWN = "UNKNOWN"
 

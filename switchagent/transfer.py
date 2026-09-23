@@ -30,7 +30,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional
 
-from . import config
+from . import config, sd_files
 from .model import ContentType
 from .mtp.base import MtpBackend, TransferResult, TransferStatus
 from .mtp.errors import MtpError
@@ -63,6 +63,8 @@ def transfer_report(
         return _transfer_game_package(backend, report, overwrite=overwrite)
     if report.content_type is ContentType.ATMOSPHERE_MOD:
         return _transfer_atmosphere_mod(backend, report, overwrite=overwrite)
+    if report.content_type is ContentType.SD_FILES:
+        return _transfer_sd_files(backend, report, overwrite=overwrite)
     return TransferOutcome(
         ok=False,
         error=f"content type {report.content_type.value} is not eligible for transfer (NEEDS_REVIEW)",
@@ -116,6 +118,49 @@ def _transfer_game_package(
         files_sent=1 if ok else 0, files_total=1,
         bytes_sent=result.bytes_sent, error=None if ok else (result.error or result.status.value),
         per_file=[result],
+    )
+
+
+def _transfer_sd_files(
+    backend: MtpBackend, report: PreviewReport, *, overwrite: bool,
+) -> TransferOutcome:
+    """A switch/ folder, file by file, to the same paths under switch/ on
+    the SD card -- the CLI counterpart of manifest._build_sd_files, with the
+    same one-file-at-a-time, stop-at-the-first-failure rule as mods."""
+    if report.sd_source_dir is None or not report.sd_source_dir.is_dir():
+        return TransferOutcome(
+            ok=False, error=(
+                "switch/ folder not staged locally yet "
+                "(archive source not extracted? call preview_path(path, extract=True))"
+            ),
+        )
+    files = sorted((p for p in report.sd_source_dir.rglob("*") if p.is_file()), key=lambda p: p.as_posix())
+    per_file: list[TransferResult] = []
+    sent = 0
+    total_bytes = 0
+    for f in files:
+        dest_path = sd_files.destination_for(f.relative_to(report.sd_source_dir).as_posix())
+        parent = "/".join(dest_path.split("/")[:-1])
+        try:
+            backend.ensure_directory(STORAGE_SD_CARD, parent)
+            result = backend.send_file(STORAGE_SD_CARD, dest_path, f, overwrite=overwrite)
+        except MtpError as exc:
+            return TransferOutcome(
+                ok=False, storage=STORAGE_SD_CARD, files_sent=sent, files_total=len(files),
+                bytes_sent=total_bytes, error=str(exc), per_file=per_file,
+            )
+        per_file.append(result)
+        if result.status is not TransferStatus.COMPLETED:
+            return TransferOutcome(
+                ok=False, storage=STORAGE_SD_CARD, files_sent=sent, files_total=len(files),
+                bytes_sent=total_bytes, error=result.error or f"transfer of '{dest_path}' did not complete",
+                per_file=per_file,
+            )
+        sent += 1
+        total_bytes += result.bytes_sent
+    return TransferOutcome(
+        ok=bool(files), storage=STORAGE_SD_CARD, files_sent=sent, files_total=len(files),
+        bytes_sent=total_bytes, per_file=per_file, error=None if files else "switch/ folder has no files",
     )
 
 
