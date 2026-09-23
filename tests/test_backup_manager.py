@@ -51,16 +51,39 @@ def test_inventory_reports_verified_account_saves_and_game_packages(tmp_path):
     assert [(item['path'], item['size']) for item in games] == [('Game A.nsp', 7)]
 
 
-def test_inventory_uses_only_dbi_profile_roots_and_counts_nested_files(tmp_path):
+def test_inventory_uses_only_dbi_profile_roots_without_scanning_nested_files(tmp_path, monkeypatch):
     backend = populated_backend()
     tree = backend.storage_tree('SAVES')
     tree.ensure_directory('Installed games/Game A/Profile A/nested/deeper')
     tree.write_file('Installed games/Game A/Profile A/nested/deeper/extra.dat', b'abc')
+    original_list = backend.list_directory
+
+    def refuse_nested_listing(storage, path='', **kwargs):
+        if path.startswith('Installed games/Game A/Profile A/nested'):
+            raise AssertionError('inventory scanned inside a save directory')
+        return original_list(storage, path, **kwargs)
+
+    monkeypatch.setattr(backend, 'list_directory', refuse_nested_listing)
     rows = BackupManager(tmp_path / 'store').inventory_saves(backend)
     assert len(rows) == 2
     profile = next(row for row in rows if row['name'] == 'Profile A')
-    assert (profile['size'], profile['file_count'], profile['selectable']) == (20, 2, True)
+    assert (profile['size'], profile['file_count'], profile['selectable']) == (None, None, True)
     assert all(len(row['path'].split('/')) == 3 for row in rows)
+
+
+def test_snapshot_still_validates_nested_save_contents(tmp_path):
+    backend = populated_backend()
+    path = 'Installed games/Game A/Profile A'
+    tree = backend.storage_tree('SAVES')
+    tree.ensure_directory(path + '/nested/deeper')
+    tree.write_file(path + '/nested/deeper/bad:name', b'unsafe')
+    service = BackupManager(tmp_path / 'store')
+
+    row = next(row for row in service.inventory_saves(backend) if row['path'] == path)
+    assert row['selectable'] is True
+    assert row['file_count'] is None
+    with pytest.raises(BackupError, match='unsafe'):
+        service.create_snapshot(backend, path)
 
 
 def test_device_game_and_profile_names_may_contain_windows_forbidden_characters(tmp_path):

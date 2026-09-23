@@ -211,13 +211,42 @@ class BackupManager:
                         row['reason'] = 'Invalid MTP save folder name'
                     else:
                         try:
-                            files, _ = self._enumerate_tree(
-                                backend, storage, save.path, session, cancel)
+                            # Inventory must not recursively scan large DBI save trees.
+                            # Snapshot creation performs the complete validation later.
+                            children = backend.list_directory(
+                                storage, save.path, expected_session=session)
+                            if len(children) > self.limits.max_files:
+                                raise BackupError('device object limit exceeded')
+                            names = set()
+                            has_directories = False
+                            known_size = 0
+                            all_sizes_known = True
+                            for child in children:
+                                _check_cancel(cancel)
+                                if not isinstance(child.name, str):
+                                    raise BackupError('ambiguous or unsafe device object')
+                                name = child.name.casefold()
+                                if (not _valid_part(child.name) or name in names
+                                        or child.path != f'{save.path}/{child.name}'
+                                        or child.metadata.get('type_known') is False):
+                                    raise BackupError('ambiguous or unsafe device object')
+                                names.add(name)
+                                if child.is_dir:
+                                    has_directories = True
+                                elif child.size is None:
+                                    all_sizes_known = False
+                                else:
+                                    if child.size > self.limits.max_file_bytes:
+                                        raise BackupError('file size limit exceeded')
+                                    known_size += child.size
+                                    if known_size > self.limits.max_total_bytes:
+                                        raise BackupError('total size limit exceeded')
                             row['identity'] = backend.save_identity(
                                 storage, save.path, expected_session=session)
-                            row['file_count'] = len(files)
-                            if all(entry.size is not None for _, entry in files):
-                                row['size'] = sum(entry.size for _, entry in files)
+                            if not has_directories:
+                                row['file_count'] = len(children)
+                                if all_sizes_known:
+                                    row['size'] = known_size
                             row['selectable'] = True
                         except (BackupError, AmbiguousPathError, InvalidOperationError,
                                 ReadAccessDeniedError, SourceNotFoundError):
