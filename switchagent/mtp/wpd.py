@@ -122,11 +122,6 @@ CLSID_PortableDeviceKeyCollection = "{DE2D022D-2480-43BE-97F0-D1FA2CF98F4F}"
 IID_IPortableDeviceKeyCollection = "{DADA2357-E0AD-492E-98DB-DD61C53BA353}"
 IID_IPortableDeviceContent = "{6A96ED84-7C73-4480-9938-BF5AF477D426}"
 IID_IEnumPortableDeviceObjectIDs = "{10ECE955-CF41-4728-BFA0-41EEDF1BBF19}"
-# Not in this machine's type libraries (PortableDeviceApi.dll's embedded
-# library stops at IPortableDeviceContent2), so this one is from
-# PortableDeviceApi.h. A wrong value can only make QueryInterface refuse,
-# which stream_object_id() treats as "unknown" -- never a crash.
-IID_IPortableDeviceDataStream = "{88E04DB3-1012-4D64-9996-F703A950D3F4}"
 IID_IPortableDeviceProperties = "{7F6D695C-03DF-4439-A809-59266BEEE3A6}"
 IID_IPortableDeviceResources = "{FD8878AC-D841-4D17-891C-E6829CDB6934}"
 IID_IStream = "{0000000C-0000-0000-C000-000000000046}"
@@ -149,6 +144,11 @@ WPD_CLIENT_REVISION = PROPERTYKEY(_CLIENT, 5)
 _STORAGE = "{01A3057A-74D6-4E80-BEA7-DC4C212CE50A}"
 WPD_STORAGE_CAPACITY = PROPERTYKEY(_STORAGE, 4)
 WPD_STORAGE_FREE_SPACE_IN_BYTES = PROPERTYKEY(_STORAGE, 5)
+
+# An object's own bytes, for IPortableDeviceResources::GetStream.
+WPD_RESOURCE_DEFAULT = PROPERTYKEY("{E81E79BE-34F0-41BF-B53F-F1A06AE87842}", 0)
+STGM_READ = 0
+S_FALSE = 1
 
 WPD_CONTENT_TYPE_FOLDER = GUID("{27E2E392-A111-48E0-AB0C-E17705A05F85}")
 WPD_CONTENT_TYPE_GENERIC_FILE = GUID("{0085E0A6-8D34-45D7-BC5C-447E59C73D48}")
@@ -431,6 +431,43 @@ def stream_object_id(stream):
         release(data_stream)
 
 
+def read_object(content, object_id, max_bytes):
+    """An object's bytes (its default resource), or None as soon as it turns
+    out to hold more than `max_bytes`. READ-ONLY: IPortableDeviceContent::
+    Transfer (slot 5) -> IPortableDeviceResources::GetStream (slot 5, after
+    IUnknown's 3, GetSupportedResources, GetResourceAttributes) -> IStream::
+    Read (slot 3) until the stream is done."""
+    resources = c_void_p()
+    vcall(content, 5, (POINTER(c_void_p),), byref(resources), what="Transfer")
+    try:
+        stream = c_void_p()
+        optimal = DWORD(0)
+        vcall(resources, 5, (LPCWSTR, POINTER(PROPERTYKEY), DWORD, POINTER(DWORD), POINTER(c_void_p)),
+              object_id, byref(WPD_RESOURCE_DEFAULT), STGM_READ, byref(optimal), byref(stream),
+              what="GetStream")
+        try:
+            buffer = ctypes.create_string_buffer(max(optimal.value, 65536))
+            chunks = []
+            total = 0
+            while True:
+                read = ULONG(0)
+                hr = vcall(stream, 3, (c_void_p, ULONG, POINTER(ULONG)), byref(buffer), len(buffer), byref(read),
+                           what="IStream::Read", check=False) & 0xFFFFFFFF
+                if hr not in (S_OK, S_FALSE):
+                    raise ComError(hr, "IStream::Read")
+                if read.value:
+                    total += read.value
+                    if total > max_bytes:
+                        return None
+                    chunks.append(buffer.raw[:read.value])
+                if hr == S_FALSE or not read.value:
+                    return b"".join(chunks)
+        finally:
+            release(stream)
+    finally:
+        release(resources)
+
+
 def create_folder(content, parent_object_id, name):
     """CreateObjectWithPropertiesOnly for a folder. WRITES to the device."""
     values = values_new()
@@ -592,6 +629,9 @@ class WpdSession:
 
     def object_size(self, object_id):
         return read_props(self._properties, object_id).get(str(WPD_OBJECT_SIZE))
+
+    def read_file(self, object_id, max_bytes):
+        return read_object(self._content, object_id, max_bytes)
 
     def forget_children(self, parent_object_id):
         self._children_cache.pop(parent_object_id, None)

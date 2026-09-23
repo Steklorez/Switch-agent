@@ -1740,10 +1740,22 @@ def retry_job(conn, job_id: int, *, force_overwrite: bool = False) -> dict:
             db.delete_installation_batch(conn, batch_id)
         raise ValueError(f"could not re-validate source for retry: {exc}") from exc
 
+    carried = manifest_mod.inherit_progress(job_id, new_job_id, in_flight=_in_flight_file(old))
     db.confirm_job(conn, new_job_id)
-    db.log_job_event(conn, new_job_id, f"retry of job {job_id} (was {old['status']})")
+    db.log_job_event(conn, new_job_id, f"retry of job {job_id} (was {old['status']})"
+                     + (f", continuing after {carried} file(s) it had already delivered" if carried else ""))
     db.log_job_event(conn, job_id, f"retried as new job {new_job_id}")
     return {"old_job_id": job_id, "new_job_id": new_job_id, "batch_id": batch_id}
+
+
+def _in_flight_file(old) -> Optional[str]:
+    """The file `old` was sending when it stopped, if it stopped mid-file.
+    Only a transfer that broke off -- a failed send, a lost device -- can
+    have left one half written; a job that ended any other way has nothing
+    of its own to replace."""
+    if old["status"] not in ("FAILED", "INTERRUPTED", "DEVICE_UNAVAILABLE"):
+        return None
+    return old["current_file"]
 
 
 def _retry_staged_job(conn, old, frozen, *, force_overwrite: bool = False) -> dict:
@@ -1766,6 +1778,9 @@ def _retry_staged_job(conn, old, frozen, *, force_overwrite: bool = False) -> di
         conn.execute("UPDATE jobs SET manifest_path=?, retry_of_job_id=?, payload_batch_id=? WHERE id=?",
                      (str(path), old["id"], frozen.batch_id, new_id))
         conn.commit()
+        carried = manifest_mod.inherit_progress(old["id"], new_id, in_flight=_in_flight_file(old))
+        if carried:
+            db.log_job_event(conn, new_id, f"continuing after {carried} file(s) job {old['id']} had already delivered")
         db.confirm_job(conn, new_id)
     except Exception:
         db.update_job_status(conn, new_id, "FAILED", error="Could not create retry manifest")

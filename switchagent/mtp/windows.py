@@ -183,6 +183,26 @@ DEFAULT_INSTALL_PRESENCE_READS_REQUIRED = 2
 # storages actually proven filesystem-like is the conservative default.
 SIZE_VERIFIABLE_STORAGES = frozenset({"SD_CARD", "NAND_USER", "NAND_SYSTEM", "SAVES", "ALBUM"})
 
+# The largest existing destination file send_file() will read back to see
+# whether it already holds exactly the bytes being sent (expected_sha256).
+# A homebrew port's data is thousands of files of a few KB; reading a
+# multi-GB file back just to compare it is not worth it -- that stays a
+# conflict, as before.
+READ_BACK_MAX_BYTES = 64 * 1024 * 1024
+
+
+class _WpdWriteFailed(Exception):
+    """WPD failed while writing an object this very call had just created, so
+    a half-written object of our OWN may now sit at the destination -- the
+    one thing a retry of the same file may replace."""
+
+    def __init__(self, cause: BaseException):
+        super().__init__(f"{type(cause).__name__}: {cause}")
+        self.cause = cause
+
+
+_ALREADY_THERE = object()  # _send_via_wpd: the destination already holds these exact bytes
+
 _SERIAL_SEGMENT_RE = re.compile(r"(usb#vid_[0-9a-f]{4}&pid_[0-9a-f]{4}#)([^#]+)(#\{)", re.IGNORECASE)
 
 
@@ -726,8 +746,10 @@ class RealMtpBackend(MtpBackend):
         return any(i.Name == name for i in parent.GetFolder.Items())
 
     def ensure_directory(self, storage: str, path: str) -> None:
-        session = self._wpd_session()
-        if session is not None:
+        for attempt in (1, 2):
+            session = self._wpd_session()
+            if session is None:
+                break
             try:
                 # Must go through the SAME transport the following send_file
                 # will navigate with: WpdSession caches a folder's children so
@@ -740,10 +762,16 @@ class RealMtpBackend(MtpBackend):
             except StorageNotFoundError:
                 raise
             except Exception as exc:  # noqa: BLE001 -- same fallback rule as send_file
-                log.warning("WPD ensure_directory failed (%s: %s) -- falling back to the Shell",
+                self._close_wpd()
+                if attempt == 1:
+                    # Same reasoning as send_file: one failed call is not yet
+                    # a transport that does not work.
+                    log.warning("WPD ensure_directory failed (%s: %s) -- reopening the WPD session once",
+                                type(exc).__name__, exc)
+                    continue
+                log.warning("WPD ensure_directory failed again (%s: %s) -- falling back to the Shell",
                             type(exc).__name__, exc)
                 self._wpd_unavailable = True
-                self._close_wpd()
         storage_item = self._get_storage_item(storage)
         self._navigate(storage_item, path, create_missing=True)
         log.info("ensure_directory storage=%s path=%r -> confirmed (shell)", storage, path)
@@ -752,7 +780,7 @@ class RealMtpBackend(MtpBackend):
 
     def send_file(
         self, storage: str, dest_path: str, source_path: Path, *, overwrite: bool = False,
-        progress: Optional[Callable[[int, int], None]] = None,
+        progress: Optional[Callable[[int, int], None]] = None, expected_sha256: Optional[str] = None,
     ) -> TransferResult:
         self._require_connected()  # re-verifies THIS device specifically, right before touching anything
 
@@ -774,12 +802,16 @@ class RealMtpBackend(MtpBackend):
         )
 
         outcome = None
-        if session is not None:
+        for attempt in (1, 2):
+            if session is None:
+                break
             try:
                 outcome = self._send_via_wpd(
                     session, storage, parent_path, filename, dest_path, source_path,
                     overwrite=overwrite, expected_size=expected_size, progress=progress,
+                    expected_sha256=expected_sha256,
                 )
+                break
             except (FileAlreadyExistsError, DestinationNotFoundError):
                 # Real, meaningful answers about the destination -- identical
                 # on either transport (verified on real hardware: the Shell
@@ -789,14 +821,40 @@ class RealMtpBackend(MtpBackend):
                 # second time, so these propagate unchanged.
                 raise
             except Exception as exc:  # noqa: BLE001 -- see _wpd_session(): any WPD fault falls back, never fails the job
+                self._close_wpd()
+                if isinstance(exc, _WpdWriteFailed) and storage in SIZE_VERIFIABLE_STORAGES:
+                    # What may be left at the destination now is our own
+                    # half-written object; whichever transport tries next
+                    # may replace it -- and only it.
+                    overwrite = True
+                if attempt == 1 and storage in SIZE_VERIFIABLE_STORAGES:
+                    # A console that stops answering for a while is not a
+                    # transport that does not work. Real case (2026-09-23):
+                    # after 137 files at 0.14s each, one 5 KB write to DBI
+                    # timed out (IStream::Write, 0x80070079) and three
+                    # seconds later the console was answering again -- but
+                    # the whole rest of that 4,625-file job had already been
+                    # switched to the Shell, 25 times slower, which then gave
+                    # up at the next stall. So: a fresh session, the same
+                    # file, once. Install-like storages keep the old rule --
+                    # there a second attempt means sending a whole game again.
+                    log.warning(
+                        "op=%s WPD transport failed (%s: %s) -- reopening the WPD session and trying "
+                        "this file once more", operation_id, type(exc).__name__, exc,
+                    )
+                    session = self._wpd_session()
+                    continue
                 log.warning(
                     "op=%s WPD transport failed (%s: %s) -- falling back to the Shell copy engine "
                     "for the rest of this connection", operation_id, type(exc).__name__, exc,
                 )
                 self._wpd_unavailable = True
-                self._close_wpd()
                 outcome = None
+                break
 
+        already_present = outcome is _ALREADY_THERE
+        if already_present:
+            outcome = (TransferStatus.COMPLETED, 0, None)
         if outcome is None:
             outcome = self._send_via_shell(
                 storage, parent_path, filename, dest_path, source_path,
@@ -809,7 +867,7 @@ class RealMtpBackend(MtpBackend):
 
         transfer_result = TransferResult(
             operation_id=operation_id, status=status, storage=storage, dest_path=dest_path,
-            bytes_sent=bytes_sent, bytes_total=expected_size, error=error,
+            bytes_sent=bytes_sent, bytes_total=expected_size, error=error, already_present=already_present,
         )
         self._transfers[operation_id] = transfer_result
         return transfer_result
@@ -864,32 +922,43 @@ class RealMtpBackend(MtpBackend):
     def _send_via_wpd(
         self, session, storage: str, parent_path: str, filename: str, dest_path: str,
         source_path: Path, *, overwrite: bool, expected_size: int, progress,
+        expected_sha256: Optional[str] = None,
     ):
         """Streams the file ourselves through IPortableDevice, which -- unlike
         IFileOperation -- reports progress, separates "bytes moving" from
         "device finalising", and on real hardware moved a 123 MiB .nsp in
         5.97s where the Shell took 68.5s for the identical file on the
         identical console (docs/PERF-MTP.md)."""
-        if overwrite:
-            # Replacing an existing object means deleting it first; MTP would
-            # otherwise happily hold two objects with the same name. The
-            # Shell's copy engine already does that replacement correctly, so
-            # the rare Override path keeps using it rather than growing a
-            # second, less-tested delete implementation here.
-            return None
         storage_id = self._wpd_storage_id(session, storage)
         parent_id = session.navigate(storage_id, parent_path, create_missing=False)
         if parent_id is None:
             raise DestinationNotFoundError(
                 f"'{parent_path}' does not exist under {storage!r} -- call ensure_directory() first"
             )
-        if session.child_id(parent_id, filename) is not None:
+        existing = session.child_id(parent_id, filename)
+        if existing is not None:
+            if (expected_sha256 and storage in SIZE_VERIFIABLE_STORAGES
+                    and self._holds_exactly(session, existing, expected_size, expected_sha256)):
+                return _ALREADY_THERE
+            if overwrite:
+                # Replacing an existing object means deleting it first; MTP
+                # would otherwise happily hold two objects with the same
+                # name. The Shell's copy engine already does that replacement
+                # correctly, so replacing keeps using it rather than growing a
+                # second, less-tested delete implementation here -- but only
+                # for a file that is actually there. Handing every file of an
+                # Override job to the Shell made a 4,625-file folder a
+                # four-hour copy.
+                return None
             raise FileAlreadyExistsError(f"'{dest_path}' already exists on '{storage}'")
 
-        timing = session.send_file(
-            parent_id, filename, source_path, progress=progress,
-            remember=storage in SIZE_VERIFIABLE_STORAGES,
-        )
+        try:
+            timing = session.send_file(
+                parent_id, filename, source_path, progress=progress,
+                remember=storage in SIZE_VERIFIABLE_STORAGES,
+            )
+        except Exception as exc:  # noqa: BLE001 -- re-raised, marked as possibly half-written
+            raise _WpdWriteFailed(exc) from exc
         log.info("wpd transfer dest=%r %s", dest_path, timing)
 
         if timing.bytes_written != expected_size:
@@ -954,6 +1023,24 @@ class RealMtpBackend(MtpBackend):
             f"({timing.stream_mb_per_second:.1f} MB/s, {timing.commit_seconds:.1f}s to finalise); "
             "DBI-side installation result still cannot be verified via MTP -- check the console screen",
         )
+
+    @staticmethod
+    def _holds_exactly(session, object_id, expected_size: int, expected_sha256: str) -> bool:
+        """Does this existing object already hold exactly the bytes about to
+        be sent? Proven only by reading it back and hashing it -- never by
+        name or size alone -- and only for files small enough to be worth
+        reading. Any doubt (a read error, too big) is "no": the caller then
+        treats the file as the conflict it always was."""
+        if expected_size > READ_BACK_MAX_BYTES:
+            return False
+        try:
+            if session.object_size(object_id) != expected_size:
+                return False
+            data = session.read_file(object_id, expected_size)
+        except Exception as exc:  # noqa: BLE001 -- a failed comparison is just "not proven identical"
+            log.info("could not read back an existing file to compare it (%s: %s)", type(exc).__name__, exc)
+            return False
+        return data is not None and hashlib.sha256(data).hexdigest() == expected_sha256
 
     # -- transport B: the Shell's copy engine (fallback) ---------------------
 
