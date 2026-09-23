@@ -7,6 +7,12 @@ Entries are one sentence per change, three to five lines per release, and
 only what a user would notice — no internals, no reasoning, no history.
 Those belong in the commit message. See [CLAUDE.md](CLAUDE.md#how-to-write-an-entry).
 
+## v1.0.17
+
+- The Library says whether it is still loading: one line above the games shows a running scan, cover downloads and the console's installed-games read, each with its own count.
+- A thin bar along the top of the window moves while anything is still loading.
+- Games that TitleDB has no cover for are no longer shown as a cover error.
+
 ## v1.0.16
 
 - A console that stops answering for a moment no longer fails a big install: that file is simply sent again.
