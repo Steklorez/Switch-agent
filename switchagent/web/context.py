@@ -22,6 +22,7 @@ one-writer/many-readers model.
 from __future__ import annotations
 
 import logging
+import re
 import threading
 import time
 import uuid
@@ -32,7 +33,7 @@ from pathlib import Path
 from typing import Callable, Optional
 
 from .. import config, db, queue_worker
-from ..backup_manager import BackupManager
+from ..backup_manager import BackupManager, _ensure_plain_path
 from ..mtp.base import DeviceInfo, MtpBackend
 from ..mtp.errors import DeviceNotFoundError
 from ..transfer import STORAGE_SD_INSTALL
@@ -401,6 +402,7 @@ class WebContext:
     # -- background worker ------------------------------------------------
 
     def start_worker(self) -> None:
+        # A timed-out stop still owns its COM thread. Never start a second one.
         if self._worker_thread is not None and self._worker_thread.is_alive():
             return
         self._stop_event.clear()
@@ -412,8 +414,13 @@ class WebContext:
         self.preparations.stop.set()
         self._stop_event.set()
         with self._backup_lock:
-            for cancellation in self._backup_cancel.values():
-                cancellation.set()
+            for job_id, cancellation in self._backup_cancel.items():
+                job = self._backup_jobs[job_id]
+                if job["action"] != "confirm_restore" or job["state"] != "running":
+                    cancellation.set()
+            pending = list(self._backup_pending)
+        for job_id in pending:
+            self.cancel_backup_job(job_id)
         if self._worker_thread is not None:
             self._worker_thread.join(timeout=10.0)
             if not self._worker_thread.is_alive():
@@ -522,12 +529,16 @@ class WebContext:
 
     def backup_state(self) -> dict:
         with self._backup_lock:
-            return {"root": str(self.backup_root),
-                    "inventory": {key: dict(value) for key, value in self._backup_inventory.items()},
+            return {"inventory": {key: dict(value) for key, value in self._backup_inventory.items()},
                     "catalog": {key: list(value) for key, value in self._backup_catalog.items()},
-                    "jobs": [dict(row) for row in self._backup_jobs.values()],
+                    "jobs": [self._public_backup_job(row) for row in self._backup_jobs.values()],
                     "reservations": {key: dict(value) for key, value in self._restore_reservations.items()},
                     "paused": self.worker_paused.is_set()}
+
+    @staticmethod
+    def _public_backup_job(job: dict) -> dict:
+        # Params can contain a local upload path or a typed profile name.
+        return {key: value for key, value in job.items() if key != "params"}
 
     def enqueue_backup(self, action: str, *, device_id: str | None = None, **params) -> str:
         allowed = {"inventory_saves", "inventory_games", "create_snapshots", "export_games",
@@ -535,6 +546,11 @@ class WebContext:
                    "cancel_restore", "restore_diagnostics", "verify_game_download"}
         if action not in allowed:
             raise ValueError("unknown backup operation")
+        needs_device = action in {"inventory_saves", "inventory_games", "create_snapshots",
+                                  "export_games", "prepare_restore", "confirm_restore",
+                                  "cancel_restore", "restore_diagnostics"}
+        if needs_device and not device_id:
+            raise ValueError("device is required")
         if device_id is not None and self.registry.get(device_id) is None:
             raise ValueError("device is not registered")
         job_id = uuid.uuid4().hex
@@ -542,11 +558,18 @@ class WebContext:
             if action == "prepare_restore":
                 if device_id in self._restore_reservations:
                     raise ValueError("restore already reserves this device")
-                self._restore_reservations[device_id] = {"job_id": job_id, "state": "preparing"}
+                self._restore_reservations[device_id] = {"job_id": job_id, "state": "preparing",
+                                                         "expires_at": time.time() + 600}
             if action in ("confirm_restore", "cancel_restore"):
                 reservation = self._restore_reservations.get(device_id)
                 if reservation is None or reservation.get("plan_id") != params.get("plan_id"):
                     raise ValueError("restore plan does not reserve this device")
+                if reservation["state"] != "prepared":
+                    raise ValueError("restore plan already has a pending command")
+                if action == "confirm_restore" and reservation.get("requires_profile_confirmation") \
+                        and params.get("confirm_profile") != reservation.get("target_profile"):
+                    raise ValueError("enter the exact target profile name to confirm restore")
+                reservation["state"] = "confirming" if action == "confirm_restore" else "cancelling"
             self._backup_jobs[job_id] = {"id": job_id, "action": action,
                                          "device_id": device_id, "params": params,
                                          "state": "queued", "done": 0, "total": None,
@@ -558,15 +581,42 @@ class WebContext:
     def backup_job(self, job_id: str) -> dict | None:
         with self._backup_lock:
             job = self._backup_jobs.get(job_id)
-            return dict(job) if job else None
+            return self._public_backup_job(job) if job else None
 
     def cancel_backup_job(self, job_id: str) -> bool:
+        upload = None
         with self._backup_lock:
             job = self._backup_jobs.get(job_id)
             if job is None or job["state"] in ("ready", "failed", "cancelled"):
                 return False
+            if job["action"] == "confirm_restore" and job["state"] == "running":
+                # The service may already have sent the first write to WPD.
+                return False
             self._backup_cancel[job_id].set()
-            return True
+            if job["state"] == "queued":
+                self._backup_pending.remove(job_id)
+                job["state"] = "cancelled"
+                job["error"] = "backup operation cancelled"
+                action, device_id, params = job["action"], job["device_id"], job["params"]
+                if action == "prepare_restore":
+                    self._restore_reservations.pop(device_id, None)
+                elif action in ("confirm_restore", "cancel_restore"):
+                    reservation = self._restore_reservations.get(device_id)
+                    if reservation and reservation.get("plan_id") == params.get("plan_id"):
+                        reservation["state"] = "prepared"
+                elif action == "import_archive":
+                    upload = params["source"]
+        if upload is not None:
+            self._owned_import_path(upload).unlink(missing_ok=True)
+        return True
+
+    def _owned_import_path(self, value: str) -> Path:
+        path = Path(value)
+        owner = self.backup_root / ".partial" / "import"
+        if path.parent != owner or not re.fullmatch(r"[0-9a-f]{32}\.zip", path.name):
+            raise ValueError("upload path is not owned by backup store")
+        _ensure_plain_path(path)
+        return path
 
     def backup_download(self, token: str) -> Path | None:
         with self._backup_lock:
@@ -575,13 +625,16 @@ class WebContext:
     def _expire_restore_reservations(self) -> None:
         now = time.time()
         with self._backup_lock:
-            expired = [(device_id, item["plan_id"])
+            expired = [(device_id, item.get("plan_id"), item["job_id"])
                        for device_id, item in self._restore_reservations.items()
-                       if item.get("expires_at", now + 1) <= now and item.get("plan_id")]
-        for device_id, plan_id in expired:
-            self.backups.cancel_restore(plan_id)
+                       if item.get("expires_at", now + 1) <= now]
+        for device_id, plan_id, job_id in expired:
+            if plan_id:
+                self.backups.cancel_restore(plan_id)
             with self._backup_lock:
-                if self._restore_reservations.get(device_id, {}).get("plan_id") == plan_id:
+                if self._restore_reservations.get(device_id, {}).get("job_id") == job_id:
+                    if not plan_id and job_id in self._backup_cancel:
+                        self._backup_cancel[job_id].set()
                     self._restore_reservations.pop(device_id, None)
 
     def run_backup_once(self) -> bool:
@@ -629,27 +682,31 @@ class WebContext:
                 result = {"archive_id": archive_id, "size": path.stat().st_size,
                           "download_url": "/api/backups/download/" + archive_id}
             elif action == "import_archive":
-                source = Path(params["source"])
-                try:
-                    result = self.backups.import_archive(source, cancel=cancellation.is_set,
-                                                         progress=progress)
-                finally:
-                    source.unlink(missing_ok=True)
+                source = self._owned_import_path(params["source"])
+                result = self.backups.import_archive(source, cancel=cancellation.is_set,
+                                                     progress=progress)
             elif action == "prepare_restore":
                 result = self.backups.prepare_restore(backend, params["snapshot_id"],
+                                                      target_path=params.get("target_path"),
                                                       cancel=cancellation.is_set, progress=progress)
                 with self._backup_lock:
                     self._restore_reservations[device_id] = {"job_id": job_id,
                                                                "plan_id": result["id"],
                                                                "expires_at": result["expires_at"],
-                                                               "state": "prepared"}
+                                                               "state": "prepared",
+                                                               "requires_profile_confirmation": result["requires_profile_confirmation"],
+                                                               "target_profile": result["target_profile"]}
             elif action == "confirm_restore":
                 try:
                     result = self.backups.confirm_restore(backend, params["plan_id"],
+                                                          confirm_profile=params.get("confirm_profile"),
                                                           cancel=cancellation.is_set, progress=progress)
                 finally:
                     with self._backup_lock:
-                        self._restore_reservations.pop(device_id, None)
+                        if params["plan_id"] not in self.backups._plans:
+                            self._restore_reservations.pop(device_id, None)
+                        elif device_id in self._restore_reservations:
+                            self._restore_reservations[device_id]["state"] = "prepared"
             elif action == "cancel_restore":
                 result = {"cancelled": self.backups.cancel_restore(params["plan_id"])}
                 with self._backup_lock:
@@ -663,6 +720,8 @@ class WebContext:
                 result = {"download_url": "/api/backups/download/" + params["export_id"]}
             else:
                 raise ValueError("backup operation is not wired yet")
+            if action == "import_archive":
+                self._owned_import_path(params["source"]).unlink(missing_ok=True)
             with self._backup_lock:
                 job["result"] = result
                 job["state"] = "ready"
@@ -675,8 +734,14 @@ class WebContext:
                 if action == "prepare_restore":
                     self._restore_reservations.pop(device_id, None)
                 if action in ("confirm_restore", "cancel_restore"):
-                    self._restore_reservations.pop(device_id, None)
+                    if params["plan_id"] not in self.backups._plans:
+                        self._restore_reservations.pop(device_id, None)
+                    elif device_id in self._restore_reservations:
+                        self._restore_reservations[device_id]["state"] = "prepared"
                 self._backup_catalog = self._load_backup_catalog()
+        finally:
+            if action == "import_archive":
+                self._owned_import_path(params["source"]).unlink(missing_ok=True)
         return True
 
     def _set_backup_progress(self, job_id: str, done: int, total: int | None) -> None:

@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import logging
 import re
+import uuid
 from pathlib import Path
 from typing import Optional
 
@@ -20,6 +21,9 @@ from fastapi.templating import Jinja2Templates
 
 from .. import __version__, db
 from .. import title_id as title_id_mod
+from ..backup_manager import BackupError, _ensure_plain_path
+from ..mtp.base import read_path
+from ..mtp.errors import InvalidOperationError
 from . import detail_views, error_reporting, onboarding, services
 from .context import WebContext
 from .schemas import (
@@ -43,6 +47,67 @@ _TEMPLATES = Jinja2Templates(directory=str(_WEB_DIR / "templates"))
 class BackupInventoryRequest(BaseModel):
     device_id: str
     kind: str
+
+
+class BackupPathsRequest(BaseModel):
+    device_id: str
+    paths: list[str]
+
+
+class BackupArchiveRequest(BaseModel):
+    snapshot_ids: list[str]
+
+
+class BackupDiagnosticsRequest(BaseModel):
+    device_id: str
+    path: str
+
+
+class BackupPrepareRequest(BaseModel):
+    device_id: str
+    snapshot_id: str
+    target_path: str | None = None
+
+
+class BackupPlanRequest(BaseModel):
+    device_id: str
+    plan_id: str
+    confirm_profile: str | None = None
+
+
+_MAX_BACKUP_UPLOAD_BYTES = 64 * 1024**3
+_UPLOAD_CHUNK = 1024 * 1024
+
+
+def _queue_backup(ctx: WebContext, action: str, *, device_id: str | None = None, **params) -> dict:
+    try:
+        return {"job_id": ctx.enqueue_backup(action, device_id=device_id, **params)}
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+
+def _nonempty(values: list[str], label: str) -> list[str]:
+    if (not values or len(values) > 1000
+            or any(not isinstance(value, str) or not value for value in values)
+            or len(values) != len(set(values))):
+        raise HTTPException(status_code=422, detail=f"{label} must contain 1 to 1000 nonempty values")
+    return values
+
+
+def _device_path(value: str) -> str:
+    try:
+        path = read_path(value)
+    except InvalidOperationError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    if not path:
+        raise HTTPException(status_code=422, detail="device path is empty")
+    return path
+
+
+def _hex_id(value: str, label: str) -> str:
+    if not re.fullmatch(r"[0-9a-f]{32}", value):
+        raise HTTPException(status_code=422, detail=f"invalid {label}")
+    return value
 
 
 def _format_size(num_bytes) -> str:
@@ -290,11 +355,107 @@ def create_app(ctx: WebContext) -> FastAPI:
     def api_backup_inventory(body: BackupInventoryRequest, ctx: WebContext = Depends(get_ctx)):
         if body.kind not in ("saves", "games"):
             raise HTTPException(status_code=422, detail="kind must be saves or games")
+        return _queue_backup(ctx, "inventory_" + body.kind, device_id=body.device_id)
+
+    @app.get("/api/backups/state")
+    def api_backup_state(ctx: WebContext = Depends(get_ctx)):
+        return ctx.backup_state()
+
+    @app.post("/api/backups/snapshots", status_code=202)
+    def api_backup_snapshots(body: BackupPathsRequest, ctx: WebContext = Depends(get_ctx)):
+        return _queue_backup(ctx, "create_snapshots", device_id=body.device_id,
+                             paths=[_device_path(path) for path in _nonempty(body.paths, "paths")])
+
+    @app.post("/api/backups/archives", status_code=202)
+    def api_backup_archive(body: BackupArchiveRequest, ctx: WebContext = Depends(get_ctx)):
+        return _queue_backup(ctx, "create_archive",
+                             snapshot_ids=[_hex_id(value, "snapshot id")
+                                           for value in _nonempty(body.snapshot_ids, "snapshot_ids")])
+
+    @app.post("/api/backups/games", status_code=202)
+    def api_backup_games(body: BackupPathsRequest, ctx: WebContext = Depends(get_ctx)):
+        return _queue_backup(ctx, "export_games", device_id=body.device_id,
+                             paths=[_device_path(path) for path in _nonempty(body.paths, "paths")])
+
+    @app.post("/api/backups/games/{export_id}/download", status_code=202)
+    def api_backup_game_download(export_id: str, ctx: WebContext = Depends(get_ctx)):
+        return _queue_backup(ctx, "verify_game_download", export_id=_hex_id(export_id, "game export id"))
+
+    @app.post("/api/backups/upload", status_code=202)
+    async def api_backup_upload(request: Request, ctx: WebContext = Depends(get_ctx)):
+        # A raw request body avoids framework multipart spooling before our
+        # limit is checked. The worker owns ZIP validation, not the HTTP thread.
+        media_type = request.headers.get("content-type", "").split(";", 1)[0].strip().lower()
+        if media_type not in ("application/zip", "application/octet-stream", "application/x-zip-compressed"):
+            raise HTTPException(status_code=415, detail="upload a ZIP body")
+        limit = min(ctx.backups.limits.max_total_bytes, _MAX_BACKUP_UPLOAD_BYTES)
+        declared = request.headers.get("content-length")
+        if declared and declared.isdecimal() and int(declared) > limit:
+            raise HTTPException(status_code=413, detail="backup archive exceeds upload limit")
+        partial = ctx.backup_root / ".partial" / "import"
+        destination = None
         try:
-            job_id = ctx.enqueue_backup("inventory_" + body.kind, device_id=body.device_id)
-        except ValueError as exc:
-            raise HTTPException(status_code=409, detail=str(exc)) from exc
-        return {"job_id": job_id}
+            _ensure_plain_path(partial)
+            partial.mkdir(parents=True, exist_ok=True)
+            _ensure_plain_path(partial)
+            destination = partial / (uuid.uuid4().hex + ".zip")
+            _ensure_plain_path(destination)
+            size = 0
+            with destination.open("xb") as output:
+                async for chunk in request.stream():
+                    size += len(chunk)
+                    if size > limit:
+                        raise HTTPException(status_code=413, detail="backup archive exceeds upload limit")
+                    for offset in range(0, len(chunk), _UPLOAD_CHUNK):
+                        output.write(chunk[offset:offset + _UPLOAD_CHUNK])
+            if not size:
+                raise HTTPException(status_code=422, detail="backup archive is empty")
+            result = _queue_backup(ctx, "import_archive", source=str(destination))
+            destination = None  # the worker owns cleanup from here
+            return result
+        except (OSError, BackupError) as exc:
+            raise HTTPException(status_code=400, detail=f"cannot store backup upload: {exc}") from exc
+        finally:
+            if destination is not None:
+                destination.unlink(missing_ok=True)
+
+    @app.get("/api/backups/download/{token}")
+    def api_backup_download(token: str, ctx: WebContext = Depends(get_ctx)):
+        if not re.fullmatch(r"[0-9a-f]{32}", token):
+            raise HTTPException(status_code=404, detail="download not found")
+        path = ctx.backup_download(token)
+        if path is None:
+            raise HTTPException(status_code=404, detail="download not found")
+        try:
+            _ensure_plain_path(path)
+            if not path.resolve(strict=True).is_relative_to(ctx.backup_root.resolve(strict=True)) or not path.is_file():
+                raise HTTPException(status_code=404, detail="download not found")
+        except (OSError, BackupError) as exc:
+            raise HTTPException(status_code=404, detail="download not found") from exc
+        return FileResponse(path, filename=path.name, media_type="application/octet-stream",
+                            headers={"Cache-Control": "no-store"})
+
+    @app.post("/api/backups/restores/diagnostics", status_code=202)
+    def api_backup_diagnostics(body: BackupDiagnosticsRequest, ctx: WebContext = Depends(get_ctx)):
+        return _queue_backup(ctx, "restore_diagnostics", device_id=body.device_id,
+                             path=_device_path(body.path))
+
+    @app.post("/api/backups/restores/prepare", status_code=202)
+    def api_backup_prepare(body: BackupPrepareRequest, ctx: WebContext = Depends(get_ctx)):
+        return _queue_backup(ctx, "prepare_restore", device_id=body.device_id,
+                             snapshot_id=_hex_id(body.snapshot_id, "snapshot id"),
+                             target_path=_device_path(body.target_path) if body.target_path is not None else None)
+
+    @app.post("/api/backups/restores/confirm", status_code=202)
+    def api_backup_confirm(body: BackupPlanRequest, ctx: WebContext = Depends(get_ctx)):
+        return _queue_backup(ctx, "confirm_restore", device_id=body.device_id,
+                             plan_id=_hex_id(body.plan_id, "restore plan id"),
+                             confirm_profile=body.confirm_profile)
+
+    @app.post("/api/backups/restores/cancel", status_code=202)
+    def api_backup_cancel_plan(body: BackupPlanRequest, ctx: WebContext = Depends(get_ctx)):
+        return _queue_backup(ctx, "cancel_restore", device_id=body.device_id,
+                             plan_id=_hex_id(body.plan_id, "restore plan id"))
 
     @app.get("/api/backups/jobs/{job_id}")
     def api_backup_job(job_id: str, ctx: WebContext = Depends(get_ctx)):
@@ -303,7 +464,21 @@ def create_app(ctx: WebContext) -> FastAPI:
             raise HTTPException(status_code=404, detail="backup job not found")
         return job
 
+    @app.post("/api/backups/jobs/{job_id}/cancel")
+    def api_backup_cancel_job(job_id: str, ctx: WebContext = Depends(get_ctx)):
+        if ctx.backup_job(job_id) is None:
+            raise HTTPException(status_code=404, detail="backup job not found")
+        if not ctx.cancel_backup_job(job_id):
+            raise HTTPException(status_code=409, detail="backup job cannot be cancelled")
+        return {"cancel_requested": True}
+
     # -- HTML pages -----------------------------------------------------
+
+    @app.get("/backups", response_class=HTMLResponse)
+    def page_backups(request: Request, conn=Depends(get_conn), ctx: WebContext = Depends(get_ctx)):
+        return _TEMPLATES.TemplateResponse(request, "backups.html", {
+            "devices": services.list_devices(conn, ctx), "active_page": "backups",
+        })
 
     @app.get("/", response_class=HTMLResponse)
     def page_library(
