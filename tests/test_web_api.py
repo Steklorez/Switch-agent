@@ -2675,7 +2675,9 @@ def test_library_grouped_view_renders_real_variant_data(client, web_ctx):
 
     games_html = client.get("/?kind=games").text
     assert "ZzzQuest" in games_html
-    assert "1 update(s), 1 DLC, 1 mod(s)" in games_html
+    assert "1 updates" in games_html
+    assert "1 DLC" in games_html
+    assert "1 mods" in games_html
     # A matching mod IS cross-referenced into the game's own nested variant
     # list (so "select the whole game" can select it too) -- it's still
     # never a top-level "games" card by itself, only nested. Its OWN raw
