@@ -13,6 +13,7 @@ Those belong in the commit message. See [CLAUDE.md](CLAUDE.md#how-to-write-an-en
 - If a game's icon would start a file none of its files provide, its card says so.
 - Homebrew ports with a TITLE_ID of their own show as games, not as DLC of a missing game.
 - Card tags wrap onto a second line instead of scrolling sideways.
+- Archives packed by a recent 7-Zip install instead of failing with "unsupported compression algorithm".
 
 ## v1.0.14
 
