@@ -23,7 +23,9 @@ from pathlib import Path
 from typing import Callable, Iterable
 
 from .mtp.base import MtpBackend, MtpEntry, read_path
-from .mtp.errors import OperationCancelledError, UnsupportedOperationError
+from .mtp.errors import (AmbiguousPathError, InvalidOperationError,
+                         OperationCancelledError, ReadAccessDeniedError,
+                         SourceNotFoundError, UnsupportedOperationError)
 from .mtp.reading import is_link_or_reparse
 
 
@@ -59,6 +61,12 @@ def _valid_part(part: str) -> bool:
     return (bool(part) and part not in ('.', '..') and part[-1] not in (' ', '.')
             and not _RESERVED.match(part) and not any(ord(ch) < 32 for ch in part)
             and not any(ch in '<>:"\\|?*' for ch in part))
+
+
+def _device_part(part: str) -> bool:
+    """An MTP directory name need not be a valid Windows filename."""
+    return (isinstance(part, str) and bool(part) and part not in ('.', '..')
+            and not any(ch in '/\\\x00' for ch in part))
 
 
 def _safe_rel(value: str) -> str:
@@ -159,24 +167,63 @@ class BackupManager:
 
     def inventory_saves(self, backend: MtpBackend, *, storage: str = 'SAVES',
                         cancel=None) -> list[dict]:
-        """List candidate save directories; unknown identity stays unknown."""
+        """List DBI group/game/profile roots, isolating unsafe save subtrees."""
         session = backend.session_token
         rows = []
-        for path, children in self._walk(backend, storage, session=session, cancel=cancel):
-            if not path:
+        for group in backend.list_directory(storage, '', expected_session=session):
+            _check_cancel(cancel)
+            if not group.is_dir or group.name not in _SAVE_GROUPS:
                 continue
-            files = [c for c in children if not c.is_dir]
-            subdirs = [c for c in children if c.is_dir]
-            depth = len(path.split('/'))
-            if depth != 3 or path.split('/', 1)[0] not in _SAVE_GROUPS:
+            try:
+                games = backend.list_directory(storage, group.path, expected_session=session)
+            except (AmbiguousPathError, InvalidOperationError,
+                    ReadAccessDeniedError, SourceNotFoundError):
+                backend._check_read_session(session)
+                rows.append({'path': group.path, 'name': group.name,
+                             'size': None, 'file_count': None, 'identity': None,
+                             'selectable': False, 'session_token': session,
+                             'reason': 'Cannot safely enumerate this save group'})
                 continue
-            identity = backend.save_identity(storage, path, expected_session=session)
-            size = (sum(c.size for c in files)
-                    if not subdirs and all(c.size is not None for c in files) else None)
-            rows.append({'path': path, 'name': path.rsplit('/', 1)[-1],
-                         'size': size, 'file_count': len(files), 'identity': identity,
-                         'selectable': True,
-                         'session_token': session})
+            for game in games:
+                _check_cancel(cancel)
+                if not game.is_dir or not _device_part(game.name):
+                    continue
+                try:
+                    saves = backend.list_directory(storage, game.path, expected_session=session)
+                except (AmbiguousPathError, InvalidOperationError,
+                        ReadAccessDeniedError, SourceNotFoundError):
+                    backend._check_read_session(session)
+                    rows.append({'path': game.path, 'name': game.name,
+                                 'size': None, 'file_count': None, 'identity': None,
+                                 'selectable': False, 'session_token': session,
+                                 'reason': 'Cannot safely enumerate this game folder'})
+                    continue
+                for save in saves:
+                    _check_cancel(cancel)
+                    if not save.is_dir:
+                        continue
+                    row = {'path': save.path, 'name': save.name, 'size': None,
+                           'file_count': None, 'identity': None, 'selectable': False,
+                           'session_token': session}
+                    if not _device_part(save.name) or save.path != f'{game.path}/{save.name}':
+                        row['reason'] = 'Invalid MTP save folder name'
+                    else:
+                        try:
+                            files, _ = self._enumerate_tree(
+                                backend, storage, save.path, session, cancel)
+                            row['identity'] = backend.save_identity(
+                                storage, save.path, expected_session=session)
+                            row['file_count'] = len(files)
+                            if all(entry.size is not None for _, entry in files):
+                                row['size'] = sum(entry.size for _, entry in files)
+                            row['selectable'] = True
+                        except (BackupError, AmbiguousPathError, InvalidOperationError,
+                                ReadAccessDeniedError, SourceNotFoundError):
+                            # A transport fault can invalidate the whole session;
+                            # never return a partial inventory in that case.
+                            backend._check_read_session(session)
+                            row['reason'] = 'Cannot safely enumerate this save'
+                    rows.append(row)
         return rows
 
     def inventory_games(self, backend: MtpBackend, *, storage: str = 'INSTALLED_GAMES',
@@ -185,7 +232,7 @@ class BackupManager:
         rows = []
         for path, children in self._walk(backend, storage, session=session, cancel=cancel):
             for child in children:
-                if not child.is_dir:
+                if not child.is_dir and child.name.casefold().endswith(('.nsp', '.nsz', '.xci', '.xcz')):
                     rows.append({'path': child.path, 'name': child.name, 'size': child.size,
                                  'kind': 'package', 'session_token': session})
         return rows
@@ -285,10 +332,13 @@ class BackupManager:
         staging.mkdir(parents=True)
         content = staging / 'files'
         content.mkdir()
+        from .mtp.windows import device_fingerprint
         manifest = {'format': 'switchagent-backup', 'version': FORMAT_VERSION,
                     'id': snapshot_id, 'state': 'incomplete', 'kind': kind,
                     'created_at': time.time(), 'storage': storage,
                     'source_path': path, 'identity': identity,
+                    'origin': {'device_fingerprint': device_fingerprint(backend.device_id),
+                               'group': parts[0], 'game': parts[1], 'profile': parts[2]},
                     'session_token': session, 'files': [], 'directories': directories}
         done = 0
         try:

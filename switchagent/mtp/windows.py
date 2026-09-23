@@ -553,6 +553,11 @@ class RealMtpBackend(MtpBackend):
         self._wpd_unavailable = not WPD_TRANSPORT_ENABLED
         self._wpd_storage_ids: dict[str, str] = {}
 
+    @property
+    def device_id(self) -> str:
+        """Configured physical target; available before connecting."""
+        return self._device_id
+
     def set_storage_overrides(self, overrides: dict[str, str]) -> None:
         """Replaces the whole override set each call (not merged), so a
         cleared mapping (its device_storage_mappings row deleted) is
@@ -654,6 +659,7 @@ class RealMtpBackend(MtpBackend):
         self._device_folder = item.GetFolder
         if not self._connected:
             self._read_session_token = uuid.uuid4().hex
+            self._wpd_unavailable = not WPD_TRANSPORT_ENABLED
         self._connected = True
         log.info("connected device=%s name=%r", device_fingerprint(self._device_id), item.Name)
         return DeviceInfo(device_id=self._device_id, name=item.Name, connected=True)

@@ -951,9 +951,9 @@ def build_mock_context(db_path: Path, *, device_ids: Optional[list[str]] = None)
         backend.add_storage("SD_INSTALL")
         saves = backend.add_storage("SAVES", free_bytes=sd_card_free_bytes, total_bytes=sd_card_total_bytes)
         installed_games = backend.add_storage("INSTALLED_GAMES")
-        saves.ensure_directory("Demo Adventure/Player/Default")
-        saves.write_file("Demo Adventure/Player/Default/progress.dat", b"SwitchAgent mock save progress\n")
-        backend.set_save_identity("SAVES", "Demo Adventure/Player/Default",
+        saves.ensure_directory("Installed games/Demo Adventure/Player")
+        saves.write_file("Installed games/Demo Adventure/Player/progress.dat", b"SwitchAgent mock save progress\n")
+        backend.set_save_identity("SAVES", "Installed games/Demo Adventure/Player",
                                   title_id="0100000000010000", user_id="mock-user-1",
                                   environment_id=device_id + "-nand-1")
         installed_games.write_file("Demo Adventure [0100000000010000][v0].nsp", b"mock game package\n")

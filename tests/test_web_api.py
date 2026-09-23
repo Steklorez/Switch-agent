@@ -240,7 +240,7 @@ def test_web_ctx_fixture_refresh_already_populated_the_storage_cache(web_ctx):
     the very first call regardless of the refresh interval."""
     storages = web_ctx.get_known_storages("mock-switch-parent")
     names = {s.name for s in storages}
-    assert names == {"SD_CARD", "SD_INSTALL"}
+    assert names == {"SD_CARD", "SD_INSTALL", "SAVES", "INSTALLED_GAMES"}
 
 
 def test_get_known_storages_is_empty_for_a_never_seen_device(web_ctx):
@@ -250,7 +250,7 @@ def test_get_known_storages_is_empty_for_a_never_seen_device(web_ctx):
 def test_api_list_device_storages_reports_auto_mapping_by_default(client, web_ctx):
     body = client.get("/api/devices/mock-switch-parent/storages").json()
     names = {s["effective_logical_name"] for s in body}
-    assert names == {"SD_CARD", "SD_INSTALL"}
+    assert names == {"SD_CARD", "SD_INSTALL", "SAVES", "INSTALLED_GAMES"}
     assert all(s["mapping_source"] == "AUTO" for s in body)
 
 

@@ -460,6 +460,19 @@ def test_connect_finds_matching_device(monkeypatch):
     info = backend.connect()
     assert info.device_id == "dev-a"
     assert info.connected is True
+    assert backend.device_id == "dev-a"
+
+
+def test_new_connection_retries_wpd_after_previous_connection_failure(monkeypatch):
+    _install_fake_shell(monkeypatch, [_make_switch("dev-a")])
+    backend = mtpw.RealMtpBackend(device_id="dev-a")
+    backend.connect()
+    backend._wpd_unavailable = True
+    backend.connect()
+    assert backend._wpd_unavailable is True  # idempotent connect keeps this session's decision
+    backend.disconnect()
+    backend.connect()
+    assert backend._wpd_unavailable is (not mtpw.WPD_TRANSPORT_ENABLED)
 
 
 def test_connect_raises_device_not_found_when_absent(monkeypatch):

@@ -127,7 +127,7 @@ class MtpEntry:
 def read_path(path: str) -> str:
     """Validate device-relative paths; never normalize away unsafe segments."""
     from .errors import InvalidOperationError
-    if not isinstance(path, str) or '\\' in path or '\x00' in path or ':' in path or path.startswith('/'):
+    if not isinstance(path, str) or '\\' in path or '\x00' in path or path.startswith('/'):
         raise InvalidOperationError('expected a relative MTP path')
     if path and any(part in ('', '.', '..') for part in path.split('/')):
         raise InvalidOperationError('unsafe MTP path component')

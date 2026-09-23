@@ -42,6 +42,120 @@ def test_inventory_reports_verified_account_saves_and_game_packages(tmp_path):
     assert [(item['path'], item['size']) for item in games] == [('Game A.nsp', 7)]
 
 
+def test_inventory_uses_only_dbi_profile_roots_and_counts_nested_files(tmp_path):
+    backend = populated_backend()
+    tree = backend.storage_tree('SAVES')
+    tree.ensure_directory('Installed games/Game A/Profile A/nested/deeper')
+    tree.write_file('Installed games/Game A/Profile A/nested/deeper/extra.dat', b'abc')
+    rows = BackupManager(tmp_path / 'store').inventory_saves(backend)
+    assert len(rows) == 2
+    profile = next(row for row in rows if row['name'] == 'Profile A')
+    assert (profile['size'], profile['file_count'], profile['selectable']) == (20, 2, True)
+    assert all(len(row['path'].split('/')) == 3 for row in rows)
+
+
+def test_device_game_and_profile_names_may_contain_windows_forbidden_characters(tmp_path):
+    backend = populated_backend()
+    path = 'Uninstalled games/Game: Special?/Player: One'
+    tree = backend.storage_tree('SAVES')
+    tree.ensure_directory(path)
+    tree.write_file(path + '/Default', b'save')
+    service = BackupManager(tmp_path / 'store')
+    row = next(row for row in service.inventory_saves(backend) if row['path'] == path)
+    assert row['selectable'] is True
+    snapshot = service.create_snapshot(backend, path)
+    assert snapshot['source_path'] == path
+    assert snapshot['files'][0]['path'] == 'Default'
+
+
+def test_bad_save_subtree_is_unselectable_without_hiding_other_saves(tmp_path):
+    backend = populated_backend()
+    bad = 'Installed games/Game A/Profile A'
+    backend.storage_tree('SAVES').write_file(bad + '/bad:name', b'bad')
+    service = BackupManager(tmp_path / 'store')
+    rows = service.inventory_saves(backend)
+    assert len(rows) == 2
+    assert next(row for row in rows if row['path'] == bad)['selectable'] is False
+    assert next(row for row in rows if row['name'] == 'Profile B')['selectable'] is True
+    with pytest.raises(BackupError, match='unsafe'):
+        service.create_snapshot(backend, bad)
+
+
+def test_unreadable_game_folder_does_not_hide_other_games(tmp_path, monkeypatch):
+    from switchagent.mtp.errors import ReadAccessDeniedError
+    backend = populated_backend()
+    original_list = backend.list_directory
+    bad = 'Installed games/Game A'
+
+    def list_with_one_unreadable_game(storage, path='', **kwargs):
+        if path == bad:
+            raise ReadAccessDeniedError('one game cannot be enumerated')
+        return original_list(storage, path, **kwargs)
+
+    monkeypatch.setattr(backend, 'list_directory', list_with_one_unreadable_game)
+    rows = BackupManager(tmp_path / 'store').inventory_saves(backend)
+    assert next(row for row in rows if row['path'] == bad)['selectable'] is False
+    assert next(row for row in rows if row['name'] == 'Profile B')['selectable'] is True
+
+
+def test_unreadable_save_group_does_not_hide_other_group(tmp_path, monkeypatch):
+    from switchagent.mtp.errors import AmbiguousPathError
+    backend = populated_backend()
+    tree = backend.storage_tree('SAVES')
+    tree.ensure_directory('Uninstalled games/Game C/Profile C')
+    tree.write_file('Uninstalled games/Game C/Profile C/data', b'progress')
+    original_list = backend.list_directory
+
+    def list_with_one_ambiguous_group(storage, path='', **kwargs):
+        if path == 'Installed games':
+            raise AmbiguousPathError('one group cannot be enumerated')
+        return original_list(storage, path, **kwargs)
+
+    monkeypatch.setattr(backend, 'list_directory', list_with_one_ambiguous_group)
+    rows = BackupManager(tmp_path / 'store').inventory_saves(backend)
+    assert next(row for row in rows if row['path'] == 'Installed games')['selectable'] is False
+    assert next(row for row in rows if row['name'] == 'Profile C')['selectable'] is True
+
+
+def test_inventory_does_not_mask_disconnect_as_one_bad_game(tmp_path, monkeypatch):
+    from switchagent.mtp.errors import DeviceDisconnectedError, ReadAccessDeniedError
+    backend = populated_backend()
+    original_list = backend.list_directory
+
+    def disconnect_during_game_list(storage, path='', **kwargs):
+        if path == 'Installed games/Game A':
+            backend.simulate_disconnect()
+            raise ReadAccessDeniedError('connection ended during game listing')
+        return original_list(storage, path, **kwargs)
+
+    monkeypatch.setattr(backend, 'list_directory', disconnect_during_game_list)
+    with pytest.raises(DeviceDisconnectedError):
+        BackupManager(tmp_path / 'store').inventory_saves(backend)
+
+
+def test_game_inventory_excludes_dbi_csv_and_non_packages(tmp_path):
+    backend = populated_backend()
+    tree = backend.storage_tree('INSTALLED_GAMES')
+    tree.write_file('InstalledApplications.csv', b'csv')
+    tree.write_file('metadata.txt', b'text')
+    tree.write_file('Other.NSZ', b'nsz')
+    tree.write_file('Third.xci', b'xci')
+    tree.write_file('Fourth.xcz', b'xcz')
+    paths = {row['path'] for row in BackupManager(tmp_path / 'store').inventory_games(backend)}
+    assert paths == {'Game A.nsp', 'Other.NSZ', 'Third.xci', 'Fourth.xcz'}
+
+
+def test_snapshot_origin_uses_device_fingerprint_and_dbi_path(tmp_path):
+    from switchagent.mtp.windows import device_fingerprint
+    backend = populated_backend()
+    path = 'Installed games/Game A/Profile A'
+    snapshot = BackupManager(tmp_path / 'store').create_snapshot(backend, path)
+    assert snapshot['origin'] == {
+        'device_fingerprint': device_fingerprint(backend.device_id),
+        'group': 'Installed games', 'game': 'Game A', 'profile': 'Profile A'}
+    assert backend.device_id not in json.dumps(snapshot['origin'])
+
+
 def test_snapshot_persists_files_and_hashes_without_device_writes(tmp_path):
     backend = populated_backend()
     service = BackupManager(tmp_path / 'backups')

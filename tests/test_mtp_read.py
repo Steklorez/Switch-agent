@@ -331,6 +331,20 @@ def test_real_failed_connect_expires_old_session(monkeypatch):
     assert backend.session_token != token
 
 
+def test_real_wpd_access_denied_invalidates_read_session(monkeypatch):
+    from switchagent.mtp import wpd
+    from switchagent.mtp.windows import RealMtpBackend
+    from switchagent.mtp.errors import ReadAccessDeniedError, DeviceDisconnectedError
+    backend = RealMtpBackend('fake')
+    backend._connected = True
+    backend._read_session_token = 'live'
+    monkeypatch.setattr(backend, '_device_currently_present', lambda: True)
+    with pytest.raises(ReadAccessDeniedError):
+        backend._read_failure(wpd.ComError(0x80070005, 'access denied'))
+    with pytest.raises(DeviceDisconnectedError):
+        _ = backend.session_token
+
+
 @pytest.mark.parametrize('phase', ['before', 'during'])
 def test_cancel_download_removes_partial_file(tmp_path, phase):
     from switchagent.mtp.errors import OperationCancelledError
