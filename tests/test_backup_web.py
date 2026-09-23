@@ -7,7 +7,7 @@ from io import BytesIO
 
 from fastapi.testclient import TestClient
 
-from switchagent import db
+from switchagent import db, queue_worker
 from switchagent.web import app as app_module
 from switchagent.web.app import create_app
 from switchagent.web.context import build_mock_context
@@ -262,8 +262,49 @@ def test_running_restore_confirm_refuses_job_cancellation(tmp_path):
         assert entered.wait(5)
         assert client.post(f"/api/backups/jobs/{job_id}/cancel").status_code == 409
         assert ctx.backup_state()["reservations"]["mock-switch-parent"]["state"] == "confirming"
+        shutdown_finished = threading.Event()
+        shutdown = threading.Thread(target=lambda: (ctx.stop_worker(), shutdown_finished.set()))
+        shutdown.start()
+        assert not shutdown_finished.wait(.2), "shutdown must wait for the in-flight restore"
         release.set()
+        assert shutdown_finished.wait(5)
+        shutdown.join(timeout=1)
         assert _ready_job(client, job_id)["state"] == "ready"
     finally:
         release.set()
+        ctx.stop_worker()
+
+
+def test_prepared_restore_holds_install_worker_until_cancel(tmp_path, monkeypatch):
+    db_path = tmp_path / "app.db"
+    with db.open_db(db_path):
+        pass
+    ctx = build_mock_context(db_path, device_ids=["mock-switch-parent"])
+    ctx.worker_poll_interval_seconds = .01
+    client = TestClient(create_app(ctx))
+    ctx.start_worker()
+    try:
+        snapshot = client.post("/api/backups/snapshots", json={
+            "device_id": "mock-switch-parent", "paths": ["Installed games/Demo Adventure/Player"]})
+        snapshot_id = _ready_job(client, snapshot.json()["job_id"])["result"][0]["id"]
+        prepared = client.post("/api/backups/restores/prepare", json={
+            "device_id": "mock-switch-parent", "snapshot_id": snapshot_id})
+        plan = _ready_job(client, prepared.json()["job_id"])["result"]
+
+        install_calls = []
+        def observed_install_worker(*args, **kwargs):
+            install_calls.append(threading.current_thread().name)
+            return None
+        monkeypatch.setattr(queue_worker, "run_worker_once", observed_install_worker)
+        time.sleep(.1)
+        assert not install_calls, "install worker must not run while restore reserves a device"
+
+        cancelled = client.post("/api/backups/restores/cancel", json={
+            "device_id": "mock-switch-parent", "plan_id": plan["id"]})
+        assert _ready_job(client, cancelled.json()["job_id"])["state"] == "ready"
+        deadline = time.monotonic() + 2
+        while not install_calls and time.monotonic() < deadline:
+            time.sleep(.01)
+        assert install_calls and set(install_calls) == {"switchagent-worker"}
+    finally:
         ctx.stop_worker()

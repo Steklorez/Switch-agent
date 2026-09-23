@@ -414,6 +414,8 @@ class WebContext:
         self.preparations.stop.set()
         self._stop_event.set()
         with self._backup_lock:
+            restoring = any(job["action"] == "confirm_restore" and job["state"] == "running"
+                            for job in self._backup_jobs.values())
             for job_id, cancellation in self._backup_cancel.items():
                 job = self._backup_jobs[job_id]
                 if job["action"] != "confirm_restore" or job["state"] != "running":
@@ -422,7 +424,9 @@ class WebContext:
         for job_id in pending:
             self.cancel_backup_job(job_id)
         if self._worker_thread is not None:
-            self._worker_thread.join(timeout=10.0)
+            # Once WPD may have started writing, exiting the daemon worker
+            # after a fixed timeout could abandon the target mid-restore.
+            self._worker_thread.join(timeout=None if restoring else 10.0)
             if not self._worker_thread.is_alive():
                 self._worker_thread = None
 

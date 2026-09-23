@@ -224,7 +224,7 @@
       if (job.state === "running" || job.state === "queued") {
         if (job.action === "confirm_restore") {
           row.querySelector(".backup-row-main").append(el("div", "backup-row-reason",
-            "Restore is in progress. Do not disconnect the Switch; the target may be partially changed if interrupted."));
+            "Restore is in progress. Do not close SwitchAgent or disconnect the Switch; the target may be partially changed if interrupted."));
         } else {
           const cancel = el("button", "btn btn-small btn-secondary backup-row-action", "Cancel");
           cancel.type = "button";
