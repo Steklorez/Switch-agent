@@ -32,7 +32,7 @@
 
 {% macro destination_label(e) %}{% if e.content_type == "ATMOSPHERE_MOD" %}SD Card (merge){% elif e.content_type == "SD_FILES" %}SD Card (switch/){% else %}SD Card install{% endif %}{% endmacro %}
 
-{% macro game_card(e, family=None, family_name=None) %}
+{% macro game_card(e, family=None, family_name=None, warning=None) %}
 <div class="card {{ 'recent-transfer' if e.recent_transfer_until }}" data-id="{{ e.id }}" data-recent-until="{{ e.recent_transfer_until or '' }}">
   {% if family %}<a class="tile-art" href="/games/{{ family }}" aria-label="{{ e.name }} — details">
   {% else %}<button type="button" class="tile-art card-body" data-detail-url="/api/library/{{ e.id }}" aria-label="{{ e.name }} — details">{% endif %}
@@ -52,6 +52,11 @@
     <div class="card-meta tile-meta"><span>{{ e.package_format or e.file_type }}</span><span>{{ e.size|filesize }}</span></div>
     <div class="card-meta tile-meta"><span>Added</span><time datetime="{{ e.first_seen_at }}">{{ e.first_seen_at[:16]|replace('T', ' ') }}</time></div>
     {% if e.content_type == "SD_FILES" %}<div class="card-meta sd-destination" title="Copied to the SD card as it is">→ {{ e.sd_destinations|join(", ") }}</div>{% endif %}
+    {% if warning %}
+    <div class="card-warning" title="The game's icon on the Switch starts this file, and nothing in its folder puts it on the SD card">
+      Needs {{ warning|join(", ") }} — not in this game's files
+    </div>
+    {% endif %}
     {{ card_status(e) }}
   </div>
 </div>
@@ -173,7 +178,8 @@
            look up); a card standing on its own -- an unclassifiable file, a
            switch/ folder that belongs to no game -- opens the detail modal
            instead of linking to a page that does not exist. #}
-        {{ game_card(g.base, family=g.base_title_id if g.has_detail_page else None, family_name=g.name) }}
+        {{ game_card(g.base, family=g.base_title_id if g.has_detail_page else None, family_name=g.name,
+                     warning=g.launch_missing) }}
       {% else %}
       <div class="card card-no-base">
         <div class="card-name" title="{{ g.name }}">{{ g.name }}</div>
@@ -187,11 +193,6 @@
         {% if g.sd_files %}<span class="extras-pill extras-pill-sd">{{ g.sd_files|length }} SD files</span>{% endif %}
         {% if g.duplicates %}<span class="extras-pill">{{ g.duplicates|length }} copies</span>{% endif %}
       {% endset %}
-      {% if g.launch_missing %}
-      <div class="card-warning" title="The game's icon on the Switch starts this file, and nothing in its folder puts it on the SD card">
-        Needs {{ g.launch_missing|join(", ") }} — not in this game's files
-      </div>
-      {% endif %}
       {% if g.updates or g.dlc or g.mods or g.sd_files or g.duplicates %}
       <details class="game-variants">
         <summary>

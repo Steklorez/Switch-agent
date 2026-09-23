@@ -504,3 +504,24 @@ def test_rows_indexed_by_the_old_classifier_are_looked_at_again_once(isolated_db
 
     second = scanner.scan_library_once(conn)
     assert second["unchanged"] == 2 and second["updated"] == 0
+
+
+def test_a_missing_nro_is_said_on_the_card_itself(tmp_path, monkeypatch):
+    """Inside the card, not beside it: the tile's three rows (card, tags,
+    link) are aligned across the whole shelf, and a fourth, optional row
+    would break that for every neighbour."""
+    library_dir = tmp_path / "library"
+    library_dir.mkdir()
+    (tmp_path / "inbox").mkdir()
+    monkeypatch.setattr(config, "INBOX_DIR", tmp_path / "inbox")
+    monkeypatch.setattr(config, "WORK_DIR", tmp_path / "work")
+    monkeypatch.setattr(config, "LIBRARY_DIR", library_dir)
+    monkeypatch.setattr(config, "CONFIG_YAML_PATH", tmp_path / "config.yaml")
+    monkeypatch.setattr(known_folders, "downloads_dir", lambda: None)
+    db_path = tmp_path / "test.db"
+    _megaman(library_dir, with_unpacked_nro=False)
+    with db.open_db(db_path) as conn:
+        scanner.scan_library_once(conn)
+    html = TestClient(create_app(build_mock_context(db_path))).get("/").text
+    card = html.split('class="game-group"', 1)[1].split("game-variants", 1)[0]
+    assert "Needs sdmc:/switch/mmxregenesis_nx/mmxregenesis_nx.nro" in card
