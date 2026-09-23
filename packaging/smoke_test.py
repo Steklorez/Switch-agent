@@ -140,6 +140,22 @@ def main() -> int:
                 print(f"error: /api/queue returned {status}, expected 200", file=sys.stderr)
                 return 1
 
+            for route, marker in (("/backups", b'id="backup-lab"'),
+                                  ("/static/backups.js", b"backup-lab"),
+                                  ("/static/backups.css", b"backup-lab")):
+                with urllib.request.urlopen(f"http://127.0.0.1:{args.port}{route}", timeout=5.0) as resp:
+                    payload = resp.read()
+                    if resp.status != 200 or marker not in payload:
+                        print(f"error: packaged {route} is missing Backup Lab content", file=sys.stderr)
+                        return 1
+                print(f"{route} -> 200")
+            with urllib.request.urlopen(f"http://127.0.0.1:{args.port}/api/backups/state", timeout=5.0) as resp:
+                backup_state = json.loads(resp.read())
+                if resp.status != 200 or "catalog" not in backup_state or "jobs" not in backup_state:
+                    print("error: packaged backup API is unavailable", file=sys.stderr)
+                    return 1
+            print("/api/backups/state -> 200")
+
             print("requesting graceful shutdown through tray Exit command...")
             if not _request_graceful_shutdown(process_id=proc.pid):
                 print("warning: could not find the app's window -- falling back to terminate()", file=sys.stderr)

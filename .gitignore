@@ -23,6 +23,7 @@ mock_switch/
 # by `pyinstaller packaging/SwitchAgent.spec` / `iscc packaging/SwitchAgent.iss`.
 build/
 dist/
+.local-build/
 *.spec.bak
 packaging/output/
 *.exe
