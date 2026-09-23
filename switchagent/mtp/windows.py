@@ -886,7 +886,10 @@ class RealMtpBackend(MtpBackend):
         if session.child_id(parent_id, filename) is not None:
             raise FileAlreadyExistsError(f"'{dest_path}' already exists on '{storage}'")
 
-        timing = session.send_file(parent_id, filename, source_path, progress=progress)
+        timing = session.send_file(
+            parent_id, filename, source_path, progress=progress,
+            remember=storage in SIZE_VERIFIABLE_STORAGES,
+        )
         log.info("wpd transfer dest=%r %s", dest_path, timing)
 
         if timing.bytes_written != expected_size:

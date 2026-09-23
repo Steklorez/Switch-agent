@@ -112,7 +112,7 @@ class _FakeSession:
     def object_size(self, object_id):
         return self.sizes[object_id]
 
-    def send_file(self, _parent, filename, source_path, *, progress=None):
+    def send_file(self, _parent, filename, source_path, *, progress=None, remember=False):
         self.sent += 1
         if progress is not None:
             progress(self.timing.bytes_written, self.timing.bytes_written)
@@ -197,3 +197,59 @@ def test_a_short_write_is_failed_not_silently_accepted(tmp_path, monkeypatch):
 
     assert result.status is TransferStatus.FAILED
     assert "4096 of 8192" in result.error
+
+
+# ---------------------------------------------------------------------------
+# A folder's listing is kept, not re-read, after each file written into it.
+#
+# Forgetting it made every file re-enumerate its whole destination folder --
+# quadratic in the folder's size. Harmless for a 45-file mod; for a homebrew
+# port's data folder of 1,420 files (Mega Man X Regenesis, 2026-09-23, ~0.3-2
+# ms per listed child) it is minutes of listing for one folder.
+# ---------------------------------------------------------------------------
+
+
+def _session_writing(monkeypatch, *, new_object_id):
+    monkeypatch.setattr(wpd, "create_file_object", lambda *_a: ("stream", 4096))
+    monkeypatch.setattr(wpd, "stream_write", lambda _s, _b, length: length)
+    monkeypatch.setattr(wpd, "stream_commit", lambda _s: None)
+    monkeypatch.setattr(wpd, "stream_object_id", lambda _s: new_object_id)
+    monkeypatch.setattr(wpd, "release", lambda _p: None)
+    session = wpd.WpdSession("pnp")
+    session._children_cache = {"parent": {"existing.dat": "o1"}}
+    return session
+
+
+def test_a_written_file_joins_its_folders_listing(tmp_path, monkeypatch):
+    source = tmp_path / "a.dat"
+    source.write_bytes(b"abc")
+    session = _session_writing(monkeypatch, new_object_id="o2")
+    session.send_file("parent", "a.dat", source, remember=True)
+    assert session._children_cache["parent"] == {"existing.dat": "o1", "a.dat": "o2"}
+
+
+def test_without_remember_the_listing_is_read_again_as_before(tmp_path, monkeypatch):
+    # DBI's install node deletes what it installs: its listing must always
+    # be asked for again, exactly as before this existed.
+    source = tmp_path / "game.nsp"
+    source.write_bytes(b"abc")
+    session = _session_writing(monkeypatch, new_object_id="o2")
+    session.send_file("parent", "game.nsp", source)
+    assert "parent" not in session._children_cache
+
+
+def test_an_unknown_new_object_id_falls_back_to_reading_the_listing(tmp_path, monkeypatch):
+    source = tmp_path / "a.dat"
+    source.write_bytes(b"abc")
+    session = _session_writing(monkeypatch, new_object_id=None)
+    session.send_file("parent", "a.dat", source, remember=True)
+    assert "parent" not in session._children_cache
+
+
+def test_a_listing_never_read_is_not_started_with_one_file(tmp_path, monkeypatch):
+    source = tmp_path / "a.dat"
+    source.write_bytes(b"abc")
+    session = _session_writing(monkeypatch, new_object_id="o2")
+    session._children_cache = {}
+    session.send_file("parent", "a.dat", source, remember=True)
+    assert "parent" not in session._children_cache
