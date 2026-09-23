@@ -94,13 +94,17 @@ def test_verify_manifest_detects_missing_source(isolated_db):
 def test_verify_manifest_detects_changed_content_same_size(isolated_db):
     conn, inbox_dir = isolated_db
     name = "Game [0100000000060000][v0].nsp"
-    (inbox_dir / name).write_bytes(b"AAAAAAAAAA")
-    report = preview.preview_path(inbox_dir / name)
+    path = inbox_dir / name
+    path.write_bytes(b"AAAAAAAAAA")
+    report = preview.preview_path(path)
     m = manifest.build_manifest_and_stage(report, job_id=5, target_storage="SD_INSTALL")
 
     # Same length, different bytes -- must be caught by the hash check, not
-    # just the (cheaper, size-only) fast path.
-    (inbox_dir / name).write_bytes(b"BBBBBBBBBB")
+    # just the (cheaper, size-only) fast path. Force a distinct timestamp so
+    # this test does not depend on the filesystem clock's write granularity.
+    path.write_bytes(b"BBBBBBBBBB")
+    stat = path.stat()
+    os.utime(path, ns=(stat.st_atime_ns, m.files[0].mtime_ns + 1_000_000_000))
 
     mismatch = manifest.verify_manifest_against_source(m, job_id=5)
     assert mismatch is not None
@@ -238,7 +242,9 @@ def test_verify_detects_content_rewritten_to_the_same_size(isolated_db):
     m = _bare_package_manifest(inbox_dir, job_id=103, name=name, data=b"original!")
 
     source = inbox_dir / name
-    source.write_bytes(b"different")  # same length, new content, new mtime
+    source.write_bytes(b"different")  # same length, new content
+    stat = source.stat()
+    os.utime(source, ns=(stat.st_atime_ns, m.files[0].mtime_ns + 1_000_000_000))
     assert len(b"different") == len(b"original!")
 
     mismatch = manifest.verify_manifest_against_source(m, 103)
