@@ -7,6 +7,13 @@ Entries are one sentence per change, three to five lines per release, and
 only what a user would notice — no internals, no reasoning, no history.
 Those belong in the commit message. See [CLAUDE.md](CLAUDE.md#how-to-write-an-entry).
 
+## v1.0.16
+
+- A console that stops answering for a moment no longer fails a big install: that file is simply sent again.
+- Retry continues where the failed attempt stopped instead of starting over.
+- Files already on the SD card with exactly the same contents are recognised and not sent again.
+- Override replaces only the files that are actually there, instead of slowing the whole install down.
+
 ## v1.0.15
 
 - A homebrew port is one game now: its `switch/` folder, archived or unpacked, is part of the game's card and is copied to the SD card on install.
