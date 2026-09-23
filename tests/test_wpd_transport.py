@@ -112,7 +112,7 @@ class _FakeSession:
     def object_size(self, object_id):
         return self.sizes[object_id]
 
-    def send_file(self, _parent, filename, source_path, *, progress=None):
+    def send_file(self, _parent, filename, source_path, *, progress=None, remember=False):
         self.sent += 1
         if progress is not None:
             progress(self.timing.bytes_written, self.timing.bytes_written)
@@ -197,3 +197,233 @@ def test_a_short_write_is_failed_not_silently_accepted(tmp_path, monkeypatch):
 
     assert result.status is TransferStatus.FAILED
     assert "4096 of 8192" in result.error
+
+
+# ---------------------------------------------------------------------------
+# A folder's listing is kept, not re-read, after each file written into it.
+#
+# Forgetting it made every file re-enumerate its whole destination folder --
+# quadratic in the folder's size. Harmless for a 45-file mod; for a homebrew
+# port's data folder of 1,420 files (Mega Man X Regenesis, 2026-09-23, ~0.3-2
+# ms per listed child) it is minutes of listing for one folder.
+# ---------------------------------------------------------------------------
+
+
+def _session_writing(monkeypatch, *, new_object_id):
+    monkeypatch.setattr(wpd, "create_file_object", lambda *_a: ("stream", 4096))
+    monkeypatch.setattr(wpd, "stream_write", lambda _s, _b, length: length)
+    monkeypatch.setattr(wpd, "stream_commit", lambda _s: None)
+    monkeypatch.setattr(wpd, "stream_object_id", lambda _s: new_object_id)
+    monkeypatch.setattr(wpd, "release", lambda _p: None)
+    session = wpd.WpdSession("pnp")
+    session._children_cache = {"parent": {"existing.dat": "o1"}}
+    return session
+
+
+def test_a_written_file_joins_its_folders_listing(tmp_path, monkeypatch):
+    source = tmp_path / "a.dat"
+    source.write_bytes(b"abc")
+    session = _session_writing(monkeypatch, new_object_id="o2")
+    session.send_file("parent", "a.dat", source, remember=True)
+    assert session._children_cache["parent"] == {"existing.dat": "o1", "a.dat": "o2"}
+
+
+def test_without_remember_the_listing_is_read_again_as_before(tmp_path, monkeypatch):
+    # DBI's install node deletes what it installs: its listing must always
+    # be asked for again, exactly as before this existed.
+    source = tmp_path / "game.nsp"
+    source.write_bytes(b"abc")
+    session = _session_writing(monkeypatch, new_object_id="o2")
+    session.send_file("parent", "game.nsp", source)
+    assert "parent" not in session._children_cache
+
+
+def test_an_unknown_new_object_id_falls_back_to_reading_the_listing(tmp_path, monkeypatch):
+    source = tmp_path / "a.dat"
+    source.write_bytes(b"abc")
+    session = _session_writing(monkeypatch, new_object_id=None)
+    session.send_file("parent", "a.dat", source, remember=True)
+    assert "parent" not in session._children_cache
+
+
+def test_a_listing_never_read_is_not_started_with_one_file(tmp_path, monkeypatch):
+    source = tmp_path / "a.dat"
+    source.write_bytes(b"abc")
+    session = _session_writing(monkeypatch, new_object_id="o2")
+    session._children_cache = {}
+    session.send_file("parent", "a.dat", source, remember=True)
+    assert "parent" not in session._children_cache
+
+
+
+# ---------------------------------------------------------------------------
+# A console that stalls is not a transport that does not work (2026-09-23).
+#
+# Field case: Mega Man X Regenesis' 4,625-file switch/ folder went out over
+# WPD at 0.14s a file until one 5 KB write timed out (IStream::Write,
+# 0x80070079). Three seconds later the console answered again, but the rest
+# of the job had already been moved to the Shell -- 3.5s a file -- which gave
+# up at the next stall. And a file already on the card with exactly the
+# bytes being sent is done, not a conflict.
+# ---------------------------------------------------------------------------
+
+import hashlib
+
+from switchagent.mtp.base import TransferStatus
+from switchagent.mtp.errors import FileAlreadyExistsError
+
+
+class _Card:
+    """One SD card that several WPD sessions (reopened ones) all see."""
+
+    def __init__(self):
+        self.files = {}  # name -> bytes
+
+
+class _CardSession:
+    def __init__(self, card, *, fail_writes=0, leave_partial=False):
+        self.card = card
+        self.fail_writes = fail_writes
+        self.leave_partial = leave_partial
+        self.writes = []
+
+    def navigate(self, _root, _path, *, create_missing):
+        return "parent"
+
+    def child_id(self, _parent, name):
+        return name if name in self.card.files else None
+
+    def object_size(self, object_id):
+        return len(self.card.files[object_id])
+
+    def read_file(self, object_id, max_bytes):
+        data = self.card.files[object_id]
+        return None if len(data) > max_bytes else data
+
+    def send_file(self, _parent, filename, source_path, *, progress=None, remember=False):
+        if self.fail_writes:
+            self.fail_writes -= 1
+            if self.leave_partial:
+                self.card.files[filename] = b"half"
+            raise wpd.ComError(0x80070079, "IStream::Write")
+        data = source_path.read_bytes()
+        self.card.files[filename] = data
+        self.writes.append(filename)
+        return wpd.TransferTiming(0.0, 0.0, 0.0, len(data))
+
+
+def _backend_over(card, sessions, monkeypatch, *, storage_object_id="s1"):
+    from switchagent.mtp.windows import RealMtpBackend
+
+    backend = RealMtpBackend("::{20D04FE0-3AEA-1069-A2D8-08002B30309D}\\dev")
+    pending = list(sessions)
+    current = {"session": pending.pop(0)}
+    monkeypatch.setattr(backend, "_require_connected", lambda: None)
+
+    def _session():
+        if backend._wpd_unavailable:
+            return None
+        if current["session"] is None and pending:
+            current["session"] = pending.pop(0)
+        return current["session"]
+
+    def _close():
+        current["session"] = None
+
+    monkeypatch.setattr(backend, "_wpd_session", _session)
+    monkeypatch.setattr(backend, "_close_wpd", _close)
+    monkeypatch.setattr(backend, "_wpd_storage_id", lambda _s, _storage: storage_object_id)
+    shell_calls = []
+
+    def _shell(storage, parent_path, filename, dest_path, source_path, *, overwrite, expected_size):
+        shell_calls.append((filename, overwrite))
+        card.files[filename] = source_path.read_bytes()
+        return TransferStatus.COMPLETED, expected_size, None
+
+    monkeypatch.setattr(backend, "_send_via_shell", _shell)
+    return backend, shell_calls
+
+
+def _source(tmp_path, data=b"asset bytes"):
+    path = tmp_path / "a.ctex"
+    path.write_bytes(data)
+    return path, hashlib.sha256(data).hexdigest()
+
+
+def test_a_stalled_write_is_tried_again_on_a_fresh_session_not_on_the_shell(tmp_path, monkeypatch):
+    card = _Card()
+    stalled, fresh = _CardSession(card, fail_writes=1), _CardSession(card)
+    backend, shell = _backend_over(card, [stalled, fresh], monkeypatch)
+    source, digest = _source(tmp_path)
+    result = backend.send_file("SD_CARD", "switch/x/a.ctex", source, expected_sha256=digest)
+    assert result.status is TransferStatus.COMPLETED
+    assert fresh.writes == ["a.ctex"] and shell == []
+    assert backend._wpd_unavailable is False  # the next file goes over WPD as well
+
+
+def test_our_own_half_written_file_is_the_one_thing_replaced(tmp_path, monkeypatch):
+    card = _Card()
+    stalled, fresh = _CardSession(card, fail_writes=1, leave_partial=True), _CardSession(card)
+    backend, shell = _backend_over(card, [stalled, fresh], monkeypatch)
+    source, digest = _source(tmp_path)
+    result = backend.send_file("SD_CARD", "switch/x/a.ctex", source, expected_sha256=digest)
+    assert result.status is TransferStatus.COMPLETED
+    assert shell == [("a.ctex", True)]  # replaced, and only because WE had just half-written it
+    assert card.files["a.ctex"] == b"asset bytes"
+
+
+def test_two_stalls_in_a_row_still_fall_back_to_the_shell(tmp_path, monkeypatch):
+    card = _Card()
+    backend, shell = _backend_over(
+        card, [_CardSession(card, fail_writes=1), _CardSession(card, fail_writes=1)], monkeypatch,
+    )
+    source, _digest = _source(tmp_path)
+    backend.send_file("SD_CARD", "switch/x/a.ctex", source)
+    assert [name for name, _ in shell] == ["a.ctex"]
+    assert backend._wpd_unavailable is True
+
+
+def test_the_install_node_keeps_the_old_rule(tmp_path, monkeypatch):
+    """A second WPD attempt at DBI's install node means sending a whole game
+    again: that storage still goes straight to the Shell, as before."""
+    card = _Card()
+    fresh = _CardSession(card)
+    backend, shell = _backend_over(card, [_CardSession(card, fail_writes=1), fresh], monkeypatch)
+    source, _digest = _source(tmp_path)
+    backend.send_file("SD_INSTALL", "game.nsp", source)
+    assert [name for name, _ in shell] == ["game.nsp"] and fresh.writes == []
+
+
+def test_a_file_already_there_with_the_same_bytes_is_done_without_sending(tmp_path, monkeypatch):
+    card = _Card()
+    card.files["a.ctex"] = b"asset bytes"
+    session = _CardSession(card)
+    backend, shell = _backend_over(card, [session], monkeypatch)
+    source, digest = _source(tmp_path)
+    result = backend.send_file("SD_CARD", "switch/x/a.ctex", source, expected_sha256=digest)
+    assert result.status is TransferStatus.COMPLETED and result.already_present
+    assert session.writes == [] and shell == []
+
+
+def test_a_file_already_there_with_other_bytes_is_still_a_conflict(tmp_path, monkeypatch):
+    card = _Card()
+    card.files["a.ctex"] = b"someone else"
+    backend, _shell = _backend_over(card, [_CardSession(card)], monkeypatch)
+    source, digest = _source(tmp_path)
+    with pytest.raises(FileAlreadyExistsError):
+        backend.send_file("SD_CARD", "switch/x/a.ctex", source, expected_sha256=digest)
+
+
+def test_override_uses_the_shell_only_for_a_file_that_is_there(tmp_path, monkeypatch):
+    card = _Card()
+    session = _CardSession(card)
+    backend, shell = _backend_over(card, [session], monkeypatch)
+    source, _digest = _source(tmp_path)
+    backend.send_file("SD_CARD", "switch/x/a.ctex", source, overwrite=True)
+    assert session.writes == ["a.ctex"] and shell == []
+    card.files["a.ctex"] = b"old"
+    source2 = tmp_path / "b" / "a.ctex"
+    source2.parent.mkdir()
+    source2.write_bytes(b"new")
+    backend.send_file("SD_CARD", "switch/x/a.ctex", source2, overwrite=True)
+    assert shell == [("a.ctex", True)]

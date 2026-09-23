@@ -34,6 +34,8 @@ def _library_item_role(row):
     is the honest answer rather than a guessed one."""
     if row is None:
         return None
+    if row["content_type"] == ContentType.SD_FILES.value:
+        return "sd"
     if row["item_type"] == "MOD_FOLDER" or row["content_type"] == ContentType.ATMOSPHERE_MOD.value:
         return "mod"
     if not row["title_id"]:
@@ -90,7 +92,8 @@ def _variant_rank(row) -> int:
     if row is None:
         return 1
     from ..model import ContentType
-    if row['content_type'] == ContentType.ATMOSPHERE_MOD.value:
+    if row['content_type'] in (ContentType.ATMOSPHERE_MOD.value, ContentType.SD_FILES.value):
+        # A game's switch/ folder goes after the game itself, like a mod.
         return _VARIANT_RANK['MOD']
     from .. import title_id as title_id_mod
     try:

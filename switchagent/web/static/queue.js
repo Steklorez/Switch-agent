@@ -23,7 +23,7 @@
   // item looks the same in the dialog that queued it and in the Queue that
   // runs it. No role -> no badge: the backend returns null whenever it
   // cannot actually tell, and a guessed kind would be worse than none.
-  const ROLE_LABELS = { base: "Game", update: "Update", dlc: "DLC", mod: "Mod" };
+  const ROLE_LABELS = { base: "Game", update: "Update", dlc: "DLC", mod: "Mod", sd: "SD files" };
 
   function buildRoleTag(role) {
     const label = ROLE_LABELS[role];

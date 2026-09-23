@@ -148,6 +148,11 @@ _STORAGE = "{01A3057A-74D6-4E80-BEA7-DC4C212CE50A}"
 WPD_STORAGE_CAPACITY = PROPERTYKEY(_STORAGE, 4)
 WPD_STORAGE_FREE_SPACE_IN_BYTES = PROPERTYKEY(_STORAGE, 5)
 
+# An object's own bytes, for IPortableDeviceResources::GetStream.
+WPD_RESOURCE_DEFAULT = PROPERTYKEY("{E81E79BE-34F0-41BF-B53F-F1A06AE87842}", 0)
+STGM_READ = 0
+S_FALSE = 1
+
 WPD_CONTENT_TYPE_FOLDER = GUID("{27E2E392-A111-48E0-AB0C-E17705A05F85}")
 WPD_CONTENT_TYPE_GENERIC_FILE = GUID("{0085E0A6-8D34-45D7-BC5C-447E59C73D48}")
 WPD_CONTENT_TYPE_UNSPECIFIED = GUID("{28D8D31E-249C-454E-AABC-34883168E634}")
@@ -507,6 +512,62 @@ def delete_object(content, object_id, *, recursive=False):
         release(ids)
 
 
+def stream_object_id(stream):
+    """The object id the device gave the file just committed through
+    `stream` (IPortableDeviceDataStream::GetObjectID, vtable slot 14: after
+    IUnknown's 3, ISequentialStream's 2 and IStream's 9), or None when the
+    stream will not say. Read-only."""
+    try:
+        data_stream = query_interface(stream, IID_IPortableDeviceDataStream)
+    except ComError:
+        return None
+    try:
+        out = c_void_p()
+        vcall(data_stream, 14, (POINTER(c_void_p),), byref(out), what="IPortableDeviceDataStream::GetObjectID")
+        return _take_string(out) if out.value else None
+    except ComError:
+        return None
+    finally:
+        release(data_stream)
+
+
+def read_object(content, object_id, max_bytes):
+    """An object's bytes (its default resource), or None as soon as it turns
+    out to hold more than `max_bytes`. READ-ONLY: IPortableDeviceContent::
+    Transfer (slot 5) -> IPortableDeviceResources::GetStream (slot 5, after
+    IUnknown's 3, GetSupportedResources, GetResourceAttributes) -> IStream::
+    Read (slot 3) until the stream is done."""
+    resources = c_void_p()
+    vcall(content, 5, (POINTER(c_void_p),), byref(resources), what="Transfer")
+    try:
+        stream = c_void_p()
+        optimal = DWORD(0)
+        vcall(resources, 5, (LPCWSTR, POINTER(PROPERTYKEY), DWORD, POINTER(DWORD), POINTER(c_void_p)),
+              object_id, byref(WPD_RESOURCE_DEFAULT), STGM_READ, byref(optimal), byref(stream),
+              what="GetStream")
+        try:
+            buffer = ctypes.create_string_buffer(max(optimal.value, 65536))
+            chunks = []
+            total = 0
+            while True:
+                read = ULONG(0)
+                hr = vcall(stream, 3, (c_void_p, ULONG, POINTER(ULONG)), byref(buffer), len(buffer), byref(read),
+                           what="IStream::Read", check=False) & 0xFFFFFFFF
+                if hr not in (S_OK, S_FALSE):
+                    raise ComError(hr, "IStream::Read")
+                if read.value:
+                    total += read.value
+                    if total > max_bytes:
+                        return None
+                    chunks.append(buffer.raw[:read.value])
+                if hr == S_FALSE or not read.value:
+                    return b"".join(chunks)
+        finally:
+            release(stream)
+    finally:
+        release(resources)
+
+
 def create_folder(content, parent_object_id, name):
     """CreateObjectWithPropertiesOnly for a folder. WRITES to the device."""
     values = values_new()
@@ -705,6 +766,9 @@ class WpdSession:
     def object_size(self, object_id):
         return read_props(self._properties, object_id).get(str(WPD_OBJECT_SIZE))
 
+    def read_file(self, object_id, max_bytes):
+        return read_object(self._content, object_id, max_bytes)
+
     def forget_children(self, parent_object_id):
         self._children_cache.pop(parent_object_id, None)
 
@@ -788,7 +852,7 @@ class WpdSession:
         return current
 
     def send_file(self, parent_object_id, filename, source_path, *, progress=None,
-                  progress_interval_seconds=DEFAULT_PROGRESS_INTERVAL_SECONDS):
+                  progress_interval_seconds=DEFAULT_PROGRESS_INTERVAL_SECONDS, remember=False):
         """Streams `source_path` into `parent_object_id` as `filename`.
 
         Returns a TransferTiming. `progress(bytes_done, bytes_total)` is
@@ -801,6 +865,15 @@ class WpdSession:
         nothing about what DBI then did with those bytes -- see
         verify_install_transport() in windows.py for why that distinction is
         preserved rather than upgraded to COMPLETED.
+
+        remember=True records the new object in the parent's cached listing
+        instead of dropping that listing. Only for a real filesystem: DBI's
+        install node deletes its objects on completion, and there the next
+        lookup has to ask the device again. Forgetting cost a full
+        re-enumeration of the destination folder per file -- quadratic in
+        the folder's size, and a homebrew port's data folder can hold 1,420
+        files (Mega Man X Regenesis, measured 2026-09-23 at ~0.3-2 ms per
+        listed child: minutes of listing for one folder).
         """
         size = source_path.stat().st_size
         started = time.perf_counter()
@@ -838,9 +911,17 @@ class WpdSession:
                     raise
                 timed_out = True
             committed = time.perf_counter()
+            new_object_id = stream_object_id(stream) if remember and not timed_out else None
         finally:
             release(stream)
-        self.forget_children(parent_object_id)
+        known = self._children_cache.get(parent_object_id)
+        if new_object_id and known is not None and filename not in known:
+            # Only ever added to a listing that was already read in full --
+            # a listing that held just this file would hide its siblings
+            # from every existence check after it.
+            known[filename] = new_object_id
+        else:
+            self.forget_children(parent_object_id)
         return TransferTiming(created - started, streamed - created, committed - streamed, written,
                               finalise_timed_out=timed_out)
 

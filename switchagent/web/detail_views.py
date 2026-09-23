@@ -173,6 +173,8 @@ def build_game_detail_view(conn, ctx: WebContext, raw_base_title_id: str) -> Opt
         "updates": family["updates"],
         "dlc": family["dlc"],
         "mods": family["mods"],
+        "sd_files": family["sd_files"],
+        "launch_checks": family["launch_checks"],
         "duplicates": family["duplicates"],
         # Entries the scanner could not classify or that failed extraction.
         # Kept as their own section so they are never quietly mixed in with
@@ -184,6 +186,7 @@ def build_game_detail_view(conn, ctx: WebContext, raw_base_title_id: str) -> Opt
         "update_count": len(family["updates"]),
         "dlc_count": len(family["dlc"]),
         "mod_count": len(family["mods"]),
+        "sd_count": len(family["sd_files"]),
         "total_size": family["total_size"],
         "first_seen_at": family["first_seen_at"],
         "last_scanned_at": family["last_scanned_at"],

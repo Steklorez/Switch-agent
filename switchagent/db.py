@@ -538,6 +538,12 @@ def _init_db_serial(conn: sqlite3.Connection) -> None:
         # THIS job only. Every other job creation path leaves this at the
         # default 0/false; the "never overwrite" guard stays the default.
         "force_overwrite": "INTEGER NOT NULL DEFAULT 0",
+        # The destination path the job was sending when it last touched the
+        # device (queue_worker._run_job_transfer, set as each file starts).
+        # A job that stopped mid-file may have left that one file half
+        # written; a retry is allowed to replace exactly that file, because
+        # it is this transfer's own -- see manifest.inherit_progress.
+        "current_file": "TEXT",
     }.items():
         if column not in existing:
             conn.execute(f"ALTER TABLE jobs ADD COLUMN {column} {declaration}")
@@ -865,6 +871,7 @@ def update_job_status(
     finished_at: Optional[str] = None,
     increment_attempt: bool = False,
     last_progress_at: Optional[str] = None,
+    current_file: Optional[str] = None,
 ) -> None:
     sets = ["status = ?"]
     params: list = [status]
@@ -892,6 +899,9 @@ def update_job_status(
         # happened, it just persists the caller's timestamp.
         sets.append("last_progress_at = ?")
         params.append(last_progress_at)
+    if current_file is not None:
+        sets.append("current_file = ?")
+        params.append(current_file)
     params.append(job_id)
     conn.execute(f"UPDATE jobs SET {', '.join(sets)} WHERE id = ?", params)
     conn.commit()
@@ -1134,6 +1144,19 @@ def upsert_library_item(
     )
     conn.commit()
     return existing["id"]
+
+
+def set_library_item_title_id(
+    conn: sqlite3.Connection, item_id: int, *, title_id: Optional[str], source: Optional[str],
+) -> None:
+    """Which game an SD_FILES row belongs to, decided after a scan has seen
+    the whole library (scanner.assign_sd_file_owners). Never confident: it
+    is inferred from where the files sit, not read from them."""
+    conn.execute(
+        "UPDATE library_items SET title_id = ?, title_id_source = ?, title_id_confident = 0 WHERE id = ?",
+        (title_id, source, item_id),
+    )
+    conn.commit()
 
 
 def touch_library_item_scanned(conn: sqlite3.Connection, item_id: int) -> None:

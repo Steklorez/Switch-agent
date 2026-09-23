@@ -22,6 +22,16 @@ was NOT extended with a "hash the remote file" method (real MTP can't do
 that cheaply, see docs/STAGE4.1.md), so "is this existing destination file
 the same content" is answered from OUR OWN record of having put it there,
 never by asking the device to prove it.
+
+Two additions (2026-09-23), both still proof rather than trust:
+  - a retry inherits its predecessor's progress.json (inherit_progress) --
+    the same record, carried along the retry chain;
+  - on a real filesystem (SD_CARD), a file already at the destination is
+    read back and hashed by the backend; if it holds exactly the manifest's
+    bytes, it counts as delivered (TransferResult.already_present). That is
+    the bytes themselves, hashed here -- not the device's word for it -- and
+    only for files small enough to be worth reading
+    (mtp/windows.READ_BACK_MAX_BYTES). Anything else is still a conflict.
 """
 
 from __future__ import annotations
@@ -33,7 +43,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
 
-from . import config
+from . import config, sd_files
 from .model import ContentType
 from .preview import PreviewReport
 from .scanner import sha256_file
@@ -155,6 +165,8 @@ def build_manifest_and_stage(
         files = _build_package_files(report, payload_dir)
     elif report.content_type is ContentType.ATMOSPHERE_MOD:
         files = _build_mod_files(report, payload_dir)
+    elif report.content_type is ContentType.SD_FILES:
+        files = _build_sd_files(report, payload_dir)
     else:
         raise ManifestError(f"content type {report.content_type.value} is not eligible for transfer")
 
@@ -281,6 +293,49 @@ def _build_mod_files(report: PreviewReport, payload_dir: Path) -> list[ManifestF
     return files
 
 
+def _build_sd_files(report: PreviewReport, payload_dir: Path) -> list[ManifestFile]:
+    """Every file of a switch/ folder, each bound for the same path under
+    switch/ on the SD card (sd_files.destination_for) -- nowhere else, so an
+    SD_FILES job can never write outside the homebrew folder whatever its
+    source looked like. Frozen and verified exactly the way a mod is: a bare
+    folder under a scanned root is hashed in place and re-verified before
+    sending; an archive's extracted folder is moved into the payload dir."""
+    if report.sd_source_dir is None:
+        raise ManifestError(
+            "switch/ folder not staged locally yet -- call preview_path(path, extract=True) first"
+        )
+    if not report.sd_source_dir.is_dir():
+        raise ManifestError(f"switch/ folder does not exist: {report.sd_source_dir}")
+
+    bare_root: Optional[Path] = None
+    if report.work_dir is None:
+        walk_root = report.sd_source_dir
+        source_kind, bare_root = _classify_bare_source_root(walk_root)
+    else:
+        frozen_root = payload_dir / "sd"
+        if frozen_root.exists():
+            import uuid
+            frozen_root = payload_dir / ("sd-" + uuid.uuid4().hex)
+        shutil.move(str(report.sd_source_dir), str(frozen_root))
+        walk_root = frozen_root
+        source_kind = "frozen"
+
+    files = []
+    for f in sorted((p for p in walk_root.rglob("*") if p.is_file()), key=lambda p: p.as_posix()):
+        rel = f.relative_to(walk_root).as_posix()
+        source_rel = f.relative_to(payload_dir).as_posix() if source_kind == "frozen" else f.relative_to(bare_root).as_posix()
+        file_stat = f.stat()
+        files.append(ManifestFile(
+            dest_relative_path=sd_files.destination_for(rel), source_kind=source_kind,
+            source_relative_path=source_rel, size=file_stat.st_size, sha256=sha256_file(f),
+            source_root=str(bare_root) if source_kind == "library" else None,
+            mtime_ns=file_stat.st_mtime_ns,
+        ))
+    if not files:
+        raise ManifestError(f"switch/ folder has no files: {report.sd_source_dir}")
+    return files
+
+
 def load_manifest(job_id: int) -> Manifest:
     return Manifest.from_dict(json.loads(manifest_path_for(job_id).read_text(encoding="utf-8")))
 
@@ -379,17 +434,69 @@ def verify_manifest_against_source(manifest: Manifest, job_id: int) -> Optional[
     return None
 
 
-def load_progress(job_id: int) -> set[str]:
+def _read_progress(job_id: int) -> dict:
     path = _progress_path_for(job_id)
     if not path.exists():
-        return set()
-    return set(json.loads(path.read_text(encoding="utf-8")).get("delivered", []))
+        return {}
+    return json.loads(path.read_text(encoding="utf-8"))
+
+
+def _write_progress(job_id: int, data: dict) -> None:
+    job_work_dir(job_id).mkdir(parents=True, exist_ok=True)
+    _progress_path_for(job_id).write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
+
+
+def load_progress(job_id: int) -> set[str]:
+    return set(_read_progress(job_id).get("delivered", []))
+
+
+def load_replaceable(job_id: int) -> set[str]:
+    """Destination files this job may overwrite although it did not deliver
+    them itself: the one a previous attempt of the SAME transfer was writing
+    when it stopped (see inherit_progress). Anything else already on the
+    device is still somebody else's, and still a conflict."""
+    return set(_read_progress(job_id).get("replace", []))
 
 
 def mark_delivered(job_id: int, dest_relative_path: str) -> None:
-    delivered = load_progress(job_id)
+    data = _read_progress(job_id)
+    delivered = set(data.get("delivered", []))
     delivered.add(dest_relative_path)
-    job_work_dir(job_id).mkdir(parents=True, exist_ok=True)
-    _progress_path_for(job_id).write_text(
-        json.dumps({"delivered": sorted(delivered)}, ensure_ascii=False), encoding="utf-8",
-    )
+    data["delivered"] = sorted(delivered)
+    _write_progress(job_id, data)
+
+
+def inherit_progress(old_job_id: int, new_job_id: int, *, in_flight: Optional[str] = None) -> int:
+    """A retry continues its transfer instead of starting it again.
+
+    Before this, Retry created a job that knew nothing of what the attempt
+    it replaces had already delivered -- and every such file then looked
+    like somebody else's to it. Real case (2026-09-23): Mega Man X
+    Regenesis' 4,625-file switch/ folder stopped after 613 files when the
+    console stalled; its retry would have met file #1 already on the SD card
+    and, under the default "skip" policy, stopped there, every time.
+
+    What carries over is exactly what the previous attempt recorded in its
+    own progress.json -- still this project's "our own record of having put
+    it there" rule, never "the device says a file exists" -- and only where
+    both attempts' manifests name the same file with the same SHA-256.
+    `in_flight` is the file the previous attempt was sending when it
+    stopped (jobs.current_file); that one may be half written, and is the
+    only file this retry is allowed to replace. Returns how many delivered
+    files were carried over."""
+    old = load_manifest(old_job_id)
+    new = load_manifest(new_job_id)
+    old_hashes = {f.dest_relative_path: f.sha256 for f in old.files}
+    new_hashes = {f.dest_relative_path: f.sha256 for f in new.files}
+    old_progress = _read_progress(old_job_id)
+    delivered = {
+        path for path in old_progress.get("delivered", [])
+        if path in new_hashes and old_hashes.get(path) == new_hashes[path]
+    }
+    replace = {path for path in old_progress.get("replace", []) if path in new_hashes}
+    if in_flight and in_flight in new_hashes:
+        replace.add(in_flight)
+    replace -= delivered
+    if delivered or replace:
+        _write_progress(new_job_id, {"delivered": sorted(delivered), "replace": sorted(replace)})
+    return len(delivered)

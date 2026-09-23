@@ -16,7 +16,7 @@
       A DONE_UNVERIFIED row with no user confirmation never is.
 #}
 
-{% macro destination_label(e) %}{% if e.content_type == "ATMOSPHERE_MOD" %}SD Card (merge){% else %}SD Card install{% endif %}{% endmacro %}
+{% macro destination_label(e) %}{% if e.content_type == "ATMOSPHERE_MOD" %}SD Card (merge){% elif e.content_type == "SD_FILES" %}SD Card (switch/){% else %}SD Card install{% endif %}{% endmacro %}
 
 {% macro content_row(e, label, role=None) %}
 <tr class="content-row">
@@ -34,8 +34,10 @@
            {{ "disabled" if e.status not in ("AVAILABLE",) }}>
   </td>
   <td class="content-name">
-    <div class="card-body" data-detail-url="/api/library/{{ e.id }}">{{ e.filename }}</div>
+    <div class="card-body" data-detail-url="/api/library/{{ e.id }}">{{ e.sd_label if role == "sd" else e.filename }}</div>
     {% if label == "Mod" and e.mod_name %}<div class="card-meta">mod folder: {{ e.mod_name }}</div>{% endif %}
+    {% if role == "sd" %}<div class="card-meta sd-destination">→ {{ e.sd_destinations|join(", ") }} · {{ e.sd.files }} files</div>{% endif %}
+    {% if e.launches %}<div class="card-meta">starts {{ e.launches }}</div>{% endif %}
   </td>
   <td>{{ label }}</td>
   <td><code>{{ e.title_id or "unknown" }}</code></td>
@@ -76,6 +78,7 @@
   <span class="detail-counter">Updates: <strong>{{ view.update_count }}</strong></span>
   <span class="detail-counter">DLC: <strong>{{ view.dlc_count }}</strong></span>
   <span class="detail-counter">Mods: <strong>{{ view.mod_count }}</strong></span>
+  {% if view.sd_count %}<span class="detail-counter">SD files: <strong>{{ view.sd_count }}</strong></span>{% endif %}
   <span class="detail-counter">Total size: <strong>{{ view.total_size|filesize }}</strong></span>
 </div>
 
@@ -92,6 +95,25 @@
 {{ content_section("Updates", view.updates, "Update", role="update") }}
 {{ content_section("DLC", view.dlc, "DLC", role="dlc") }}
 {{ content_section("Mods", view.mods, "Mod", role="mod") }}
+{{ content_section("SD card files", view.sd_files, "SD files", role="sd") }}
+{% if view.launch_checks %}
+<section class="detail-section" id="launch-checks">
+  <h3>What the icon starts</h3>
+  <p class="settings-hint">
+    This is a homebrew forwarder: installed like a game, its icon starts a program from the SD card.
+    That program has to be on the card at exactly this path.
+  </p>
+  <ul class="plain-list">
+    {% for c in view.launch_checks %}
+    <li>
+      <code>{{ c.launches }}</code> —
+      {% if c.provided_by %}comes from <strong>{{ c.provided_by }}</strong>
+      {% else %}<span class="card-warning">nothing in this game's files provides it</span>{% endif %}
+    </li>
+    {% endfor %}
+  </ul>
+</section>
+{% endif %}
 {{ content_section("Other copies", view.duplicates, "Other copy") }}
 {% if view.needs_review %}
 <section class="detail-section" id="needs-review-section">

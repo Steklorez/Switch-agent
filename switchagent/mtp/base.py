@@ -111,6 +111,10 @@ class TransferResult:
     bytes_sent: int
     bytes_total: int
     error: Optional[str] = None
+    # COMPLETED without writing: the destination already held a file with
+    # exactly the expected content, read back and hashed (send_file's
+    # expected_sha256). Nothing was sent, and nothing had to be.
+    already_present: bool = False
 
 
 @dataclass(frozen=True)
@@ -285,9 +289,15 @@ class MtpBackend(ABC):
     @abstractmethod
     def send_file(
         self, storage: str, dest_path: str, source_path: Path, *, overwrite: bool = False,
-        progress: Optional[Callable[[int, int], None]] = None,
+        progress: Optional[Callable[[int, int], None]] = None, expected_sha256: Optional[str] = None,
     ) -> TransferResult:
         """Sends exactly one local file to storage:dest_path.
+
+        `expected_sha256`: when dest_path already exists, a backend that can
+        read it back may compare its content to this hash and, if they are
+        the same, report COMPLETED with already_present=True instead of
+        raising FileAlreadyExistsError or overwriting anything. Only ever
+        proven by reading the bytes -- a matching name or size is not proof.
 
         `progress(bytes_sent, bytes_total)` is optional in both directions: a
         caller need not pass one, and a backend that cannot observe its own

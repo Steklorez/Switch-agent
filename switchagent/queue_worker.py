@@ -20,9 +20,10 @@ a pre-Stage-5 architecture audit (see docs/STAGE4.1.md):
      exists -- only a file THIS job's own prior send_file call is recorded
      (in manifest.py's progress.json) as having delivered gets skipped;
      anything else found already present is treated as an unresolved
-     conflict, not as proof of a prior successful send. Real MTP gives no
-     cheap way to hash a remote file to prove equivalence, and this
-     codebase deliberately does not pretend otherwise.
+     conflict, not as proof of a prior successful send -- unless reading it
+     back proves it holds exactly the bytes being sent (small files on a
+     real filesystem only; see manifest.py's docstring). A matching name or
+     size is never taken as proof.
 
 One worker, one job, one device at a time (the explicitly allowed minimal
 shape for this stage) -- but nothing here assumes there is only ever one
@@ -42,6 +43,7 @@ from typing import Optional
 
 from . import db
 from . import manifest as manifest_mod
+from . import sd_files
 from . import title_id as title_id_mod
 from . import work_cleanup
 from .model import ContentType
@@ -86,7 +88,7 @@ class JobRunOutcome:
 def _target_storage_for(report: PreviewReport) -> str:
     if report.content_type is ContentType.GAME_PACKAGE:
         return STORAGE_SD_INSTALL
-    if report.content_type is ContentType.ATMOSPHERE_MOD:
+    if report.content_type in (ContentType.ATMOSPHERE_MOD, ContentType.SD_FILES):
         return STORAGE_SD_CARD
     raise manifest_mod.ManifestError(
         f"content type {report.content_type.value} is not eligible for transfer"
@@ -151,6 +153,11 @@ def create_job_from_report(
     return job_id
 
 
+# Content whose manifest title_id IS its game's family id rather than an id
+# of its own that the variant arithmetic would have to decode.
+_TAGGED_WITH_FAMILY_ID = (ContentType.ATMOSPHERE_MOD.value, ContentType.SD_FILES.value)
+
+
 def _base_title_id_for_dependency_check(manifest) -> Optional[str]:
     """The family/base TITLE_ID a job's manifest actually depends on for
     install ordering -- mods are tagged with the base's own TITLE_ID
@@ -163,7 +170,7 @@ def _base_title_id_for_dependency_check(manifest) -> Optional[str]:
     DLC's own TITLE_ID), not the base's, which is exactly backwards."""
     if not manifest.title_id:
         return None
-    if manifest.content_type == ContentType.ATMOSPHERE_MOD.value:
+    if manifest.content_type in _TAGGED_WITH_FAMILY_ID:
         return manifest.title_id
     return title_id_mod.classify_title_variant(manifest.title_id).base_title_id
 
@@ -207,8 +214,11 @@ def _dependency_status(conn: sqlite3.Connection, manifest, target_device_id: str
     if not manifest.title_id:
         return None
 
-    if manifest.content_type == ContentType.ATMOSPHERE_MOD.value:
-        base_title_id = manifest.title_id  # mods are tagged with the base's own TITLE_ID directly
+    if manifest.content_type in _TAGGED_WITH_FAMILY_ID:
+        # mods are tagged with the base's own TITLE_ID directly, and so is a
+        # game's switch/ folder (sd_files.assign_owners) -- neither is ever
+        # a base game itself, so both wait behind one that is in flight.
+        base_title_id = manifest.title_id
     else:
         variant, base_title_id = title_id_mod.classify_title_variant(manifest.title_id)
         if variant == "BASE":
@@ -469,6 +479,15 @@ def resolve_library_item_display_name(
     filename). See find_family_base_name_source's own docstring for why
     `library_items` matters at scale."""
     raw_name = Path(row["absolute_path"]).name
+    if row["content_type"] == ContentType.SD_FILES.value:
+        # "switch.7z" or a folder called "switch" names the SD layout, not
+        # the game: borrow the game's name when it belongs to one (exactly
+        # as a mod does), the release folder's otherwise.
+        if row["title_id"]:
+            source = find_family_base_name_source(conn, row["title_id"], library_items=library_items)
+            if source is not None:
+                return Path(source["absolute_path"]).name
+        return sd_files.display_name(row["absolute_path"])
     if row["item_type"] != "MOD_FOLDER" or not row["title_id"]:
         return raw_name
     source = find_family_base_name_source(conn, row["title_id"], library_items=library_items)
@@ -506,16 +525,20 @@ def display_name_for_job(
         row = db.get_library_item_by_id(conn, job_row["library_item_id"])
         if row is not None:
             name = resolve_library_item_display_name(conn, row, library_items=library_items)
-            return _with_mod_suffix(name, job_row) if mod_suffix else name
+            return _with_mod_suffix(name, job_row, row["content_type"]) if mod_suffix else name
     if job_row["inbox_item_id"] is not None:
         row = db.get_inbox_item_by_id(conn, job_row["inbox_item_id"])
         if row is not None:
             name = Path(row["relative_path"]).name
-            return _with_mod_suffix(name, job_row) if mod_suffix else name
+            return _with_mod_suffix(name, job_row, row["content_type"]) if mod_suffix else name
     return f"job {job_row['id']}"
 
 
-def _with_mod_suffix(name: str, job_row: sqlite3.Row) -> str:
+def _with_mod_suffix(name: str, job_row: sqlite3.Row, content_type: Optional[str] = None) -> str:
+    # A game's switch/ folder also goes to SD_CARD, and calling it a mod
+    # would be wrong: it is half of the game, not a change to one.
+    if content_type == ContentType.SD_FILES.value:
+        return f"{name} — SD files"
     if job_row["target_storage"] == STORAGE_SD_CARD:
         return f"{name} — Mod"
     return name
@@ -628,6 +651,9 @@ def _run_job_transfer(conn: sqlite3.Connection, backend: MtpBackend, job_row: sq
         return JobRunOutcome(job_id=job_id, status="SOURCE_CHANGED", error=error)
 
     delivered = manifest_mod.load_progress(job_id)
+    # Files a previous attempt of this same transfer left half written (see
+    # manifest.inherit_progress) -- the only ones replaced without asking.
+    replaceable = manifest_mod.load_replaceable(job_id)
     bytes_done = sum(f.size for f in manifest.files if f.dest_relative_path in delivered)
     # UI-006 follow-up: bytes_total/bytes_done were previously only ever
     # written at a TERMINAL status (see the DESTINATION_CONFLICT/FAILED/
@@ -657,6 +683,12 @@ def _run_job_transfer(conn: sqlite3.Connection, backend: MtpBackend, job_row: sq
     # (db.py) -- so _process_job() can never be re-entered for a job that
     # already delivered a file as UNVERIFIED in a prior run.
     any_unverified = False
+    # Files found already on the card with exactly these bytes (read back
+    # and hashed by the backend -- see send_file's expected_sha256): done,
+    # without sending them again. Counted for one log line at the end rather
+    # than one per file: a re-run over a 4,625-file folder would otherwise
+    # write 4,625 of them.
+    already_present = 0
 
     for file in manifest.files:
         if file.dest_relative_path in delivered:
@@ -670,7 +702,9 @@ def _run_job_transfer(conn: sqlite3.Connection, backend: MtpBackend, job_row: sq
         # docstring), this is what keeps last_progress_at reflecting "just
         # started sending this file" rather than staying frozen at
         # whenever the job first went RUNNING.
-        db.update_job_status(conn, job_id, "RUNNING", last_progress_at=db.now_iso())
+        db.update_job_status(
+            conn, job_id, "RUNNING", last_progress_at=db.now_iso(), current_file=file.dest_relative_path,
+        )
 
         parent = "/".join(file.dest_relative_path.split("/")[:-1])
         source_path = manifest_mod.resolve_source_path(file, job_id, batch_id=manifest.batch_id)
@@ -705,7 +739,11 @@ def _run_job_transfer(conn: sqlite3.Connection, backend: MtpBackend, job_row: sq
             # MTP round-trips this loop doesn't need.
             result = backend.send_file(
                 storage, file.dest_relative_path, source_path,
-                overwrite=bool(job_row["force_overwrite"]), progress=report_progress,
+                overwrite=bool(job_row["force_overwrite"]) or file.dest_relative_path in replaceable,
+                progress=report_progress,
+                # Only a real filesystem can be read back meaningfully -- DBI's
+                # install node is not one (see mtp/windows.py).
+                expected_sha256=file.sha256 if storage == STORAGE_SD_CARD else None,
             )
         except FileAlreadyExistsError:
             # Exists on the device, but WE have no record (progress.json) of
@@ -742,7 +780,11 @@ def _run_job_transfer(conn: sqlite3.Connection, backend: MtpBackend, job_row: sq
 
         if result.status is TransferStatus.COMPLETED:
             manifest_mod.mark_delivered(job_id, file.dest_relative_path)
-            bytes_done += result.bytes_sent
+            if result.already_present:
+                already_present += 1
+                bytes_done += file.size
+            else:
+                bytes_done += result.bytes_sent
             db.update_job_status(conn, job_id, "RUNNING", last_progress_at=db.now_iso(), bytes_done=bytes_done)
             continue
 
@@ -788,6 +830,11 @@ def _run_job_transfer(conn: sqlite3.Connection, backend: MtpBackend, job_row: sq
         )
         return JobRunOutcome(job_id=job_id, status="DONE_UNVERIFIED")
 
+    if already_present:
+        db.log_job_event(
+            conn, job_id,
+            f"{already_present} file(s) were already on the device with exactly these contents -- not sent again",
+        )
     db.update_job_status(conn, job_id, "DONE", bytes_done=bytes_done, finished_at=db.now_iso())
     db.log_job_event(conn, job_id, f"done, {len(manifest.files)} file(s)")
     return JobRunOutcome(job_id=job_id, status="DONE")

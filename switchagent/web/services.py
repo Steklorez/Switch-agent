@@ -14,7 +14,7 @@ import re
 from pathlib import Path
 from typing import Optional
 
-from .. import db, extractor, manifest as manifest_mod, preview, queue_worker
+from .. import db, extractor, manifest as manifest_mod, preview, queue_worker, sd_files
 from .. import title_id as title_id_mod
 from ..model import ContentType
 from .context import WebContext
@@ -62,6 +62,8 @@ def _resolve_entry_name(conn, row, *, library_items=None) -> str:
     (queue_worker.display_name_for_job), never a second, independently
     maintained naming system. See find_family_base_name_source's own
     docstring (PERF-001) for why `library_items` matters at scale."""
+    if row["content_type"] == ContentType.SD_FILES.value:
+        return sd_files.display_name(row["absolute_path"])
     if row["item_type"] == "MOD_FOLDER" and row["title_id"]:
         source = queue_worker.find_family_base_name_source(conn, row["title_id"], library_items=library_items)
         if source is not None:
@@ -145,7 +147,7 @@ def _library_entry_view(
     # computed for a mod.
     confirmed_on_device = (
         installed_on_device_base_ids is not None
-        and row["content_type"] != ContentType.ATMOSPHERE_MOD.value
+        and row["content_type"] not in (ContentType.ATMOSPHERE_MOD.value, ContentType.SD_FILES.value)
         and base_title_id in installed_on_device_base_ids
     )
     if confirmed_on_device and display_status == "INSTALLED_UNVERIFIED":
@@ -228,6 +230,21 @@ def _library_entry_view(
         "job": job_view,
         "confirmed_on_device": confirmed_on_device,
         "hide_unverified_badge": hide_unverified_badge,
+        **_sd_fields(row),
+    }
+
+
+def _sd_fields(row) -> dict:
+    """What an entry puts on the SD card, and what a forwarder launches from
+    it (see sd_files.py). `sd` is present on an SD_FILES item, and on a
+    package or mod archive that carries a switch/ folder of its own."""
+    summary = sd_files.sd_summary_of(row)
+    launches = sd_files.launches_of(row)
+    return {
+        "sd": summary.to_dict() if summary else None,
+        "sd_destinations": [f"sdmc:/{app}" for app in summary.apps] if summary else [],
+        "sd_label": sd_files.part_label(row["absolute_path"]),
+        "launches": f"sdmc:/{launches}" if launches else None,
     }
 
 
@@ -490,7 +507,8 @@ def _family_entries(game: dict) -> list[dict]:
     family-level filters and the family-level aggregates below both use,
     so they can never drift apart."""
     return [
-        e for e in ([game["base"]] + game["updates"] + game["dlc"] + game["mods"] + game["duplicates"])
+        e for e in ([game["base"]] + game["updates"] + game["dlc"] + game["mods"]
+                    + game.get("sd_files", []) + game["duplicates"])
         if e is not None
     ]
 
@@ -592,7 +610,8 @@ def list_library_view(
         return {"kind": "mods", "entries": mods}
 
     packages = [e for e in all_entries if e["content_type"] == ContentType.GAME_PACKAGE.value]
-    others = [e for e in all_entries if e not in mods and e not in packages]
+    sd_parts = [e for e in all_entries if e["content_type"] == ContentType.SD_FILES.value]
+    others = [e for e in all_entries if e not in mods and e not in packages and e not in sd_parts]
 
     # Mods are tagged with the base game's own TITLE_ID directly (the
     # atmosphere/contents/<TITLE_ID>/ convention) -- no variant arithmetic
@@ -623,6 +642,20 @@ def list_library_view(
         entries = sorted((e for fam in families.values() for e in fam["dlc"]), key=key_fn, reverse=reverse)
         return {"kind": "dlc", "entries": entries}
 
+    # A game's switch/ folder is part of that game's card, the same way its
+    # updates are -- which game it belongs to was settled at scan time
+    # (sd_files.assign_owners, stored as its title_id). One that belongs to
+    # no game in the library is shown on its own card rather than hidden:
+    # a standalone homebrew app is a perfectly good thing to install.
+    sd_by_base: dict[str, list] = {}
+    standalone_sd = []
+    for e in sd_parts:
+        family = family_base_title_id(e["title_id"])
+        if family is not None and family in families:
+            sd_by_base.setdefault(family, []).append(e)
+        else:
+            standalone_sd.append(e)
+
     games = []
     for fam in families.values():
         # Prefer an AVAILABLE base as the card's primary entry; any
@@ -633,6 +666,7 @@ def list_library_view(
         primary = bases_sorted[0] if bases_sorted else None
         duplicates = bases_sorted[1:]
         fam_mods = sorted(mods_by_base.get(fam["base_title_id"], []), key=lambda x: x["name"])
+        fam_sd = sorted(sd_by_base.get(fam["base_title_id"], []), key=lambda x: x["sd_label"])
         name_source = primary or (fam["updates"] + fam["dlc"] + duplicates + fam_mods)[0]
         games.append(_finish_family({
             "base_title_id": fam["base_title_id"],
@@ -641,15 +675,22 @@ def list_library_view(
             "updates": sorted(fam["updates"], key=lambda x: x["name"]),
             "dlc": sorted(fam["dlc"], key=lambda x: x["name"]),
             "mods": fam_mods,
+            "sd_files": fam_sd,
             "duplicates": sorted(duplicates, key=lambda x: x["name"]),
             "variant_count": (
-                len(fam["updates"]) + len(fam["dlc"]) + len(fam_mods) + len(duplicates) + (1 if primary else 0)
+                len(fam["updates"]) + len(fam["dlc"]) + len(fam_mods) + len(fam_sd) + len(duplicates)
+                + (1 if primary else 0)
             ),
+        }))
+    for e in standalone_sd:
+        games.append(_finish_family({
+            "base_title_id": f"sd-{e['id']}", "name": e["name"], "base": e,
+            "updates": [], "dlc": [], "mods": [], "sd_files": [], "duplicates": [], "variant_count": 1,
         }))
     for e in others:  # MIXED/UNKNOWN content_type -- shown, never dropped
         games.append(_finish_family({
             "base_title_id": f"other-{e['id']}", "name": e["name"], "base": e,
-            "updates": [], "dlc": [], "mods": [], "duplicates": [], "variant_count": 1,
+            "updates": [], "dlc": [], "mods": [], "sd_files": [], "duplicates": [], "variant_count": 1,
         }))
 
     if needle:
@@ -720,6 +761,23 @@ def _finish_family(game: dict) -> dict:
     # "Not installed" filter must never disagree about the same title.
     # INSTALLED proper is untouched: that one is either user-confirmed or
     # DBI-confirmed, never a holding state.
+    # A forwarder only starts an .nro that some part of the game puts on the
+    # SD card; say so when none does (Mega Man X Regenesis ships its .nro
+    # outside switch.7z -- install only the archive and the icon on the
+    # home menu opens nothing). Checked against every part of this family
+    # that carries a switch/ folder, case-insensitively like the card.
+    parts = [(e["sd_label"], sd_files.SdSummary.from_dict(e["sd"])) for e in entries if e.get("sd")]
+    checks = []
+    for e in entries:
+        target = e.get("launches")
+        if not target or e["content_type"] != ContentType.GAME_PACKAGE.value:
+            continue
+        if any(c["launches"] == target for c in checks):
+            continue
+        checks.append({"launches": target, "provided_by": sd_files.provider_of(target[len("sdmc:/"):], parts)})
+    game["launch_checks"] = checks
+    game["launch_missing"] = [c["launches"] for c in checks if c["provided_by"] is None]
+
     base = game["base"]
     base_claims_installed = base is not None and base["status"] in ("INSTALLED", "INSTALLED_UNVERIFIED")
     if base is not None and base.get("hide_unverified_badge"):
@@ -967,7 +1025,7 @@ def _resolve_latest_retry(conn, row):
 # vocabulary and one colour per kind. "base" is the one the dialog leaves
 # untagged (there, everything hangs under a base-game header that names it);
 # Queue is a flat list with no such header, so a plain game needs saying too.
-_VARIANT_ROLE_LABEL = {"base": "Game", "update": "Update", "dlc": "DLC", "mod": "Mod"}
+_VARIANT_ROLE_LABEL = {"base": "Game", "update": "Update", "dlc": "DLC", "mod": "Mod", "sd": "SD files"}
 
 _TITLE_VARIANT_TO_ROLE = {"BASE": "base", "UPDATE": "update", "DLC": "dlc"}
 
@@ -984,6 +1042,8 @@ def _job_variant_role(job_row) -> Optional[str]:
         return None
     if manifest.content_type == ContentType.ATMOSPHERE_MOD.value:
         return "mod"
+    if manifest.content_type == ContentType.SD_FILES.value:
+        return "sd"
     if manifest.content_type != ContentType.GAME_PACKAGE.value or not manifest.title_id:
         return None
     variant, _base_id = title_id_mod.classify_title_variant(manifest.title_id)
@@ -997,7 +1057,7 @@ def _job_view(conn, row) -> dict:
     # Same helper the worker's history uses -- minus its " — Mod" suffix,
     # which the [Mod] badge below now says instead (History keeps it: no
     # badge there).
-    display_name = queue_worker.display_name_for_job(conn, row, mod_suffix=variant_role != "mod")
+    display_name = queue_worker.display_name_for_job(conn, row, mod_suffix=variant_role not in ("mod", "sd"))
     stall_seconds = _stall_seconds(row)
     return {
         # Queue badge: what this job installs (see _job_variant_role).
@@ -1339,6 +1399,34 @@ def _sub_report_for_entry(report, entry):
     )
 
 
+def _apply_library_row(report, row) -> None:
+    """A switch/ folder's own files carry no TITLE_ID; the game it belongs
+    to is what the scan decided and what Library grouped it under
+    (library_items.title_id, see sd_files.assign_owners). The job inherits
+    exactly that, so it waits behind its game's install and is recorded
+    under that game."""
+    if report.content_type is ContentType.SD_FILES:
+        report.title_id = row["title_id"]
+        report.title_id_confident = False
+
+
+def _sd_sub_report(report):
+    """The switch/ folder of a package or mod archive (see
+    preview._attach_sd_part) as an SD_FILES report of its own, tagged with
+    the game the archive installs. None when there is none."""
+    if report.sd_source_dir is None or report.content_type not in (
+        ContentType.GAME_PACKAGE, ContentType.ATMOSPHERE_MOD,
+    ):
+        return None
+    family = report.title_id if report.content_type is ContentType.ATMOSPHERE_MOD         else family_base_title_id(report.title_id)
+    return dataclasses.replace(
+        report, content_type=ContentType.SD_FILES, title_id=family, title_id_confident=False,
+        package_format=None, package_relative_path=None, package_entries=[], mod_source_dir=None,
+        size=report.sd_summary.size if report.sd_summary else 0,
+        file_count=report.sd_summary.files if report.sd_summary else None,
+    )
+
+
 def create_and_confirm_jobs(conn, library_item_ids: list[int], target_device_id: str, *, progress=None,
                             confirm: bool = True) -> dict:
     """The ONLY path that creates jobs from the Web UI (point 9/19/25): the
@@ -1420,17 +1508,22 @@ def create_and_confirm_jobs(conn, library_item_ids: list[int], target_device_id:
 
         try:
             report = preview.preview_path(Path(row["absolute_path"]), extract=True)
-        except extractor.ExtractionBackendMissingError:
+        except extractor.ExtractionBackendMissingError as exc:
             # RAR decompression needs an external unrar/7z/bsdtar on PATH
             # that this packaged build does not bundle (see
             # docs/PACKAGING.md's "RAR extraction" section) -- report
             # clearly per item rather than letting this propagate into an
-            # unhandled 500.
+            # unhandled 500. A .7z only gets here when py7zr cannot decode
+            # its method and no external tool is there to; its own message
+            # says exactly that.
+            is_rar = Path(row["absolute_path"]).suffix.lower() == ".rar"
             errors.append({
                 "library_item_id": item_id,
-                "error": "RAR extraction is unavailable on this machine (no unrar/7z/bsdtar found on PATH) "
-                         "-- see Settings for details.",
+                "error": ("RAR extraction is unavailable on this machine (no unrar/7z/bsdtar found on PATH) "
+                          "-- see Settings for details.") if is_rar else str(exc),
             })
+            if progress:
+                progress(item_id=item_id, phase="Failed", error=errors[-1]["error"])
             continue
         except (OSError, manifest_mod.ManifestError, extractor.ArchiveError, ValueError) as exc:
             errors.append({"library_item_id": item_id, "error": str(exc)})
@@ -1438,13 +1531,19 @@ def create_and_confirm_jobs(conn, library_item_ids: list[int], target_device_id:
                 progress(item_id=item_id, phase="Failed", error=str(exc))
             continue
 
-        action = "INSTALL_VIA_DBI" if report.content_type is ContentType.GAME_PACKAGE else "COPY_MERGE"
+        _apply_library_row(report, row)
 
         if report.content_type is ContentType.GAME_PACKAGE and len(report.package_entries) > 1:
             entries = sorted(report.package_entries, key=_package_entry_sort_key)
             sub_reports = [(e.relative_path, _sub_report_for_entry(report, e)) for e in entries]
         else:
             sub_reports = [(None, report)]
+        # A package or mod archive that also carries a switch/ folder gets
+        # one more job for it, after its packages -- nothing the archive
+        # ships may silently stay behind (see _sd_sub_report).
+        sd_part = _sd_sub_report(report)
+        if sd_part is not None:
+            sub_reports.append(("switch/", sd_part))
 
         # Each entry gets its OWN try/except: one entry's manifest/staging
         # failure (e.g. a corrupt DLC payload) must not silently prevent
@@ -1461,6 +1560,7 @@ def create_and_confirm_jobs(conn, library_item_ids: list[int], target_device_id:
         # in this same request -- exactly the "archive 1 installing while
         # archive 4 still extracting" bug this fixes.
         for label, sub_report in sub_reports:
+            action = "INSTALL_VIA_DBI" if sub_report.content_type is ContentType.GAME_PACKAGE else "COPY_MERGE"
             try:
                 job_id = queue_worker.create_job_from_report(
                     conn, sub_report, library_item_id=item_id, action=action,
@@ -1625,6 +1725,7 @@ def retry_job(conn, job_id: int, *, force_overwrite: bool = False) -> dict:
 
     try:
         report = preview.preview_path(source_path, extract=True)
+        _apply_library_row(report, source_row)
         new_job_id = queue_worker.create_job_from_report(
             conn, report,
             library_item_id=old["library_item_id"], inbox_item_id=old["inbox_item_id"],
@@ -1639,10 +1740,22 @@ def retry_job(conn, job_id: int, *, force_overwrite: bool = False) -> dict:
             db.delete_installation_batch(conn, batch_id)
         raise ValueError(f"could not re-validate source for retry: {exc}") from exc
 
+    carried = manifest_mod.inherit_progress(job_id, new_job_id, in_flight=_in_flight_file(old))
     db.confirm_job(conn, new_job_id)
-    db.log_job_event(conn, new_job_id, f"retry of job {job_id} (was {old['status']})")
+    db.log_job_event(conn, new_job_id, f"retry of job {job_id} (was {old['status']})"
+                     + (f", continuing after {carried} file(s) it had already delivered" if carried else ""))
     db.log_job_event(conn, job_id, f"retried as new job {new_job_id}")
     return {"old_job_id": job_id, "new_job_id": new_job_id, "batch_id": batch_id}
+
+
+def _in_flight_file(old) -> Optional[str]:
+    """The file `old` was sending when it stopped, if it stopped mid-file.
+    Only a transfer that broke off -- a failed send, a lost device -- can
+    have left one half written; a job that ended any other way has nothing
+    of its own to replace."""
+    if old["status"] not in ("FAILED", "INTERRUPTED", "DEVICE_UNAVAILABLE"):
+        return None
+    return old["current_file"]
 
 
 def _retry_staged_job(conn, old, frozen, *, force_overwrite: bool = False) -> dict:
@@ -1665,6 +1778,9 @@ def _retry_staged_job(conn, old, frozen, *, force_overwrite: bool = False) -> di
         conn.execute("UPDATE jobs SET manifest_path=?, retry_of_job_id=?, payload_batch_id=? WHERE id=?",
                      (str(path), old["id"], frozen.batch_id, new_id))
         conn.commit()
+        carried = manifest_mod.inherit_progress(old["id"], new_id, in_flight=_in_flight_file(old))
+        if carried:
+            db.log_job_event(conn, new_id, f"continuing after {carried} file(s) job {old['id']} had already delivered")
         db.confirm_job(conn, new_id)
     except Exception:
         db.update_job_status(conn, new_id, "FAILED", error="Could not create retry manifest")
@@ -1800,7 +1916,7 @@ _ACTIVITY_FLAGS = {
     "DESTINATION_CONFLICT": "conflict",
 }
 
-_ROLE_LABELS = {"base": "Game", "update": "Update", "dlc": "DLC", "mod": "Mod"}
+_ROLE_LABELS = {"base": "Game", "update": "Update", "dlc": "DLC", "mod": "Mod", "sd": "SD files"}
 
 
 def _local(created_at: str) -> Optional[datetime]:
@@ -1855,6 +1971,8 @@ def _history_role(conn, row) -> Optional[str]:
             return role
     if " \u2014 Mod" in (row["display_name"] or ""):
         return "mod"
+    if " \u2014 SD files" in (row["display_name"] or ""):
+        return "sd"
     if not row["title_id"]:
         return None
     try:
