@@ -47,6 +47,12 @@ def image_path(title_id):
     return config.DATA_DIR / "covers" / (title_id.upper() + ".img")
 
 
+class NoCoverError(ValueError):
+    """TitleDB simply has no cover for this game -- a homebrew port's own
+    TITLE_ID, as a rule. An answer, not a failure: nothing went wrong, and
+    retrying will not change it."""
+
+
 class CoverQueue:
     def __init__(self):
         self.lock = threading.Lock()
@@ -58,12 +64,20 @@ class CoverQueue:
         self.requested = set()
         self.names = {}
         self.phase = "Idle"
+        # Which titles ended without a cover, and why: `error` above keeps
+        # the last reason for anyone who reads it, these say which of them
+        # were a real failure (network, a bad image) and which were only
+        # "TitleDB has none" -- what the Library page must not show as red.
+        self.not_found = set()
+        self.failed = set()
 
     def snapshot(self):
         with self.lock:
             ready = sorted(tid for tid in self.requested if image_path(tid).is_file())
             return {"running": self.running, "phase": self.phase, "ready": ready,
-                    "total": len(self.requested), "error": self.error}
+                    "total": len(self.requested), "error": self.error,
+                    "not_found": len(self.not_found & self.requested),
+                    "failed": len(self.failed & self.requested)}
 
     def submit(self, items, *, retry=False):
         """items: an iterable of either a bare TITLE_ID string, or a
@@ -81,6 +95,8 @@ class CoverQueue:
             if retry and not self.running:
                 self.retry_after.clear()
                 self.error = None
+                self.not_found.clear()
+                self.failed.clear()
             for item in items:
                 tid, name = item if isinstance(item, tuple) else (item, None)
                 if tid and re.fullmatch(r"[0-9A-Fa-f]{16}", tid):
@@ -90,6 +106,8 @@ class CoverQueue:
                         self.names[tid] = title_id_mod.strip_release_tags(name)
                     if not image_path(tid).exists() and self.retry_after.get(tid, 0) < time.time():
                         self.pending.add(tid)
+                        self.not_found.discard(tid)
+                        self.failed.discard(tid)
             if self.running or not self.pending:
                 return
             self.running = True
@@ -164,7 +182,7 @@ class CoverQueue:
                     self.index = self._load_index()
                 url = self.index["by_id"].get(tid) or self._lookup_by_name(self.names.get(tid))
                 if not url:
-                    raise ValueError("No cover in TitleDB for this TITLE_ID or name")
+                    raise NoCoverError("No cover in TitleDB for this TITLE_ID or name")
                 self.phase = "Downloading covers"
                 data = download(url, 5 * 1024 * 1024)
                 if not (data.startswith(b"\xff\xd8\xff") or data.startswith(b"\x89PNG\r\n\x1a\n") or (data[:4] == b"RIFF" and data[8:12] == b"WEBP")):
@@ -175,11 +193,15 @@ class CoverQueue:
                 temp.write_bytes(data)
                 temp.replace(path)
                 self.error = None
+                with self.lock:
+                    self.not_found.discard(tid)
+                    self.failed.discard(tid)
             except Exception as exc:
                 log.info("Cover unavailable for %s: %s", tid, exc)
                 with self.lock:
                     self.retry_after[tid] = time.time() + 3600
                     self.error = str(exc)
+                    (self.not_found if isinstance(exc, NoCoverError) else self.failed).add(tid)
                     if self.index is None:
                         for pending in self.pending:
                             self.retry_after[pending] = time.time() + 3600

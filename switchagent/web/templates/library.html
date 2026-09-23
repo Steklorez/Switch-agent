@@ -151,17 +151,44 @@
     Rescan
   </button>
 </div>
-<div id="scan-status" class="scan-status" hidden>
-  <span id="scan-status-text"></span>
-  {# Shown only while a scan is actually running -- see library.js. A big
-     Library folder can take minutes per pass, and until this existed the
-     only way out was to wait it out. #}
-  <button id="scan-cancel-btn" class="btn btn-small" type="button" hidden>Stop scanning</button>
-</div>
-<div id="cover-status" class="scan-status" role="status" aria-live="polite">
-  <span id="cover-status-text">Checking covers…</span>
-  <button id="cover-retry" class="btn btn-small" type="button" hidden>Retry covers</button>
-</div>
+{# Everything that happens on its own in the background -- the library
+   scan (at startup, and whenever a Library folder changes), cover
+   downloads, the console's "Installed games" read that "On Switch" badges
+   wait for -- with a live bar each, and one line that says plainly whether
+   what is on screen is everything yet. Rendered by activity.js from
+   GET /api/activity. The ids inside are the ones library.js/covers.js
+   already bind to. #}
+<div id="activity-topline" class="activity-topline" hidden><span></span></div>
+<section id="activity" class="activity" data-state="checking" aria-label="Background activity">
+  <span class="activity-dot" aria-hidden="true"></span>
+  <span class="activity-summary-text" role="status" aria-live="polite">Checking…</span>
+  <span class="activity-summary-facts"></span>
+  <span class="activity-rows">
+    <span class="activity-row" data-task="scan" hidden>
+      <svg class="activity-icon" viewBox="0 0 24 24" aria-hidden="true"><circle class="ring-track" cx="12" cy="12" r="9"/><path class="ring-arc" d="M12 3a9 9 0 0 1 9 9"/></svg>
+      <span class="activity-title">Scanning</span>
+      <span class="activity-count"></span>
+      <span class="activity-bar"><span class="activity-bar-fill"></span></span>
+      <span class="activity-detail" id="scan-status-text" hidden></span>
+      <button id="scan-cancel-btn" class="activity-action" type="button" hidden>Stop</button>
+    </span>
+    <span class="activity-row" data-task="covers" hidden>
+      <svg class="activity-icon" viewBox="0 0 24 24" aria-hidden="true"><rect x="3.5" y="4.5" width="17" height="15" rx="2.5"/><circle cx="9" cy="10" r="1.8"/><path d="M4 17l5-5 3.5 3.5L15 13l5 4.5"/></svg>
+      <span class="activity-title">Covers</span>
+      <span class="activity-count"></span>
+      <span class="activity-bar"><span class="activity-bar-fill"></span></span>
+      <span class="activity-detail" id="cover-status-text" hidden></span>
+      <button id="cover-retry" class="activity-action" type="button" hidden>Retry</button>
+    </span>
+    <span class="activity-row" data-task="device" hidden>
+      <svg class="activity-icon" viewBox="0 0 24 24" aria-hidden="true"><rect x="2.5" y="6" width="5" height="12" rx="2.5"/><rect x="16.5" y="6" width="5" height="12" rx="2.5"/><rect x="7.5" y="5" width="9" height="14" rx="1"/></svg>
+      <span class="activity-title">Switch</span>
+      <span class="activity-count"></span>
+      <span class="activity-bar"><span class="activity-bar-fill"></span></span>
+      <span class="activity-detail" hidden></span>
+    </span>
+  </span>
+</section>
 
 {% if kind == "games" %}
   {% if not view.games %}
@@ -232,6 +259,7 @@
 {% block scripts %}
 <script src="{{ static_url('library.js') }}"></script>
 <script src="{{ static_url('covers.js') }}"></script>
+<script src="{{ static_url('activity.js') }}"></script>
 <script src="{{ static_url('library_activity.js') }}"></script>
 <script src="{{ static_url('card_motion.js') }}"></script>
 <script src="{{ static_url('library_live.js') }}"></script>

@@ -647,6 +647,30 @@ def create_app(ctx: WebContext) -> FastAPI:
     def api_scan_status(ctx: WebContext = Depends(get_ctx)):
         return ctx.scan_status_snapshot()
 
+    @app.get("/api/activity")
+    def api_activity(conn=Depends(get_conn), ctx: WebContext = Depends(get_ctx)):
+        """Everything the Library page's activity panel shows, in one read:
+        the library scan, the cover download and what each connected
+        console is being asked. Memory only -- nothing here touches a disk
+        walk or a device."""
+        from .. import preferences
+        covers = ctx.covers.snapshot()
+        devices = ctx.device_activity_snapshot()
+        for device in devices:
+            device["label"] = services.device_label(conn, device.pop("device_id"))
+        return {
+            "scan": ctx.scan_status_snapshot(),
+            "covers": {
+                "enabled": preferences.load()["covers"], "running": covers["running"],
+                "phase": covers["phase"], "ready": len(covers["ready"]), "total": covers["total"],
+                "not_found": covers["not_found"], "failed": covers["failed"],
+                # Only a real failure is an error here: "TitleDB has no cover
+                # for this homebrew port" is an answer, shown as a count.
+                "error": covers["error"] if covers["failed"] else None,
+            },
+            "devices": devices,
+        }
+
     # -- JSON API: queue / jobs (mutations are explicit, separate from reads) --
 
     @app.get("/api/queue")
