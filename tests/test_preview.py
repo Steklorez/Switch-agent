@@ -71,7 +71,7 @@ def test_preview_archive_with_multiple_packages_exposes_every_entry(tmp_path, mo
     path = build_zip(tmp_path / "multi.zip", {
         "Game [0100AAAAAAAAA000][v0].nsz": b"base bytes",
         "Game Update [0100AAAAAAAAA800][v65536].nsz": b"update bytes bytes",
-        "Game DLC1 [0100AAAAAAAAA001][v0].nsz": b"dlc bytes",
+        "Game DLC1 [0100AAAAAAAAB001][v0].nsz": b"dlc bytes",
     })
     report = preview.preview_path(path, extract=True)
     assert report.content_type is ContentType.GAME_PACKAGE
@@ -81,7 +81,7 @@ def test_preview_archive_with_multiple_packages_exposes_every_entry(tmp_path, mo
     assert set(by_variant) == {"BASE", "UPDATE", "DLC"}
     assert by_variant["BASE"].title_id == "0100AAAAAAAAA000"
     assert by_variant["UPDATE"].title_id == "0100AAAAAAAAA800"
-    assert by_variant["DLC"].title_id == "0100AAAAAAAAA001"
+    assert by_variant["DLC"].title_id == "0100AAAAAAAAB001"
 
     for entry in report.package_entries:
         extracted = report.work_dir / entry.relative_path
