@@ -602,89 +602,23 @@
 
   // -- rescan (non-blocking, point 16) -------------------------------------
   //
-  // W3-007: more than one trigger can exist on the page now (the toolbar's
-  // own #rescan-btn, plus an onboarding banner's own Rescan button when the
+  // W3-007: more than one trigger can exist on the page (the toolbar's own
+  // #rescan-btn, plus an onboarding banner's own Rescan button when the
   // library is empty -- see library.html/onboarding.py) -- every element
-  // with the shared .rescan-trigger class is wired up identically, all
-  // sharing the single #scan-status readout below.
+  // with the shared .rescan-trigger class is wired up identically. What the
+  // scan is doing, its Stop button, and when the buttons come back are all
+  // activity.js's: it shows every scan, not only one started from here --
+  // and library_live.js refreshes the grid when it ends, without reloading
+  // the page out from under a selection.
 
-  const rescanBtns = document.querySelectorAll(".rescan-trigger");
-  const scanStatusBox = document.getElementById("scan-status");
-  // The readout is a <span> inside the box now, so the Stop button sitting
-  // next to it does not get wiped by every status write.
-  const scanStatus = document.getElementById("scan-status-text") || scanStatusBox;
-  const scanCancelBtn = document.getElementById("scan-cancel-btn");
-
-  if (scanCancelBtn) {
-    scanCancelBtn.addEventListener("click", async () => {
-      scanCancelBtn.disabled = true;
-      scanCancelBtn.textContent = "Stopping…";
-      // Cooperative: the scan unwinds at its next checkpoint, so the button
-      // reports "asked" and the poll below is what confirms it stopped.
-      await fetch("/api/scan/cancel", { method: "POST" });
-    });
-  }
-
-  function setScanCancelVisible(visible) {
-    if (!scanCancelBtn) return;
-    scanCancelBtn.hidden = !visible;
-    if (visible && !scanCancelBtn.disabled) scanCancelBtn.textContent = "Stop scanning";
-    if (!visible) {
-      scanCancelBtn.disabled = false;
-      scanCancelBtn.textContent = "Stop scanning";
-    }
-  }
-
-  function setRescanButtonsDisabled(disabled) {
-    rescanBtns.forEach((btn) => { btn.disabled = disabled; });
-  }
-
-  rescanBtns.forEach((btn) => {
+  document.querySelectorAll(".rescan-trigger").forEach((btn) => {
     btn.addEventListener("click", async () => {
-      setRescanButtonsDisabled(true);
-      await fetch(btn.dataset.scanUrl, { method: "POST" });
-      pollScanStatus(btn.dataset.statusUrl);
+      btn.disabled = true;
+      try {
+        await fetch(btn.dataset.scanUrl, { method: "POST" });
+      } finally {
+        document.dispatchEvent(new Event("activity-poke"));
+      }
     });
   });
-
-  async function pollScanStatus(statusUrl) {
-    scanStatusBox.hidden = false;
-    try {
-      const res = await fetch(statusUrl);
-      const state = await res.json();
-      if (state.running) {
-        const elapsed = state.elapsed_seconds != null ? ` (${Math.round(state.elapsed_seconds)}s)` : "";
-        const verb = state.cancel_requested ? "Stopping" : "Scanning";
-        scanStatus.textContent = state.current_filename
-          ? `${verb}… ${state.current_filename}${elapsed}`
-          : `${verb}…${elapsed}`;
-        setScanCancelVisible(true);
-        setTimeout(() => pollScanStatus(statusUrl), 1000);
-      } else {
-        setRescanButtonsDisabled(false);
-        setScanCancelVisible(false);
-        if (state.cancelled) {
-          // Deliberately NOT reloading the page: a cancelled pass indexed
-          // only part of the folder, and snapping the list to that
-          // half-finished view is not what "stop" asked for.
-          scanStatus.textContent = "Scan stopped. What it had already indexed was kept.";
-        } else if (state.error) {
-          scanStatus.textContent = "Scan error: " + state.error;
-        } else if (state.summary) {
-          const s = state.summary;
-          // `relocated` is only ever mentioned when it happened: re-pointing a
-          // Library folder at the same files by another path (UNC, a new drive
-          // letter) silently folds the old rows into the new ones, and a scan
-          // reporting "0 new, 0 updated, 0 removed" would hide that entirely.
-          scanStatus.textContent =
-            "Scan complete: " + s.new + " new, " + s.updated + " updated, " + s.removed + " removed" +
-            (s.relocated ? ", " + s.relocated + " matched to a new path" : "") + ".";
-          setTimeout(() => window.location.reload(), 1000);
-        }
-      }
-    } catch (e) {
-      setRescanButtonsDisabled(false);
-      scanStatus.textContent = "Could not check scan status.";
-    }
-  }
 })();

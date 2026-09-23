@@ -77,6 +77,12 @@ class ScanState:
     # finished state reads "Cancelled" rather than an ordinary
     # "Completed" with suspiciously small numbers.
     cancel_requested: bool = False
+    # Where the pass is (scanner.scan_library_once's on_progress):
+    # "walking" (done = entries seen, total unknown), "indexing" (done of
+    # total), "finishing".
+    phase: Optional[str] = None
+    done: int = 0
+    total: Optional[int] = None
 
 
 class WebContext:
@@ -158,6 +164,14 @@ class WebContext:
         # convention as _storage_cache.
         self._installed_games_cache: dict[str, set[str]] = {}  # device_id -> base_title_ids
         self._installed_games_cache_lock = threading.Lock()
+        # What each connected console is being asked right now, and what the
+        # last successful "Installed games" read found -- for the Library
+        # page's activity panel. That read can take a while on a console
+        # with many titles, and until it finishes no card can say "On
+        # Switch"; the page should say so instead of looking finished.
+        self._device_activity_lock = threading.Lock()
+        self._device_activity: dict[str, dict] = {}
+        self._installed_read: dict[str, dict] = {}
 
         # DBI does not rewrite InstalledApplications.csv mid-session
         # (field-confirmed 2026-09-21: a title this app itself sends via
@@ -247,14 +261,18 @@ class WebContext:
             backend.set_storage_overrides(overrides)
 
             if should_refresh_storage or device_id not in previously_live:
+                self._note_device_activity(device_id, "Reading storage")
                 try:
                     storage_snapshot[device_id] = backend.list_storages()
                 except Exception:  # noqa: BLE001 -- one bad device must not skip the rest
                     log.exception("failed to refresh storage snapshot for a device")
                 installed_games_snapshot[device_id] = set()
+                self._note_device_activity(device_id, "Reading installed games")
                 try:
                     ids = backend.list_installed_title_ids()
                     if ids is not None:
+                        with self._device_activity_lock:
+                            self._installed_read[device_id] = {"count": len(ids), "at": db.now_iso()}
                         installed_games_snapshot[device_id] = ids
                         # Persisted too (db.device_installed_titles), not just
                         # cached in memory -- so this device's confirmed set
@@ -267,8 +285,13 @@ class WebContext:
                         db.set_device_installed_base_title_ids(conn, device_id, ids)
                 except Exception:  # noqa: BLE001 -- one bad device must not skip the rest
                     log.exception("failed to refresh installed-games snapshot for a device")
+                finally:
+                    self._note_device_activity(device_id, None)
         with self._device_cache_lock:
             self._device_cache = live
+        with self._device_activity_lock:
+            live_ids_now = {device.device_id for device in live}
+            self._installed_read = {k: v for k, v in self._installed_read.items() if k in live_ids_now}
         if should_refresh_storage:
             self._last_storage_refresh_monotonic = time.monotonic()
         if storage_snapshot:
@@ -308,6 +331,47 @@ class WebContext:
                 abandon_all_jobs_for_device(conn, device_id, reason)
                 self.preparations.clear_for_device(device_id)
         return live
+
+    def _note_device_activity(self, device_id: str, phase: Optional[str]) -> None:
+        with self._device_activity_lock:
+            if phase is None:
+                self._device_activity.pop(device_id, None)
+            else:
+                self._device_activity[device_id] = {"phase": phase, "since": time.monotonic()}
+
+    def device_activity_snapshot(self) -> list[dict]:
+        """One entry per console connected right now: what it is being asked
+        (phase, for how long) and what its last "Installed games" read found.
+        Read from memory only -- never a COM call, this runs on an HTTP
+        thread (see the class-level note)."""
+        with self._device_cache_lock:
+            live = list(self._device_cache)
+        with self._device_activity_lock:
+            activity = dict(self._device_activity)
+            reads = dict(self._installed_read)
+        now = time.monotonic()
+        result = []
+        for device in live:
+            current = activity.get(device.device_id)
+            last = reads.get(device.device_id)
+            result.append({
+                "device_id": device.device_id,
+                "phase": current["phase"] if current else None,
+                "busy_seconds": round(now - current["since"], 1) if current else None,
+                "installed_count": last["count"] if last else None,
+                "installed_read_at": last["at"] if last else None,
+            })
+        # A console being read for the first time is not in _device_cache
+        # yet (that is only replaced once the whole tick is done), but it is
+        # exactly the one worth showing.
+        for device_id, current in activity.items():
+            if all(entry["device_id"] != device_id for entry in result):
+                result.append({
+                    "device_id": device_id, "phase": current["phase"],
+                    "busy_seconds": round(now - current["since"], 1),
+                    "installed_count": None, "installed_read_at": None,
+                })
+        return result
 
     def get_known_installed_title_ids(self) -> set[str]:
         """Union, across every currently-known device's most recent
@@ -501,6 +565,12 @@ class WebContext:
             with self.scan_lock:
                 self.scan_state.current_filename = path
 
+        def _on_progress(phase: str, done: int, total: Optional[int]) -> None:
+            with self.scan_lock:
+                self.scan_state.phase = phase
+                self.scan_state.done = done
+                self.scan_state.total = total
+
         def _run():
             from .. import scanner
             try:
@@ -508,7 +578,7 @@ class WebContext:
                 db.init_db(conn)
                 try:
                     summary = scanner.scan_library_once(
-                        conn, on_file=_on_file, should_stop=cancel.is_set,
+                        conn, on_file=_on_file, should_stop=cancel.is_set, on_progress=_on_progress,
                     )
                 finally:
                     conn.close()
@@ -576,6 +646,7 @@ class WebContext:
             started_at, finished_at = state.started_at, state.finished_at
             summary, current_filename = state.summary, state.current_filename
             cancel_requested = state.cancel_requested
+            phase, done, total = state.phase, state.done, state.total
 
         cancelled = bool(summary and summary.get("cancelled"))
         if started_at is None:
@@ -603,6 +674,7 @@ class WebContext:
             "started_at": started_at, "finished_at": finished_at,
             "current_filename": current_filename, "elapsed_seconds": elapsed_seconds,
             "cancel_requested": cancel_requested, "cancelled": cancelled,
+            "phase": phase if running else None, "done": done, "total": total,
         }
 
     # -- library filesystem watcher (point 12) ------------------------------

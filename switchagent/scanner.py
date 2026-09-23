@@ -432,6 +432,7 @@ def scan_once(conn) -> dict:
 def scan_library_once(
     conn, *, on_file: Optional[Callable[[str], None]] = None,
     should_stop: Optional[Callable[[], bool]] = None,
+    on_progress: Optional[Callable[[str, int, Optional[int]], None]] = None,
 ) -> dict:
     """One full pass over config.LIBRARY_DIR. Safe to call repeatedly --
     items unchanged since the last pass (by size+mtime for files, or the
@@ -449,6 +450,12 @@ def scan_library_once(
     UI progress hook (see switchagent/web/context.py's
     run_scan_in_background); scan_library_once() itself has no other use
     for it and works identically with or without one.
+
+    `on_progress(phase, done, total)`, if given, says where the pass is,
+    for a progress bar (web/context.py): "walking" while the folders are
+    still being enumerated -- done counts entries seen, total is None, since
+    nobody knows yet -- then "indexing" over every item found (done of
+    total), then "finishing" for the whole-library passes at the end.
 
     `should_stop`, if given, is polled at every step -- while enumerating
     the tree as well as per item -- and makes this return early with
@@ -483,6 +490,12 @@ def scan_library_once(
 
     def _stopped() -> bool:
         return should_stop is not None and should_stop()
+
+    def _progress(phase: str, done: int, total: Optional[int]) -> None:
+        if on_progress is not None:
+            on_progress(phase, done, total)
+
+    _progress("walking", 0, None)
 
     seen_absolute_paths: set[str] = set()
     # Which of those were inserted, not just refreshed -- see the
@@ -570,12 +583,16 @@ def scan_library_once(
     # Folders called "switch" are noted during the SAME walk rather than a
     # second one: on a network share this enumeration is most of a scan.
     switch_dirs: list[Path] = []
+    walked = 0
     for root in library_dirs:
         if not root.is_dir():
             continue
         for candidate in root.rglob("*"):
             if _stopped():
                 return _cancelled()
+            walked += 1
+            if walked % 25 == 0:
+                _progress("walking", walked, None)
             if candidate.name.lower() == sd_files.SD_ROOT_DIR:
                 if candidate.is_dir():
                     switch_dirs.append(candidate)
@@ -589,9 +606,15 @@ def scan_library_once(
     # switch/ folders already unpacked in the library (a homebrew port's
     # .nro often ships that way, next to an archive of its data): each is
     # one SD_FILES item, fingerprinted exactly like a mod folder.
-    for folder in sd_files.find_sd_folders(switch_dirs, exclude=mod_folders):
+    sd_folders = sd_files.find_sd_folders(switch_dirs, exclude=mod_folders)
+    to_index = len(sd_folders) + len(candidate_files)
+    indexed = 0
+    _progress("indexing", 0, to_index)
+    for folder in sd_folders:
         if _stopped():
             return _cancelled()
+        indexed += 1
+        _progress("indexing", indexed, to_index)
         abs_path = str(folder)
         seen_absolute_paths.add(abs_path)
         if on_file is not None:
@@ -637,6 +660,8 @@ def scan_library_once(
     for abs_path_obj in candidate_files:
         if _stopped():
             return _cancelled()
+        indexed += 1
+        _progress("indexing", indexed, to_index)
         abs_path = str(abs_path_obj)
         seen_absolute_paths.add(abs_path)
         if on_file is not None:
@@ -721,6 +746,8 @@ def scan_library_once(
             newly_indexed_paths.add(abs_path)
         else:
             updated_count += 1
+
+    _progress("finishing", to_index, to_index)
 
     # Before anything is called stale: a row this pass never visited may be
     # the very file it DID visit under another path spelling (a Library

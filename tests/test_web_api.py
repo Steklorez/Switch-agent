@@ -525,7 +525,7 @@ def test_library_folders_can_be_changed_while_a_scan_is_running(client, web_ctx,
 
     started, release = threading.Event(), threading.Event()
 
-    def _slow_scan(conn, *, on_file=None, should_stop=None):
+    def _slow_scan(conn, *, on_file=None, should_stop=None, on_progress=None):
         started.set()
         # Behaves like the real thing: polls for the stop flag rather than
         # running to completion, so "cancel" is what actually ends it.
