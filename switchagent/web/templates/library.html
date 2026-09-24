@@ -151,6 +151,26 @@
     Rescan
   </button>
 </div>
+<script>
+  // On a wide window the filters move into the top bar, freeing the whole
+  // row they took above the games; on a narrower one there is no room up
+  // there, so they stay here. The same element moves (listeners, typed
+  // text and all), and before the first paint, so it never jumps.
+  (function () {
+    const toolbar = document.querySelector(".library-toolbar");
+    const slot = document.getElementById("topbar-tools");
+    if (!toolbar || !slot) return;
+    const home = document.createComment("library-toolbar");
+    toolbar.before(home);
+    const wide = window.matchMedia("(min-width: 1400px)");
+    function place() {
+      if (wide.matches) slot.appendChild(toolbar); else home.after(toolbar);
+      toolbar.classList.toggle("in-topbar", wide.matches);
+    }
+    wide.addEventListener("change", place);
+    place();
+  })();
+</script>
 {# Everything that happens on its own in the background -- the library
    scan (at startup, and whenever a Library folder changes), cover
    downloads, the console's "Installed games" read that "On Switch" badges
