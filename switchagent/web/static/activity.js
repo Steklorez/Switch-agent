@@ -159,7 +159,7 @@
       });
       return true;
     }
-    if (covers.error || coverImageErrors) {
+    if (covers.failed || coverImageErrors) {
       retryBtn.hidden = false;
       show(rows.covers, {
         state: "error", title: "Covers",
@@ -188,15 +188,26 @@
   }
 
   function renderSummary(active, data) {
-    panel.dataset.state = active ? "busy" : "idle";
-    summaryText.textContent = active ? "Loading…" : "Everything is loaded";
+    const scanFailed = data.scan.status === "failed";
+    const coversFailed = !!data.covers.failed || coverImageErrors > 0;
+    const needsFolder = !!document.getElementById("onboarding-library_not_configured");
+    panel.dataset.state = scanFailed || coversFailed || needsFolder ? "error" : active ? "busy" : "idle";
+    summaryText.textContent = scanFailed ? "Library scan failed" : needsFolder ? "Choose a Library folder" :
+      data.scan.running ? (data.scan.total && data.scan.phase === "indexing"
+        ? `Scanning games · ${number.format(data.scan.done)} / ${number.format(data.scan.total)}`
+        : `Finding games · ${number.format(data.scan.done || 0)} found`) :
+      data.covers.running ? (data.covers.total
+        ? `Loading covers · ${number.format(data.covers.ready)} / ${number.format(data.covers.total)}`
+        : "Loading covers…") :
+      data.devices.some(d => d.phase) ? "Checking Switch games…" :
+      coversFailed ? "Some covers unavailable" : "Library ready";
 
     const facts = [];
     const cards = document.querySelectorAll(".library-tiles > .game-group, .library-tiles > .card").length;
     facts.push(plural(cards, "game", "games"));
     const c = data.covers;
     if (!c.enabled) facts.push("covers off");
-    else if (c.total) {
+    else if (c.total && cards) {
       facts.push(`${number.format(c.ready)}/${number.format(c.total)} covers`
         + (!c.running && c.not_found ? ` (${c.not_found} not in TitleDB)` : ""));
     }
@@ -209,7 +220,10 @@
         facts.push(`${d.label} connected`);
       }
     }
-    summaryFacts.textContent = facts.join(" · ");
+    const scanError = /library directories do not exist/i.test(data.scan.error || "")
+      ? "Library folder is missing. Choose it in Settings." : data.scan.error;
+    summaryFacts.textContent = scanFailed ? scanError || "Use Rescan to try again." :
+      needsFolder ? "Set the folder in Settings to find games." : facts.join(" · ");
     summaryFacts.title = summaryFacts.textContent;  // cut short on a narrow screen
 
     if (!topline) return;

@@ -44,6 +44,9 @@ def test_inventory_request_only_uses_existing_device_worker(tmp_path):
         assert response.status_code == 202, response.text
         row = _ready_job(client, response.json()["job_id"])
         assert row["state"] == "ready"
+        assert row["items_done"] == row["items_total"] == 1
+        save = client.get("/api/backups/state").json()["inventory"]["mock-switch-parent"]["saves"][0]
+        assert len(save["cover_id"]) == 16
         assert calls and set(calls) == {"switchagent-worker"}
     finally:
         ctx.stop_worker()
@@ -62,6 +65,7 @@ def test_selected_save_downloads_as_valid_archive(tmp_path):
         assert created.status_code == 202, created.text
         snapshot_job = _ready_job(client, created.json()["job_id"])
         assert snapshot_job["state"] == "ready", snapshot_job["error"]
+        assert snapshot_job["items_done"] == snapshot_job["items_total"] == 1
         snapshot_id = snapshot_job["result"][0]["id"]
         archived = client.post("/api/backups/archives", json={"snapshot_ids": [snapshot_id]})
         assert archived.status_code == 202, archived.text

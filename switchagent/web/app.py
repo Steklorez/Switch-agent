@@ -21,6 +21,7 @@ from fastapi.templating import Jinja2Templates
 
 from .. import __version__, db
 from .. import title_id as title_id_mod
+from ..covers import cover_key
 from ..backup_manager import BackupError, _ensure_plain_path
 from ..mtp.base import read_path
 from ..mtp.errors import InvalidOperationError
@@ -166,6 +167,7 @@ _TEMPLATES.env.filters["mtime"] = _format_mtime
 _TEMPLATES.env.globals["app_version"] = __version__
 _TEMPLATES.env.globals["static_url"] = _static_url
 _TEMPLATES.env.filters["game_name"] = title_id_mod.strip_release_tags
+_TEMPLATES.env.filters["cover_key"] = cover_key
 
 
 # ---------------------------------------------------------------------------
@@ -792,7 +794,22 @@ def create_app(ctx: WebContext) -> FastAPI:
         # falls back to a TitleDB name search when the TITLE_ID itself isn't
         # found there (a release filename's bracketed TITLE_ID is never more
         # than a low-confidence guess, see title_id.py's from_filename).
-        ctx.covers.submit([(g["base_title_id"], g["name"]) for g in view["games"]], retry=retry)
+        items = [(cover_key(g["name"], g["base_title_id"]), g["name"]) for g in view["games"]]
+        backup = ctx.backup_state()
+        for groups in backup["inventory"].values():
+            for kind in ("saves", "games"):
+                for row in groups.get(kind, []):
+                    path = row.get("path") or ""
+                    parts = path.split("/")
+                    name = parts[1] if kind == "saves" and len(parts) >= 3 else row.get("name") or ""
+                    items.append((row.get("cover_id"), name))
+        for row in backup["catalog"]["snapshots"]:
+            parts = (row.get("source_path") or "").split("/")
+            if len(parts) >= 3:
+                items.append((row.get("cover_id"), parts[1]))
+        for row in backup["catalog"]["games"]:
+            items.append((row.get("cover_id"), row.get("name") or ""))
+        ctx.covers.submit(items, retry=retry)
         return {"queued": True}
 
     @app.get("/api/covers/status")

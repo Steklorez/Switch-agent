@@ -168,7 +168,7 @@ class BackupManager:
             stack.extend((c.path, depth + 1) for c in reversed(children) if c.is_dir)
 
     def inventory_saves(self, backend: MtpBackend, *, storage: str = 'SAVES',
-                        cancel=None) -> list[dict]:
+                        cancel=None, on_row=None) -> list[dict]:
         """List DBI group/game/profile roots, isolating unsafe save subtrees."""
         session = backend.session_token
         rows = []
@@ -185,6 +185,8 @@ class BackupManager:
                              'size': None, 'file_count': None, 'identity': None,
                              'selectable': False, 'session_token': session,
                              'reason': 'Cannot safely enumerate this save group'})
+                if on_row:
+                    on_row(rows[-1], len(rows))
                 continue
             for game in games:
                 _check_cancel(cancel)
@@ -199,6 +201,8 @@ class BackupManager:
                                  'size': None, 'file_count': None, 'identity': None,
                                  'selectable': False, 'session_token': session,
                                  'reason': 'Cannot safely enumerate this game folder'})
+                    if on_row:
+                        on_row(rows[-1], len(rows))
                     continue
                 for save in saves:
                     _check_cancel(cancel)
@@ -255,6 +259,8 @@ class BackupManager:
                             backend._check_read_session(session)
                             row['reason'] = 'Cannot safely enumerate this save'
                     rows.append(row)
+                    if on_row:
+                        on_row(row, len(rows))
         return rows
 
     def inventory_games(self, backend: MtpBackend, *, storage: str = 'INSTALLED_GAMES',
@@ -432,12 +438,19 @@ class BackupManager:
         return manifest
 
     def create_snapshots(self, backend: MtpBackend, paths: Iterable[str], *,
-                         storage: str = 'SAVES', cancel=None, progress=None) -> list[dict]:
+                         storage: str = 'SAVES', cancel=None, progress=None,
+                         on_snapshot=None) -> list[dict]:
         selected = list(paths)
         if not selected or len(set(selected)) != len(selected):
             raise BackupError('select unique save paths')
-        return [self.create_snapshot(backend, path, storage=storage,
-                                     cancel=cancel, progress=progress) for path in selected]
+        snapshots = []
+        for path in selected:
+            snapshot = self.create_snapshot(backend, path, storage=storage,
+                                            cancel=cancel, progress=progress)
+            snapshots.append(snapshot)
+            if on_snapshot:
+                on_snapshot(snapshot, len(snapshots), len(selected))
+        return snapshots
 
     def _validate_file_table(self, manifest: dict) -> None:
         if not isinstance(manifest, dict) or manifest.get('format') != 'switchagent-backup' \

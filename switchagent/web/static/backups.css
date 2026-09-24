@@ -1,6 +1,7 @@
 .backup-lab { min-width: 0; }
 .backup-lab [hidden] { display: none !important; }
 .backup-lab h2, .backup-lab h3, .backup-lab h4 { margin: 0 0 8px; }
+.backup-lab h2 { font-size: clamp(1.4rem, 3vw, 2rem); }
 .backup-lab p { margin: 0; }
 .backup-heading, .backup-section-heading { display: flex; justify-content: space-between; align-items: start; flex-wrap: wrap; gap: 12px; }
 .backup-heading { margin-bottom: 14px; }
@@ -11,6 +12,17 @@
 .backup-notice { margin-bottom: 14px; }
 .backup-device-bar, .backup-toolbar, .backup-selection-bar, .backup-upload-form { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; }
 .backup-device-bar { margin-bottom: 18px; }
+.backup-overview { display: flex; align-items: flex-start; gap: 12px; padding: 14px; margin-bottom: 16px; border: 1px solid var(--border); border-radius: 12px; background: var(--surface); }
+.backup-overview[data-state=busy] { border-color: var(--accent); }
+.backup-overview[data-state=error] { border-color: var(--danger); }
+.backup-overview-dot { width: 10px; height: 10px; margin-top: 6px; flex: none; border-radius: 50%; background: var(--ok); }
+.backup-overview[data-state=busy] .backup-overview-dot { background: var(--accent); animation: backup-pulse 1.4s ease-in-out infinite; }
+.backup-overview[data-state=error] .backup-overview-dot { background: var(--danger); }
+.backup-overview-copy { flex: 1; min-width: 0; }
+.backup-overview-copy strong { display: block; margin-bottom: 3px; }
+.backup-overview progress { display: block; width: 100%; height: 8px; margin-top: 10px; }
+.backup-overview progress[hidden] { display: none; }
+@keyframes backup-pulse { 50% { opacity: .35; } }
 .backup-prepared-plan { display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 10px; margin-bottom: 16px; padding: 12px; border: 1px solid var(--warn); border-radius: 10px; background: var(--surface); }
 .backup-prepared-actions { display: flex; gap: 8px; flex-wrap: wrap; }
 .backup-device-bar label, .backup-toolbar label, .backup-restore-card label, .backup-upload-form label { font-weight: 600; font-size: .9rem; }
@@ -27,7 +39,11 @@
 .backup-row, .backup-restore-card, .backup-upload-form, .backup-activity { border: 1px solid var(--border); background: var(--surface); border-radius: 11px; padding: 12px; min-width: 0; }
 .backup-row { display: flex; align-items: center; gap: 12px; }
 .backup-row input[type=checkbox] { flex: 0 0 auto; width: 20px; height: 20px; accent-color: var(--accent); }
+.backup-cover-shell { display: grid; place-items: center; position: relative; overflow: hidden; width: 44px; height: 62px; border-radius: 5px; background: var(--surface-2); flex: none; }
+.backup-cover-placeholder { font-size: 1.3rem; font-weight: 700; color: var(--text-dim); }
+.backup-cover-shell.has-cover .backup-cover-placeholder { display: none; }
 .backup-cover { width: 44px; height: 62px; object-fit: cover; border-radius: 5px; background: var(--surface-2); flex: none; }
+.backup-cover[hidden] { display: none; }
 .backup-row-main { min-width: 0; flex: 1 1 auto; }
 .backup-row-title { font-weight: 600; overflow-wrap: anywhere; }
 .backup-row-meta { color: var(--text-dim); font-size: .8rem; line-height: 1.4; overflow-wrap: anywhere; }
@@ -42,7 +58,10 @@
 .backup-restore-card h4 { margin: 0; }
 .backup-panel > h4 { margin-top: 22px; }
 .backup-activity { margin-top: 22px; }
-.backup-activity h3 { margin-bottom: 12px; }
+.backup-activity summary, .backup-more-options summary { cursor: pointer; font-weight: 600; }
+.backup-activity .backup-list { margin-top: 12px; }
+.backup-more-options { margin-top: 18px; }
+.backup-more-options > summary { color: var(--text-dim); padding: 10px 0; }
 .backup-job-progress { width: 100%; height: 7px; border: none; background: var(--surface-2); border-radius: 5px; overflow: hidden; margin-top: 8px; }
 .backup-job-progress::-webkit-progress-bar { background: var(--surface-2); }
 .backup-job-progress::-webkit-progress-value { background: var(--accent); }
@@ -65,6 +84,8 @@
   .backup-selection-bar .btn, .backup-upload-form .btn, .backup-restore-card .btn { width: 100%; }
   .backup-prepared-actions, .backup-prepared-actions .btn { width: 100%; }
   .backup-row { gap: 8px; flex-wrap: wrap; }
+  #backup-save-list .backup-row, #backup-local-list .backup-row { flex-wrap: nowrap; }
   .backup-row-action { width: 100%; }
   .backup-message { bottom: calc(var(--nav-h) + 8px); }
 }
+@media (prefers-reduced-motion: reduce) { .backup-overview-dot { animation: none !important; } }

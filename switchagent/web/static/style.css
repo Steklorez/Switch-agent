@@ -186,6 +186,16 @@ a { color: var(--accent); text-decoration: none; }
   padding: 0 4px; font-size: 0.9rem; color: var(--text); white-space: nowrap;
 }
 .filter-checkbox input { width: 16px; height: 16px; accent-color: var(--accent); }
+.library-more-filters { position: relative; align-self: center; }
+.library-more-filters summary { cursor: pointer; min-height: 40px; display: flex; align-items: center; padding: 0 10px; color: var(--text-dim); }
+.library-more-filter-fields { display: flex; flex-wrap: wrap; gap: 8px; padding: 8px; border: 1px solid var(--border); border-radius: 10px; background: var(--surface); }
+@media (max-width: 640px) {
+  .library-toolbar, .toolbar-form { width: 100%; }
+  .toolbar-form .search-box { flex: 1 1 100%; }
+  .library-more-filters { order: 4; width: 100%; }
+  .library-more-filter-fields .filter-select { flex: 1 1 100%; }
+  .library-toolbar > .btn { flex: 1 1 100%; }
+}
 .scan-status { color: var(--text-dim); font-size: 0.85rem; margin-bottom: 12px;
   display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
 /* [hidden] must still win over the flex display above. */

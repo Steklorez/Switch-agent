@@ -65,6 +65,29 @@ def test_cover_falls_back_to_titledb_name_search_when_title_id_is_wrong(tmp_path
     assert covers.image_path(wrong_tid).read_bytes() == b"\xff\xd8\xfftest"
 
 
+def test_cover_without_title_id_uses_stable_name_key(tmp_path, monkeypatch):
+    monkeypatch.setattr(config, "DATA_DIR", tmp_path)
+    key = covers.cover_key("Demo Adventure")
+    assert key == covers.cover_key("Demo: Adventure")
+    assert key == covers.cover_key("Demo Adventure [0100000000011000][v0].nsp")
+    assert key != covers.cover_key("Another Game")
+
+    def download(url, limit):
+        if url == covers.TITLEDB:
+            return json.dumps({"1": {"id": "0100000000011000", "name": "Demo Adventure",
+                                      "iconUrl": "https://img-eshop.cdn.nintendo.net/icon.jpg"}}).encode()
+        return b"\xff\xd8\xfftest"
+
+    monkeypatch.setattr(covers, "download", download)
+    queue = covers.CoverQueue()
+    queue.submit([(key, "Demo Adventure")])
+    for _ in range(100):
+        if not queue.running:
+            break
+        time.sleep(.01)
+    assert covers.image_path(key).read_bytes() == b"\xff\xd8\xfftest"
+
+
 def test_cover_name_fallback_tolerates_close_but_inexact_names(tmp_path, monkeypatch):
     """A near-miss (one dropped letter) still resolves via difflib, but
     only because it clears the strict cutoff -- see _NAME_MATCH_CUTOFF."""

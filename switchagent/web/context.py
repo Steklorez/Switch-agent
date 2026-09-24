@@ -33,6 +33,7 @@ from pathlib import Path
 from typing import Callable, Optional
 
 from .. import config, db, queue_worker
+from ..covers import cover_key
 from ..backup_manager import BackupManager, _ensure_plain_path
 from ..mtp.base import DeviceInfo, MtpBackend
 from ..mtp.errors import DeviceNotFoundError
@@ -597,11 +598,24 @@ class WebContext:
 
     def backup_state(self) -> dict:
         with self._backup_lock:
-            return {"inventory": {key: dict(value) for key, value in self._backup_inventory.items()},
-                    "catalog": {key: list(value) for key, value in self._backup_catalog.items()},
+            inventory = {device: {kind: [self._backup_cover_row(row) for row in rows]
+                                  for kind, rows in groups.items()}
+                         for device, groups in self._backup_inventory.items()}
+            catalog = {key: [self._backup_cover_row(row) for row in rows]
+                       for key, rows in self._backup_catalog.items()}
+            return {"inventory": inventory,
+                    "catalog": catalog,
                     "jobs": [self._public_backup_job(row) for row in self._backup_jobs.values()],
                     "reservations": {key: dict(value) for key, value in self._restore_reservations.items()},
                     "paused": self.worker_paused.is_set()}
+
+    @staticmethod
+    def _backup_cover_row(row: dict) -> dict:
+        path = row.get("source_path") or row.get("path") or ""
+        parts = path.split("/")
+        name = parts[1] if len(parts) >= 3 else row.get("name") or ""
+        key = cover_key(name, (row.get("identity") or {}).get("title_id") or row.get("title_id"))
+        return {**row, "cover_id": key} if key else dict(row)
 
     @staticmethod
     def _public_backup_job(job: dict) -> dict:
@@ -641,6 +655,8 @@ class WebContext:
             self._backup_jobs[job_id] = {"id": job_id, "action": action,
                                          "device_id": device_id, "params": params,
                                          "state": "queued", "done": 0, "total": None,
+                                         "items_done": 0,
+                                         "items_total": len(params.get("paths", [])) if action == "create_snapshots" else None,
                                          "result": None, "error": None}
             self._backup_cancel[job_id] = threading.Event()
             self._backup_pending.append(job_id)
@@ -723,16 +739,21 @@ class WebContext:
                 backend.connect()
             progress = lambda done, total: self._set_backup_progress(job_id, done, total)
             if action == "inventory_saves":
-                result = self.backups.inventory_saves(backend, cancel=cancellation.is_set)
+                result = self.backups.inventory_saves(
+                    backend, cancel=cancellation.is_set,
+                    on_row=lambda _row, count: self._set_backup_items(job_id, count, None))
                 with self._backup_lock:
                     self._backup_inventory.setdefault(device_id, {})["saves"] = result
+                self._set_backup_items(job_id, len(result), len(result))
             elif action == "inventory_games":
                 result = self.backups.inventory_games(backend, cancel=cancellation.is_set)
                 with self._backup_lock:
                     self._backup_inventory.setdefault(device_id, {})["games"] = result
             elif action == "create_snapshots":
                 result = self.backups.create_snapshots(backend, params["paths"],
-                                                       cancel=cancellation.is_set, progress=progress)
+                                                       cancel=cancellation.is_set, progress=progress,
+                                                       on_snapshot=lambda _row, done, total:
+                                                       self._set_backup_items(job_id, done, total))
             elif action == "export_games":
                 result = self.backups.export_games(backend, params["paths"],
                                                    cancel=cancellation.is_set, progress=progress)
@@ -796,6 +817,10 @@ class WebContext:
                 self._backup_catalog = self._load_backup_catalog()
         except Exception as exc:
             log.exception("backup operation failed")
+            if action == "import_archive":
+                # A terminal job must mean its temporary upload is gone;
+                # clients can observe failed before the outer finally runs.
+                self._owned_import_path(params["source"]).unlink(missing_ok=True)
             with self._backup_lock:
                 job["error"] = str(exc)
                 job["state"] = "cancelled" if cancellation.is_set() else "failed"
@@ -816,6 +841,11 @@ class WebContext:
         with self._backup_lock:
             self._backup_jobs[job_id]["done"] = done
             self._backup_jobs[job_id]["total"] = total
+
+    def _set_backup_items(self, job_id: str, done: int, total: int | None) -> None:
+        with self._backup_lock:
+            self._backup_jobs[job_id]["items_done"] = done
+            self._backup_jobs[job_id]["items_total"] = total
 
     # -- library scan (point 16: must not block the UI) --------------------
 

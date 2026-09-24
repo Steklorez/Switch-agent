@@ -37,12 +37,13 @@
   {% if family %}<a class="tile-art" href="/games/{{ family }}" aria-label="{{ e.name }} — details">
   {% else %}<button type="button" class="tile-art card-body" data-detail-url="/api/library/{{ e.id }}" aria-label="{{ e.name }} — details">{% endif %}
     <span class="cover-placeholder" aria-hidden="true">{{ e.name[:1] }}</span>
-    {% if family or e.base_title_id %}<img class="game-cover" data-cover-id="{{ family or e.base_title_id }}" alt="" hidden>{% endif %}
+    {% set art_id = e.name|cover_key(family or e.base_title_id) %}
+    {% if art_id %}<img class="game-cover" data-cover-id="{{ art_id }}" alt="" hidden>{% endif %}
   {% if family %}</a>{% else %}</button>{% endif %}
   <label class="card-checkbox">
     <input type="checkbox" class="select-box" value="{{ e.id }}" data-name="{{ e.name }}"
            data-size="{{ e.size }}" data-destination="{{ destination_label(e) }}"
-           data-cover-id="{{ family or e.base_title_id or '' }}"
+           data-cover-id="{{ art_id or '' }}"
            data-existing-copy="{{ '1' if (e.confirmed_on_device or e.status in ('INSTALLED', 'INSTALLED_UNVERIFIED')) else '' }}"
            {% if family %}data-family="{{ family }}" data-role="base" data-family-name="{{ family_name }}"{% endif %}
            {{ "disabled" if not e.can_install }}>
@@ -110,42 +111,38 @@
 {% endif %}
 <div class="library-toolbar">
   <form method="get" action="/" class="toolbar-form">
-    <input type="search" name="search" placeholder="Search games..." value="{{ search }}" class="search-box">
-    <select name="format" class="filter-select" onchange="this.form.submit()">
-      <option value="">All formats</option>
-      {% for fmt in ["NSP","NSZ","XCI","XCZ"] %}
-      <option value="{{ fmt }}" {{ "selected" if format_filter == fmt }}>{{ fmt }}</option>
-      {% endfor %}
-    </select>
-    <select name="sort" class="filter-select" onchange="this.form.submit()">
-      {% for key, label in [("date_added","Recently added"), ("name","Name"), ("size","Size"),
-                             ("last_scanned","Last scanned"), ("date_modified","Date modified")] %}
-      <option value="{{ key }}" {{ "selected" if sort == key }}>{{ label }}</option>
-      {% endfor %}
-    </select>
-    {# W3-003: family-level filters, applied on top of the controls above.
-       Only meaningful for the grouped "Games" kind -- the flat Updates/DLC/
-       Mods kinds have no families to filter. #}
-    <select name="filter" class="filter-select" onchange="this.form.submit()">
-      {% for key, label in [("all","All"), ("base","Base Games"), ("updates","With updates"),
-                             ("dlc","With DLC"), ("mods","With mods"), ("duplicates","Duplicates")] %}
-      <option value="{{ key }}" {{ "selected" if group_filter == key }}>{{ label }}</option>
-      {% endfor %}
-    </select>
-    {# Independent of `filter` above -- an additive checkbox, not one more
-       mutually-exclusive option, so "not yet installed" can combine with
-       e.g. "With DLC" instead of forcing a choice between them. Keyed off
-       SwitchAgent's own copy record (services.list_library_view's
-       `not_installed`), never DBI's confirmed-on-device signal -- see
-       that function's own docstring for why (DBI's report only refreshes
-       when the user manually reopens it on-console, so it can't answer
-       "what do I still need to install"). #}
+    <input type="search" name="search" placeholder="Search games..." value="{{ search }}" class="search-box" aria-label="Search games">
+    {# This filters by install state; it can combine with the extra filters. #}
     <label class="filter-checkbox">
       <input type="checkbox" name="not_installed" value="1" onchange="this.form.submit()"
              {{ "checked" if not_installed }}>
       Not installed
     </label>
-    <button type="submit" class="btn btn-secondary">Filter</button>
+    <details class="library-more-filters" {{ 'open' if format_filter or sort != 'date_added' or group_filter != 'all' }}>
+      <summary>Filters and sort</summary>
+      <div class="library-more-filter-fields">
+        <select name="format" class="filter-select" onchange="this.form.submit()">
+          <option value="">All formats</option>
+          {% for fmt in ["NSP","NSZ","XCI","XCZ"] %}
+          <option value="{{ fmt }}" {{ "selected" if format_filter == fmt }}>{{ fmt }}</option>
+          {% endfor %}
+        </select>
+        <select name="sort" class="filter-select" onchange="this.form.submit()">
+          {% for key, label in [("date_added","Recently added"), ("name","Name"), ("size","Size"),
+                                 ("last_scanned","Last scanned"), ("date_modified","Date modified")] %}
+          <option value="{{ key }}" {{ "selected" if sort == key }}>{{ label }}</option>
+          {% endfor %}
+        </select>
+        <select name="filter" class="filter-select" onchange="this.form.submit()">
+          {% for key, label in [("all","All"), ("base","Base Games"), ("updates","With updates"),
+                                 ("dlc","With DLC"), ("mods","With mods"), ("duplicates","Duplicates")] %}
+          <option value="{{ key }}" {{ "selected" if group_filter == key }}>{{ label }}</option>
+          {% endfor %}
+        </select>
+        <button type="submit" class="btn btn-secondary">Apply</button>
+      </div>
+    </details>
+    <button type="submit" class="btn btn-secondary library-search-submit">Search</button>
   </form>
   <button id="rescan-btn" class="btn btn-secondary rescan-trigger" data-scan-url="/api/scan" data-status-url="/api/scan/status">
     Rescan

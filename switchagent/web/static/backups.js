@@ -14,6 +14,8 @@
   let uploadRequest = null;
   let messageTimer;
   let polling = false;
+  let coverSignature = "";
+  let readyCovers = new Set();
 
   function el(tag, className, value) {
     const node = document.createElement(tag);
@@ -30,7 +32,7 @@
   }
   function formatDate(seconds) {
     if (!Number.isFinite(Number(seconds))) return "Date unknown";
-    return new Date(Number(seconds) * 1000).toLocaleString();
+    return new Date(Number(seconds) * 1000).toLocaleString(undefined, { dateStyle: "medium", timeStyle: "short" });
   }
   function labelPath(path) {
     const parts = String(path || "").split("/");
@@ -66,18 +68,22 @@
   function gameExports() { return state.catalog?.games || []; }
   function clearSelection(kind) { selected[kind].clear(); render(); }
   function titleId(row) {
-    const id = row?.identity?.title_id || row?.title_id;
+    const id = row?.cover_id || row?.identity?.title_id || row?.title_id;
     return /^[0-9a-f]{16}$/i.test(String(id || "")) ? String(id).toUpperCase() : null;
   }
   function cover(row) {
     const id = titleId(row);
-    if (!id) return null;
+    const shell = el("span", "backup-cover-shell");
+    shell.append(el("span", "backup-cover-placeholder", (row?.name || row?.source_path?.split("/")[1] || "?").charAt(0).toUpperCase()));
+    if (!id || !readyCovers.has(id)) return shell;
     const image = el("img", "backup-cover");
     image.alt = "";
     image.loading = "lazy";
     image.onerror = () => { image.hidden = true; };
+    image.onload = () => { image.hidden = false; shell.classList.add("has-cover"); };
     image.src = `/api/covers/${encodeURIComponent(id)}`;
-    return image;
+    shell.append(image);
+    return shell;
   }
   function empty(list, text) { list.replaceChildren(el("p", "empty-state", text)); }
 
@@ -88,7 +94,7 @@
       input.type = "checkbox";
       input.disabled = !canSelect;
       input.checked = canSelect && selected[kind].has(kind === "local" ? item.id : item.path);
-      input.setAttribute("aria-label", `Select ${title}`);
+      input.setAttribute("aria-label", `Select ${title}` + (kind === "local" ? ` saved ${formatDate(item.created_at)}` : ""));
       input.addEventListener("change", () => {
         const key = kind === "local" ? item.id : item.path;
         if (input.checked) selected[kind].add(key); else selected[kind].delete(key);
@@ -96,8 +102,7 @@
       });
       row.append(input);
     }
-    const image = cover(item);
-    if (image) row.append(image);
+    if (kind || item.cover_id) row.append(cover(item));
     const main = el("div", "backup-row-main");
     main.append(el("div", "backup-row-title", title), el("div", "backup-row-meta", meta));
     if (item.reason) main.append(el("div", "backup-row-reason", item.reason));
@@ -113,19 +118,20 @@
       .map(r => String(r.path).split("/")[2]))].sort((a, b) => a.localeCompare(b));
     filter.replaceChildren(new Option("All profiles", ""), ...names.map(name => new Option(name, name)));
     filter.value = names.includes(prior) ? prior : "";
+    filter.hidden = names.length < 2;
+    filter.previousElementSibling.hidden = names.length < 2;
     const shown = rows.filter(r => !filter.value || String(r.path || "").split("/")[2] === filter.value);
     const list = $("backup-save-list");
-    if (!shown.length) { empty(list, rows.length ? "No saves for this profile." : "No saves found. Scan a connected Switch."); return; }
+    if (!shown.length) { empty(list, rows.length ? "No saves for this profile." : "Press Find saves to list console saves."); return; }
     list.replaceChildren(...shown.map(item => {
       const parts = String(item.path || "").split("/");
       const title = parts.length === 3 ? parts[1] : (item.name || item.path);
       const profile = parts.length === 3 ? parts[2] : "Profile unknown";
-      const count = item.file_count == null ? "Files not counted" : `${item.file_count} files`;
-      const type = item.identity?.save_type || "Type unknown";
+      const count = item.file_count == null ? "Files not counted" : `${item.file_count} ${item.file_count === 1 ? "file" : "files"}`;
       const lastCopy = snapshots().find(copy => copy.source_path === item.path &&
         copy.origin?.device_fingerprint === device?.device_fingerprint);
       const copyLabel = lastCopy ? ` · Last copy ${formatDate(lastCopy.created_at)}` : " · No local copy";
-      return rowShell(item, "saves", title, `${profile} · ${parts[0] || "Saves"} · ${type} · ${formatBytes(item.size)} · ${count}${copyLabel}`, item.selectable === true);
+      return rowShell(item, "saves", title, `${profile} · ${formatBytes(item.size)} · ${count}${copyLabel}`, item.selectable === true);
     }));
   }
   function localRows() {
@@ -135,8 +141,9 @@
     list.replaceChildren(...rows.map(item => {
       const source = item.source_path || "";
       const size = Array.isArray(item.files) ? item.files.reduce((sum, file) => sum + Number(file.size || 0), 0) : null;
-      const origin = item.origin?.device_fingerprint ? `Device ${item.origin.device_fingerprint}` : "Origin unknown";
-      const meta = `${formatDate(item.created_at)} · ${formatBytes(size)} · ${item.files?.length ?? "Unknown"} files · ${origin}`;
+      const count = item.files?.length;
+      const meta = `${formatDate(item.created_at)} · ${formatBytes(size)} · ` +
+        (count == null ? "Files not counted" : `${count} ${count === 1 ? "file" : "files"}`);
       return rowShell(item, "local", labelPath(source), meta);
     }));
   }
@@ -175,10 +182,13 @@
     };
     $("backup-save-selection").textContent = summary(saves);
     $("backup-game-selection").textContent = summary(games);
+    $("backup-clear-saves").hidden = selected.saves.size === 0;
+    $("backup-clear-games").hidden = selected.games.size === 0;
     $("backup-copy-saves").disabled = saves.length === 0 || !chosenDevice();
     $("backup-export-games").disabled = games.length === 0 || !chosenDevice();
     const availableLocal = new Set(snapshots().map(item => item.id));
     for (const id of selected.local) if (!availableLocal.has(id)) selected.local.delete(id);
+    $("backup-clear-local").hidden = selected.local.size === 0;
     $("backup-download-selected").disabled = selected.local.size === 0;
     restoreChoices();
   }
@@ -215,8 +225,7 @@
       restore_diagnostics: "Check restore support"
     };
     list.replaceChildren(...jobs.map(job => {
-      const row = rowShell(job, null, names[job.action] || "Backup task", job.error ||
-        (job.total == null ? `${formatBytes(job.done)} processed · total unknown` : `${formatBytes(job.done)} / ${formatBytes(job.total)}`));
+      const row = rowShell(job, null, names[job.action] || "Backup task", jobDetail(job));
       const tag = el("span", `backup-state backup-state-${job.state}`, job.state === "ready" ? "Ready" :
         job.state === "running" ? "Working" : job.state === "queued" ? "Waiting" :
         job.state === "cancelled" ? "Cancelled" : "Failed");
@@ -234,14 +243,82 @@
           });
           row.append(cancel);
         }
-        if (job.total != null && job.total > 0) {
+        if ((job.items_total != null && job.items_total > 0) || (job.total != null && job.total > 0)) {
           const progress = el("progress", "backup-job-progress");
-          progress.max = job.total; progress.value = Math.min(job.done || 0, job.total);
+          progress.max = job.items_total || job.total;
+          progress.value = Math.min(job.items_total != null ? job.items_done || 0 : job.done || 0, progress.max);
           row.querySelector(".backup-row-main").append(progress);
         }
       }
       return row;
     }));
+  }
+  function jobDetail(job) {
+    if (job.error) return job.error;
+    if (job.action === "inventory_saves") {
+      return job.state === "ready" ? `${job.items_done || 0} saves found` :
+        `${job.items_done || 0} saves found so far · total cannot be estimated yet`;
+    }
+    if (job.action === "create_snapshots") {
+      const done = job.items_done || 0, total = job.items_total || 0;
+      const bytes = job.total > 0 ? ` · current save ${formatBytes(job.done)} / ${formatBytes(job.total)}` : "";
+      return `${done} of ${total} copies saved · ${Math.max(0, total - done)} remaining${bytes}`;
+    }
+    if (job.state === "queued") return "Waiting to start";
+    if (job.state === "ready") return "Finished";
+    return job.total == null ? `${formatBytes(job.done)} processed` :
+      `${formatBytes(job.done)} / ${formatBytes(job.total)}`;
+  }
+  function renderOverview() {
+    const device = chosenDevice();
+    const jobs = [...(state.jobs || [])].reverse().filter(job => job.device_id === device || !job.device_id);
+    const active = jobs.find(job => job.state === "queued" || job.state === "running");
+    const latest = active || jobs[0];
+    const rows = inventory("saves");
+    const available = rows.filter(row => row.selectable).length;
+    const overview = $("backup-overview");
+    const title = $("backup-overview-title"), detail = $("backup-overview-detail");
+    const bar = $("backup-overview-progress");
+    overview.dataset.state = active ? "busy" : latest?.state === "failed" ? "error" : "idle";
+    if (!device) {
+      title.textContent = "Choose a connected Switch";
+      detail.textContent = `${snapshots().length} local copies remain available.`;
+    } else if (active) {
+      const action = {inventory_saves:"Finding saves", create_snapshots:"Backing up saves",
+        inventory_games:"Finding game packages", export_games:"Exporting game packages"}[active.action] || "Working";
+      title.textContent = active.state === "queued" ? `${action} · waiting` : action;
+      detail.textContent = jobDetail(active);
+    } else if (latest?.state === "failed") {
+      title.textContent = latest.action === "create_snapshots"
+        ? `Backup stopped · ${latest.items_done || 0} of ${latest.items_total || 0} saved`
+        : "Last task failed";
+      detail.textContent = (latest.error || "Open Recent activity for details.") +
+        (latest.action === "create_snapshots" && latest.items_done ? " Finished copies remain in Saved copies." : "");
+    } else if (latest?.action === "create_snapshots" && latest.state === "ready") {
+      title.textContent = `Backup complete · ${latest.items_done} of ${latest.items_total} copies saved`;
+      detail.textContent = "Open Saved copies to download a ZIP.";
+    } else if (rows.length) {
+      title.textContent = `${available} of ${rows.length} ${rows.length === 1 ? "save" : "saves"} ready to back up`;
+      detail.textContent = `${snapshots().length} local copies stored on this computer.`;
+    } else if (latest?.action === "inventory_saves" && latest.state === "ready") {
+      title.textContent = "No saves found on this Switch";
+      detail.textContent = "Check DBI and try Find saves again.";
+    } else {
+      title.textContent = "Ready to find saves";
+      detail.textContent = "Press Find saves to read the connected Switch.";
+    }
+    bar.hidden = !active;
+    if (active) {
+      const total = active.items_total || active.total;
+      if (total > 0) { bar.max = total; bar.value = active.items_total != null ? active.items_done || 0 : active.done || 0; }
+      else bar.removeAttribute("value");
+    }
+    $("backup-save-toolbar").hidden = rows.length === 0;
+    $("backup-save-actions").hidden = rows.length === 0;
+    $("backup-game-toolbar").hidden = inventory("games").length === 0;
+    $("backup-game-actions").hidden = inventory("games").length === 0;
+    $("backup-scan-saves").disabled = !device || !!active;
+    $("backup-scan-games").disabled = !device || !!active;
   }
   function reservationToReview() {
     const entries = Object.entries(state.reservations || {})
@@ -269,7 +346,7 @@
     $("backup-discard-plan").disabled = cancellingPlans.has(reservation.plan_id);
     banner.hidden = false;
   }
-  function render() { saveRows(); localRows(); gameRows(); updateSelection(); activityRows(); renderPreparedPlan(); }
+  function render() { saveRows(); localRows(); gameRows(); updateSelection(); activityRows(); renderPreparedPlan(); renderOverview(); }
   function download(url) {
     const anchor = el("a");
     anchor.href = url;
@@ -307,6 +384,15 @@
     polling = true;
     try {
       state = await api("/api/backups/state");
+      const signature = JSON.stringify({inventory: state.inventory, snapshots: state.catalog?.snapshots?.map(row => row.id)});
+      if (signature !== coverSignature) {
+        coverSignature = signature;
+        void post("/api/covers/refresh", {}).catch(() => {});
+      }
+      try {
+        const covers = await api("/api/covers/status");
+        readyCovers = new Set(covers.enabled ? covers.ready || [] : []);
+      } catch (_) { /* Backup actions remain available without artwork. */ }
       const reservedIds = new Set(Object.values(state.reservations || {}).map(item => item.plan_id));
       for (const id of cancellingPlans) if (!reservedIds.has(id)) cancellingPlans.delete(id);
       handleReadyJobs();

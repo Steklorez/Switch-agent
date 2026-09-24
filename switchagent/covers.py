@@ -1,5 +1,6 @@
 """TitleDB metadata and Nintendo icons, downloaded by one background thread."""
 import difflib
+import hashlib
 import json
 import logging
 import re
@@ -19,6 +20,25 @@ _ALLOWED = {"raw.githubusercontent.com", "img-eshop.cdn.nintendo.net", "assets.n
 # an exact match on title_id_mod.normalize_name() didn't already handle,
 # not to guess between genuinely different games.
 _NAME_MATCH_CUTOFF = 0.9
+
+
+def _cover_name(name: str) -> str:
+    plain = title_id_mod.strip_release_tags(name or "")
+    return re.sub(r"\.(?:nsp|nsz|xci|xcz)$", "", plain, flags=re.IGNORECASE).strip()
+
+
+def cover_key(name: str, title_id: str | None = None) -> str | None:
+    """Return a cache key for artwork, even when DBI has no TITLE_ID.
+
+    Name keys are display-only cache identities; they are never game or save
+    identities. CoverQueue still requires a strict TitleDB name match.
+    """
+    if title_id and re.fullmatch(r"[0-9A-Fa-f]{16}", str(title_id)):
+        return str(title_id).upper()
+    normalized = title_id_mod.normalize_name(_cover_name(name))
+    if not normalized:
+        return None
+    return "F" + hashlib.sha256(normalized.encode("utf-8")).hexdigest()[:15].upper()
 
 
 def allowed_url(url):
@@ -103,7 +123,7 @@ class CoverQueue:
                     tid = tid.upper()
                     self.requested.add(tid)
                     if name:
-                        self.names[tid] = title_id_mod.strip_release_tags(name)
+                        self.names[tid] = _cover_name(name)
                     if not image_path(tid).exists() and self.retry_after.get(tid, 0) < time.time():
                         self.pending.add(tid)
                         self.not_found.discard(tid)

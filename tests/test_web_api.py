@@ -2705,6 +2705,20 @@ def test_library_grouped_view_renders_real_variant_data(client, web_ctx):
     assert "0100000000010000" in mods_html
 
 
+def test_library_name_only_game_still_has_cover_lookup_key(client, web_ctx):
+    with db.open_db(web_ctx.db_path) as conn:
+        db.upsert_library_item(
+            conn, absolute_path=str(config.LIBRARY_DIR / "Mystery Voyage.nsp"),
+            item_type="FILE", file_type="NSP", size=10, mtime=0.0,
+            content_hash="mystery", title_id=None, title_id_source=None,
+            status="NEEDS_REVIEW", suggested_action=None, suggested_target=None,
+            content_type="GAME_PACKAGE", package_format="NSP",
+        )
+    html = client.get("/").text
+    assert "Mystery Voyage" in html
+    assert re.search(r'<img class="game-cover" data-cover-id="F[0-9A-F]{15}"', html)
+
+
 def test_games_view_marks_base_checkbox_and_shares_family_with_siblings(client, web_ctx):
     """Server-side half of the "select a game selects everything" UX:
     library.js cascades from data-role="base" to every checkbox sharing

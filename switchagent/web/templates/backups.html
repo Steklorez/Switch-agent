@@ -5,20 +5,24 @@
 <div class="backup-lab" id="backup-lab">
   <div class="backup-heading">
     <div>
-      <h2>Backups <span class="backup-lab-badge">Lab</span></h2>
-      <p class="backup-muted">Copy saves and installed game packages from a connected Switch.</p>
+      <h2>Back up your Switch saves</h2>
+      <p class="backup-muted">Find saves on your console, then keep a copy on this computer.</p>
     </div>
   </div>
-  <div class="backup-notice" role="note">
-    Save archives include an unsigned device identifier. It helps prevent an accidental mix-up, but does not prove where an edited archive came from. A completed transfer does not yet prove a game will load the restored save. Test the first restore on a disposable save.
-  </div>
-
   <div class="backup-device-bar">
     <label for="backup-device">Switch</label>
     <select id="backup-device" aria-label="Switch for backup operations"><option value="">Choose a connected Switch</option></select>
     <button type="button" class="btn btn-secondary" id="backup-refresh">Refresh</button>
     <span id="backup-device-status" class="backup-muted" role="status"></span>
   </div>
+  <section class="backup-overview" id="backup-overview" role="status" aria-live="polite">
+    <span class="backup-overview-dot" aria-hidden="true"></span>
+    <div class="backup-overview-copy">
+      <strong id="backup-overview-title">Choose a Switch to begin</strong>
+      <p id="backup-overview-detail" class="backup-muted">Your existing local copies remain available below.</p>
+      <progress id="backup-overview-progress" hidden></progress>
+    </div>
+  </section>
   <div id="backup-prepared-plan" class="backup-prepared-plan" role="status" hidden>
     <div>
       <strong>Restore is ready for review</strong>
@@ -31,33 +35,33 @@
   </div>
 
   <div class="backup-tabs" role="tablist" aria-label="Backup sections">
-    <button type="button" role="tab" id="backup-tab-saves" aria-controls="backup-panel-saves" aria-selected="true">Saves</button>
-    <button type="button" role="tab" id="backup-tab-local" aria-controls="backup-panel-local" aria-selected="false" tabindex="-1">Local copies</button>
-    <button type="button" role="tab" id="backup-tab-games" aria-controls="backup-panel-games" aria-selected="false" tabindex="-1">Games</button>
+    <button type="button" role="tab" id="backup-tab-saves" aria-controls="backup-panel-saves" aria-selected="true">On Switch</button>
+    <button type="button" role="tab" id="backup-tab-local" aria-controls="backup-panel-local" aria-selected="false" tabindex="-1">Saved copies</button>
+    <button type="button" role="tab" id="backup-tab-games" aria-controls="backup-panel-games" aria-selected="false" tabindex="-1">Game packages</button>
   </div>
 
   <section id="backup-panel-saves" class="backup-panel" role="tabpanel" aria-labelledby="backup-tab-saves">
     <div class="backup-section-heading">
-      <div><h3>Console saves</h3><p class="backup-muted">Choose one, several, or all available saves. Unknown sizes stay unknown until copied.</p></div>
-      <button type="button" class="btn btn-secondary" id="backup-scan-saves">Scan saves</button>
+      <div><h3>Saves on this Switch</h3><p class="backup-muted">Select the saves you want to keep.</p></div>
+      <button type="button" class="btn btn-primary" id="backup-scan-saves">Find saves</button>
     </div>
     <p class="backup-inline-notice">Close the game before copying its save so the files do not change during backup.</p>
-    <div class="backup-toolbar">
+    <div class="backup-toolbar" id="backup-save-toolbar" hidden>
       <label for="backup-profile-filter">Profile</label>
       <select id="backup-profile-filter"><option value="">All profiles</option></select>
       <button type="button" class="btn btn-secondary" id="backup-select-all-saves">Select all shown</button>
       <button type="button" class="btn btn-secondary" id="backup-clear-saves">Clear</button>
     </div>
     <div id="backup-save-list" class="backup-list" aria-live="polite"><p class="empty-state">Scan a connected Switch to see saves.</p></div>
-    <div class="backup-selection-bar">
+    <div class="backup-selection-bar" id="backup-save-actions" hidden>
       <span id="backup-save-selection">No saves selected</span>
-      <button type="button" class="btn btn-primary" id="backup-copy-saves" disabled>Create local copies</button>
+      <button type="button" class="btn btn-primary" id="backup-copy-saves" disabled>Back up selected saves</button>
     </div>
   </section>
 
   <section id="backup-panel-local" class="backup-panel" role="tabpanel" aria-labelledby="backup-tab-local" hidden>
     <div class="backup-section-heading">
-      <div><h3>Local copies</h3><p class="backup-muted">Ready copies are stored on this computer. You can download a ZIP or import a SwitchAgent ZIP.</p></div>
+      <div><h3>Saved on this computer</h3><p class="backup-muted">These copies are ready to download as a ZIP.</p></div>
     </div>
     <div class="backup-toolbar">
       <button type="button" class="btn btn-secondary" id="backup-select-all-local">Select all ready</button>
@@ -65,6 +69,8 @@
       <button type="button" class="btn btn-primary" id="backup-download-selected" disabled>Download selected ZIP</button>
     </div>
     <div id="backup-local-list" class="backup-list" aria-live="polite"><p class="empty-state">No local copies yet.</p></div>
+    <details class="backup-more-options">
+      <summary>Import or restore a save</summary>
     <form id="backup-upload-form" class="backup-upload-form">
       <label for="backup-upload-file">Import a SwitchAgent ZIP</label>
       <input id="backup-upload-file" type="file" accept=".zip,application/zip" required>
@@ -75,6 +81,7 @@
     <div class="backup-restore-card">
       <h4>Restore a save</h4>
       <p class="backup-muted">A local copy replaces progress in an existing save folder. A pre-restore copy of the target is made before confirmation.</p>
+      <p class="backup-warning">A SwitchAgent ZIP contains an unsigned device identifier. Check its source carefully. A completed transfer does not prove the game will load the save. Test the first restore on a disposable save.</p>
       <p class="backup-inline-notice">Close the game before preparing or confirming a restore.</p>
       <label for="backup-restore-source">Local copy</label>
       <select id="backup-restore-source"><option value="">Choose a copy</option></select>
@@ -83,6 +90,7 @@
       <button type="button" class="btn btn-secondary" id="backup-prepare-restore" disabled>Check restore and make safety copy</button>
       <p class="backup-muted" id="backup-restore-help">Scan saves on the target Switch before preparing a restore.</p>
     </div>
+    </details>
   </section>
 
   <section id="backup-panel-games" class="backup-panel" role="tabpanel" aria-labelledby="backup-tab-games" hidden>
@@ -90,12 +98,12 @@
       <div><h3>Installed game packages</h3><p class="backup-muted">Export selected packages to this computer. Game exports are separate from save copies. Each listed package is copied individually; this does not capture an installed game with all updates and DLC as one restorable set.</p></div>
       <button type="button" class="btn btn-secondary" id="backup-scan-games">Scan games</button>
     </div>
-    <div class="backup-toolbar">
+    <div class="backup-toolbar" id="backup-game-toolbar" hidden>
       <button type="button" class="btn btn-secondary" id="backup-select-all-games">Select all shown</button>
       <button type="button" class="btn btn-secondary" id="backup-clear-games">Clear</button>
     </div>
     <div id="backup-game-list" class="backup-list" aria-live="polite"><p class="empty-state">Scan a connected Switch to see game packages.</p></div>
-    <div class="backup-selection-bar">
+    <div class="backup-selection-bar" id="backup-game-actions" hidden>
       <span id="backup-game-selection">No games selected</span>
       <button type="button" class="btn btn-primary" id="backup-export-games" disabled>Export selected games</button>
     </div>
@@ -103,10 +111,10 @@
     <div id="backup-export-list" class="backup-list" aria-live="polite"><p class="empty-state">No game exports yet.</p></div>
   </section>
 
-  <section class="backup-activity" aria-labelledby="backup-activity-heading">
-    <h3 id="backup-activity-heading">Activity</h3>
+  <details class="backup-activity">
+    <summary id="backup-activity-heading">Recent activity</summary>
     <div id="backup-job-list" class="backup-list" aria-live="polite"><p class="empty-state">No backup activity yet.</p></div>
-  </section>
+  </details>
   <p id="backup-message" class="backup-message" role="status" aria-live="polite" hidden></p>
 
   <dialog id="backup-confirm-dialog" class="backup-confirm-dialog" aria-labelledby="backup-confirm-title">
