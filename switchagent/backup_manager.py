@@ -168,10 +168,17 @@ class BackupManager:
             stack.extend((c.path, depth + 1) for c in reversed(children) if c.is_dir)
 
     def inventory_saves(self, backend: MtpBackend, *, storage: str = 'SAVES',
-                        cancel=None, on_row=None) -> list[dict]:
+                        cancel=None, on_row=None, on_game=None) -> list[dict]:
         """List DBI group/game/profile roots, isolating unsafe save subtrees."""
         session = backend.session_token
         rows = []
+        work = []
+
+        def add_row(row):
+            rows.append(row)
+            if on_row:
+                on_row(row, len(rows))
+
         for group in backend.list_directory(storage, '', expected_session=session):
             _check_cancel(cancel)
             if not group.is_dir or group.name not in _SAVE_GROUPS:
@@ -181,86 +188,100 @@ class BackupManager:
             except (AmbiguousPathError, InvalidOperationError,
                     ReadAccessDeniedError, SourceNotFoundError):
                 backend._check_read_session(session)
-                rows.append({'path': group.path, 'name': group.name,
-                             'size': None, 'file_count': None, 'identity': None,
-                             'selectable': False, 'session_token': session,
-                             'reason': 'Cannot safely enumerate this save group'})
-                if on_row:
-                    on_row(rows[-1], len(rows))
+                work.append(('error', {'path': group.path, 'name': group.name,
+                                       'size': None, 'file_count': None, 'identity': None,
+                                       'selectable': False, 'session_token': session,
+                                       'reason': 'Cannot safely enumerate this save group'}))
                 continue
             for game in games:
                 _check_cancel(cancel)
                 if not game.is_dir or not _device_part(game.name):
                     continue
-                try:
-                    saves = backend.list_directory(storage, game.path, expected_session=session)
-                except (AmbiguousPathError, InvalidOperationError,
-                        ReadAccessDeniedError, SourceNotFoundError):
-                    backend._check_read_session(session)
-                    rows.append({'path': game.path, 'name': game.name,
-                                 'size': None, 'file_count': None, 'identity': None,
-                                 'selectable': False, 'session_token': session,
-                                 'reason': 'Cannot safely enumerate this game folder'})
-                    if on_row:
-                        on_row(rows[-1], len(rows))
+                work.append(('game', game))
+
+        games_total = sum(kind == 'game' for kind, _ in work)
+        games_done = 0
+        if on_game:
+            on_game(0, games_total, None)
+        for kind, item in work:
+            _check_cancel(cancel)
+            if kind == 'error':
+                add_row(item)
+                continue
+            game = item
+            if on_game:
+                on_game(games_done, games_total, game.name)
+            try:
+                saves = backend.list_directory(storage, game.path, expected_session=session)
+            except (AmbiguousPathError, InvalidOperationError,
+                    ReadAccessDeniedError, SourceNotFoundError):
+                backend._check_read_session(session)
+                add_row({'path': game.path, 'name': game.name,
+                         'size': None, 'file_count': None, 'identity': None,
+                         'selectable': False, 'session_token': session,
+                         'reason': 'Cannot safely enumerate this game folder'})
+                games_done += 1
+                if on_game:
+                    on_game(games_done, games_total, None)
+                continue
+            for save in saves:
+                _check_cancel(cancel)
+                if not save.is_dir:
                     continue
-                for save in saves:
-                    _check_cancel(cancel)
-                    if not save.is_dir:
-                        continue
-                    row = {'path': save.path, 'name': save.name, 'size': None,
-                           'file_count': None, 'identity': None, 'selectable': False,
-                           'session_token': session}
-                    if not _device_part(save.name) or save.path != f'{game.path}/{save.name}':
-                        row['reason'] = 'Invalid MTP save folder name'
-                    else:
-                        try:
-                            # Inventory must not recursively scan large DBI save trees.
-                            # Snapshot creation performs the complete validation later.
-                            children = backend.list_directory(
-                                storage, save.path, expected_session=session)
-                            if len(children) > self.limits.max_files:
-                                raise BackupError('device object limit exceeded')
-                            names = set()
-                            has_directories = False
-                            known_size = 0
-                            all_sizes_known = True
-                            for child in children:
-                                _check_cancel(cancel)
-                                if not isinstance(child.name, str):
-                                    raise BackupError('ambiguous or unsafe device object')
-                                name = child.name.casefold()
-                                if (not _valid_part(child.name) or name in names
-                                        or child.path != f'{save.path}/{child.name}'
-                                        or child.metadata.get('type_known') is False):
-                                    raise BackupError('ambiguous or unsafe device object')
-                                names.add(name)
-                                if child.is_dir:
-                                    has_directories = True
-                                elif child.size is None:
-                                    all_sizes_known = False
-                                else:
-                                    if child.size > self.limits.max_file_bytes:
-                                        raise BackupError('file size limit exceeded')
-                                    known_size += child.size
-                                    if known_size > self.limits.max_total_bytes:
-                                        raise BackupError('total size limit exceeded')
-                            row['identity'] = backend.save_identity(
-                                storage, save.path, expected_session=session)
-                            if not has_directories:
-                                row['file_count'] = len(children)
-                                if all_sizes_known:
-                                    row['size'] = known_size
-                            row['selectable'] = True
-                        except (BackupError, AmbiguousPathError, InvalidOperationError,
-                                ReadAccessDeniedError, SourceNotFoundError):
-                            # A transport fault can invalidate the whole session;
-                            # never return a partial inventory in that case.
-                            backend._check_read_session(session)
-                            row['reason'] = 'Cannot safely enumerate this save'
-                    rows.append(row)
-                    if on_row:
-                        on_row(row, len(rows))
+                row = {'path': save.path, 'name': save.name, 'size': None,
+                       'file_count': None, 'identity': None, 'selectable': False,
+                       'session_token': session}
+                if not _device_part(save.name) or save.path != f'{game.path}/{save.name}':
+                    row['reason'] = 'Invalid MTP save folder name'
+                else:
+                    try:
+                        # Inventory must not recursively scan large DBI save trees.
+                        # Snapshot creation performs the complete validation later.
+                        children = backend.list_directory(
+                            storage, save.path, expected_session=session)
+                        if len(children) > self.limits.max_files:
+                            raise BackupError('device object limit exceeded')
+                        names = set()
+                        has_directories = False
+                        known_size = 0
+                        all_sizes_known = True
+                        for child in children:
+                            _check_cancel(cancel)
+                            if not isinstance(child.name, str):
+                                raise BackupError('ambiguous or unsafe device object')
+                            name = child.name.casefold()
+                            if (not _valid_part(child.name) or name in names
+                                    or child.path != f'{save.path}/{child.name}'
+                                    or child.metadata.get('type_known') is False):
+                                raise BackupError('ambiguous or unsafe device object')
+                            names.add(name)
+                            if child.is_dir:
+                                has_directories = True
+                            elif child.size is None:
+                                all_sizes_known = False
+                            else:
+                                if child.size > self.limits.max_file_bytes:
+                                    raise BackupError('file size limit exceeded')
+                                known_size += child.size
+                                if known_size > self.limits.max_total_bytes:
+                                    raise BackupError('total size limit exceeded')
+                        row['identity'] = backend.save_identity(
+                            storage, save.path, expected_session=session)
+                        if not has_directories:
+                            row['file_count'] = len(children)
+                            if all_sizes_known:
+                                row['size'] = known_size
+                        row['selectable'] = True
+                    except (BackupError, AmbiguousPathError, InvalidOperationError,
+                            ReadAccessDeniedError, SourceNotFoundError):
+                        # A transport fault can invalidate the whole session;
+                        # never return a partial inventory in that case.
+                        backend._check_read_session(session)
+                        row['reason'] = 'Cannot safely enumerate this save'
+                add_row(row)
+            games_done += 1
+            if on_game:
+                on_game(games_done, games_total, None)
         return rows
 
     def inventory_games(self, backend: MtpBackend, *, storage: str = 'INSTALLED_GAMES',

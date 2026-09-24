@@ -51,6 +51,22 @@ def test_inventory_reports_verified_account_saves_and_game_packages(tmp_path):
     assert [(item['path'], item['size']) for item in games] == [('Game A.nsp', 7)]
 
 
+def test_inventory_reports_game_progress_without_recursing_into_save_files(tmp_path):
+    backend = populated_backend()
+    progress = []
+    rows_seen = []
+    rows = BackupManager(tmp_path / 'store').inventory_saves(
+        backend,
+        on_game=lambda done, total, name: progress.append((done, total, name)),
+        on_row=lambda row, count: rows_seen.append((row['path'], count)),
+    )
+    assert progress[0] == (0, 2, None)
+    assert progress[-1] == (2, 2, None)
+    assert (0, 2, 'Game A') in progress
+    assert (1, 2, 'Game B') in progress
+    assert rows_seen[-1][1] == len(rows) == 2
+
+
 def test_inventory_uses_only_dbi_profile_roots_without_scanning_nested_files(tmp_path, monkeypatch):
     backend = populated_backend()
     tree = backend.storage_tree('SAVES')

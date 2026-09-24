@@ -45,6 +45,8 @@ def test_inventory_request_only_uses_existing_device_worker(tmp_path):
         row = _ready_job(client, response.json()["job_id"])
         assert row["state"] == "ready"
         assert row["items_done"] == row["items_total"] == 1
+        assert row["games_done"] == row["games_total"] == 1
+        assert row["current_game"] is None
         save = client.get("/api/backups/state").json()["inventory"]["mock-switch-parent"]["saves"][0]
         assert len(save["cover_id"]) == 16
         assert calls and set(calls) == {"switchagent-worker"}

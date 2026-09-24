@@ -657,6 +657,8 @@ class WebContext:
                                          "state": "queued", "done": 0, "total": None,
                                          "items_done": 0,
                                          "items_total": len(params.get("paths", [])) if action == "create_snapshots" else None,
+                                         "games_done": 0, "games_total": None,
+                                         "current_game": None,
                                          "result": None, "error": None}
             self._backup_cancel[job_id] = threading.Event()
             self._backup_pending.append(job_id)
@@ -741,7 +743,9 @@ class WebContext:
             if action == "inventory_saves":
                 result = self.backups.inventory_saves(
                     backend, cancel=cancellation.is_set,
-                    on_row=lambda _row, count: self._set_backup_items(job_id, count, None))
+                    on_row=lambda _row, count: self._set_backup_items(job_id, count, None),
+                    on_game=lambda done, total, name:
+                    self._set_backup_scan_progress(job_id, done, total, name))
                 with self._backup_lock:
                     self._backup_inventory.setdefault(device_id, {})["saves"] = result
                 self._set_backup_items(job_id, len(result), len(result))
@@ -846,6 +850,14 @@ class WebContext:
         with self._backup_lock:
             self._backup_jobs[job_id]["items_done"] = done
             self._backup_jobs[job_id]["items_total"] = total
+
+    def _set_backup_scan_progress(self, job_id: str, done: int, total: int,
+                                  current_game: str | None) -> None:
+        with self._backup_lock:
+            job = self._backup_jobs[job_id]
+            job["games_done"] = done
+            job["games_total"] = total
+            job["current_game"] = current_game
 
     # -- library scan (point 16: must not block the UI) --------------------
 
