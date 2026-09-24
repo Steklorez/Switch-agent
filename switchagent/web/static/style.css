@@ -945,3 +945,55 @@ a { color: var(--accent); text-decoration: none; }
   margin: 14px 0 0; padding-top: 12px; border-top: 1px solid var(--border);
   font-size: .74rem; color: var(--text-dim); line-height: 1.6;
 }
+
+/* --- Segmented progress bar: the queue dock and the Queue page ------------
+   The track and the fill share one block pattern starting at the same left
+   edge (a mask on the bar), so filled blocks sit exactly on empty ones.
+   .is-running: a light runs along the blocks already sent, so a transfer
+   visibly moves even between two byte counts. .is-sweeping: work with no
+   byte count yet (unpacking) -- the blocks run along the whole bar. */
+.seg-bar {
+  --seg: repeating-linear-gradient(90deg, #000 0 12px, transparent 12px 15px);
+  --seg-color: #8fa8d066;
+  position: relative; height: 9px; overflow: hidden;
+  -webkit-mask: var(--seg); mask: var(--seg);
+  background: #ffffff17;
+}
+.seg-bar-fill {
+  position: absolute; inset: 0 auto 0 0; width: 0; overflow: hidden;
+  background: var(--seg-color); transition: width .6s cubic-bezier(.2,.8,.25,1);
+}
+.seg-bar.is-running .seg-bar-fill::after {
+  content: ""; position: absolute; top: 0; bottom: 0; left: -72px; width: 72px;
+  background: linear-gradient(90deg, transparent, #ffffffc0, transparent);
+  animation: seg-run 1.3s linear var(--seg-phase, 0s) infinite;
+}
+.seg-bar.is-sweeping .seg-bar-fill {
+  width: 30% !important; transition: none;
+  animation: seg-sweep 1.4s cubic-bezier(.45,.05,.55,.95) infinite;
+}
+@keyframes seg-run { to { left: 100%; } }
+@keyframes seg-sweep { from { left: -30%; } to { left: 100%; } }
+/* Still: Settings' animation preference "Off", or "Auto" (the default) on a
+   system asking for reduced motion -- which a Remote Desktop session often
+   does on its own. "On" keeps the blocks running regardless. The
+   preference reaches <html data-motion> through queue_dock.js. */
+:root[data-motion="off"] .seg-bar.is-running .seg-bar-fill::after { animation: none; content: none; }
+:root[data-motion="off"] .seg-bar.is-sweeping .seg-bar-fill { animation: none; left: 0; width: 100% !important; opacity: .5; }
+:root[data-motion="off"] .seg-bar-fill { transition: none; }
+@media (prefers-reduced-motion: reduce) {
+  :root:not([data-motion="on"]) .seg-bar.is-running .seg-bar-fill::after { animation: none; content: none; }
+  :root:not([data-motion="on"]) .seg-bar.is-sweeping .seg-bar-fill { animation: none; left: 0; width: 100% !important; opacity: .5; }
+  :root:not([data-motion="on"]) .seg-bar-fill { transition: none; }
+}
+
+/* A game's cover as a small row icon (queue dock, Queue page). The first
+   letter of its name sits underneath: a game with no cover shows that, and
+   an image that fails to load simply shows nothing on top of it. */
+.game-thumb {
+  position: relative; flex: none; width: 64px; height: 40px; border-radius: 6px; overflow: hidden;
+  display: grid; place-items: center;
+  background: linear-gradient(135deg, #243552, #141c2c); color: #8fa8d0; font-weight: 700;
+  box-shadow: inset 0 0 0 1px #ffffff17;
+}
+.game-thumb img { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; }

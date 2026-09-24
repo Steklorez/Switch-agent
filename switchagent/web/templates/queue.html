@@ -14,17 +14,33 @@
     </div>
     <div class="worker-controls">
       <span class="worker-state">Worker: <strong>{{ "Paused" if worker_paused else "Running" }}</strong></span>
-      <button class="btn btn-secondary" data-worker-action="{{ 'resume' if worker_paused else 'pause' }}">
+      <button class="btn btn-ok" data-worker-action="{{ 'resume' if worker_paused else 'pause' }}">
         {{ "Resume" if worker_paused else "Pause" }}
       </button>
+      {#- Shown only while there is something to abort; queue.js keeps it
+          current (GET /api/worker/status). Stopping a transfer in flight is
+          not instant, and the status line says so rather than hiding it. -#}
+      <span id="abort-status" class="worker-state" aria-live="polite"
+            {{ "hidden" if not abort.stopping }}>{{ "Stopping…" if abort.stopping }}</span>
+      <button class="btn btn-danger" id="abort-btn" {{ "hidden" if not abort.abortable }}
+              {{ "disabled" if abort.stopping }}
+              title="Stop the install in progress and cancel everything waiting in the queue">Abort</button>
     </div>
   </div>
+</div>
+
+{#- Pause only stops the NEXT thing from starting -- without this, pressing
+    it changed one word in the header and nothing else anyone could see.
+    queue.js keeps it current. -#}
+<div id="paused-banner" class="paused-banner" role="status" {{ "hidden" if not worker_paused }}>
+  <strong>Paused.</strong> Nothing new starts until you press Resume.
+  A file already being sent finishes first.
 </div>
 
 <section id="preparation-list" aria-live="polite"></section>
 <p id="empty-state" class="empty-state" {{ "hidden" if groups }}>Queue is empty.</p>
 
-<ol id="job-list" class="job-list">
+<ol id="job-list" class="job-list" data-paused="{{ 1 if worker_paused else 0 }}">
   {% for g in groups %}
   <li class="batch-group" data-batch-id="{{ g.batch_id if g.batch_id is not none else '' }}">
     {% if g.total > 1 %}
@@ -34,7 +50,23 @@
     </div>
     {% endif %}
     <ol class="batch-jobs">
-      {% for j in g.jobs %}
+      {#- One card per game: its cover once, then one row and one bar per
+          package it installs. The same grouping queue.js's
+          renderGameGroups() builds on every poll. -#}
+      {% for game in g.games %}
+      {%- set busy = game.jobs|selectattr("status", "in", ["RUNNING", "VERIFYING"])|list %}
+      {%- set removable = game.jobs|rejectattr("abandoned")|selectattr("status", "in", removable_statuses)|list %}
+      <li class="game-group">
+      <div class="game-group-side">
+        <span class="game-thumb game-group-thumb" aria-hidden="true">{{ game.name[:1]|upper }}{% if game.cover_id %}<img src="/api/covers/{{ game.cover_id }}" alt="">{% endif %}</span>
+        {% if removable and not busy %}
+        <button type="button" class="btn btn-small game-remove-btn" title="Remove this game from the queue"
+                data-remove-jobs="{{ game.jobs|map(attribute='id')|join(',') }}" data-remove-items=""
+                data-remove-name="{{ game.name }}">Remove</button>
+        {% endif %}
+      </div>
+      <ol class="game-group-jobs">
+      {% for j in game.jobs %}
       <li class="job-row {{ 'progress-active' if j.status == 'RUNNING' }}" data-job-id="{{ j.id }}" data-status="{{ j.status }}">
         <div class="job-main">
           <div class="job-name">
@@ -67,17 +99,24 @@
           {% endif %}
         </div>
         <div class="job-status">
-          <span class="status-pill status-{{ j.status|lower }}">{{ j.status.replace("_", " ") }}</span>
+          {%- if j.status == "CONFIRMED" and worker_paused %}
+          <span class="status-pill status-{{ j.status|lower }} status-paused">Paused</span>
+          {%- elif j.status == "RUNNING" %}
+          <span class="status-pill status-running">{{ "Installing" if j.target_storage == "SD_INSTALL" else "Copying to device" }}</span>
+          {%- else %}
+          <span class="status-pill status-{{ j.status|lower }}">{{ j.status_label }}</span>
+          {%- endif %}
           {% if j.status == "RUNNING" %}<span class="spinner" aria-label="in progress"></span>{% endif %}
         </div>
         <div class="job-actions">
           {% if not j.abandoned and j.status in ("FAILED", "INTERRUPTED", "DEVICE_UNAVAILABLE", "SOURCE_CHANGED", "BLOCKED_BY_DEPENDENCY") %}
           <button class="btn btn-small" data-job-action="retry" data-job-id="{{ j.id }}">Retry installation</button>
           {% endif %}
-          {% if not j.abandoned and j.status in ("PENDING_CONFIRM", "CONFIRMED", "DEVICE_UNAVAILABLE", "WAITING_FOR_BASE", "WAITING_FOR_DEVICE", "FAILED", "INTERRUPTED", "SOURCE_CHANGED", "BLOCKED_BY_DEPENDENCY") %}
-          <button class="btn btn-small btn-danger" data-job-action="cancel" data-job-id="{{ j.id }}">Cancel</button>
-          {% endif %}
         </div>
+        <div class="seg-bar job-bar {{ 'is-running' if j.status == 'RUNNING' }}"><span class="seg-bar-fill"></span></div>
+      </li>
+      {% endfor %}
+      </ol>
       </li>
       {% endfor %}
     </ol>
@@ -91,11 +130,14 @@
   <h3 id="confirm-action-title">Are you sure?</h3>
   <p id="confirm-action-message"></p>
   <div class="modal-actions">
+    {#- Labels are per question: confirmAction() in queue.js sets them and
+        puts these defaults back afterwards. -#}
     <button type="button" class="btn btn-secondary" id="confirm-action-cancel-btn">Never mind</button>
     <button type="button" class="btn btn-danger" id="confirm-action-ok-btn">Confirm</button>
   </div>
 </dialog>
 {% endblock %}
+{% block styles %}<link rel="stylesheet" href="{{ static_url('queue_page.css') }}">{% endblock %}
 {% block scripts %}
 <script src="{{ static_url('queue.js') }}"></script>
 {% endblock %}

@@ -50,3 +50,13 @@ class TransferFailedError(MtpError):
 class InvalidOperationError(MtpError):
     """The operation was called in a state that doesn't make sense for it --
     e.g. before connect(), or with a malformed path."""
+
+
+class TransferAborted(Exception):
+    """Raised by the CALLER's own `progress` callback (see MtpBackend.
+    send_file) to stop a transfer the user aborted -- never by a backend on
+    its own. Deliberately NOT an MtpError: nothing is wrong with the device
+    or the transport, so no backend may treat it as a fault to retry, fall
+    back from, or report as a failed transfer. A backend lets it propagate
+    out of send_file unchanged; what was left at the destination (a
+    half-written object, at most) is the caller's to record honestly."""

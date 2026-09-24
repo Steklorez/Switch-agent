@@ -69,3 +69,9 @@ class PreferencesRequest(BaseModel):
     auto_scan: bool
     scan_interval: int = Field(ge=10, le=3600)
     covers: bool
+
+
+class RemoveFromQueueRequest(BaseModel):
+    """One game card on the Queue page: its jobs and its preparation items."""
+    job_ids: list[int] = Field(default_factory=list)
+    library_item_ids: list[int] = Field(default_factory=list)

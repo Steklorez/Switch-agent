@@ -119,6 +119,15 @@ class WebContext:
         # UI-006 "Restart worker when safe" -- see request_worker_restart()
         # below for exactly what this can and cannot do.
         self._worker_restart_requested = threading.Event()
+        # Queue page "Abort" -- see request_abort(). A counter, not an
+        # Event: nothing ever has to remember to clear it, so an Abort can
+        # never leave the worker stuck refusing work. The worker pass that
+        # was already under way when the counter moved is the one that
+        # stops; the next pass reads the new value and runs normally.
+        self._abort_lock = threading.Lock()
+        self._abort_generation = 0
+        self._abort_requested_monotonic: Optional[float] = None
+        self._worker_pass_generation: Optional[int] = None
 
         self.scan_lock = threading.Lock()
         self.scan_state = ScanState()
@@ -502,6 +511,36 @@ class WebContext:
     def is_worker_restart_pending(self) -> bool:
         return self._worker_restart_requested.is_set()
 
+    def request_abort(self) -> None:
+        """Queue page "Abort", the running-transfer half (the queued half
+        is services.abort_all(), which calls this LAST, after it has
+        cancelled every job the worker could otherwise pick up next).
+
+        Stops the worker pass under way right now at its next safe point
+        (queue_worker._run_job_transfer's docstring lists them) -- never by
+        force: no thread is killed and no COM call is interrupted. Worker
+        passes that start afterwards are unaffected, so the worker is ready
+        for new installs the moment the aborted one has stopped; Pause is a
+        separate switch and is left exactly as it was."""
+        with self._abort_lock:
+            self._abort_generation += 1
+            self._abort_requested_monotonic = time.monotonic()
+
+    def _abort_checker(self, generation: int):
+        return lambda: self._abort_generation != generation
+
+    @property
+    def abort_stopping_seconds(self) -> Optional[float]:
+        """How long an Abort has been waiting for the worker pass it
+        targets to stop; None when there is nothing left to stop (no Abort,
+        or the aborted pass already returned). The Queue page shows the
+        running row as "Stopping" for exactly this long."""
+        with self._abort_lock:
+            active = self._worker_pass_generation
+            if active is None or active == self._abort_generation or self._abort_requested_monotonic is None:
+                return None
+            return round(time.monotonic() - self._abort_requested_monotonic, 1)
+
     def _worker_loop(self) -> None:
         conn = db.get_connection(self.db_path)
         db.init_db(conn)
@@ -536,7 +575,20 @@ class WebContext:
                     if self.worker_paused.is_set():
                         self._stop_event.wait(1.0)
                         continue
-                    outcome = queue_worker.run_worker_once(conn, self.registry)
+                    # Read BEFORE run_worker_once lists the jobs: an Abort
+                    # after this point may have cancelled rows that list
+                    # still holds, and must stop this pass (see
+                    # request_abort()).
+                    with self._abort_lock:
+                        generation = self._abort_generation
+                        self._worker_pass_generation = generation
+                    try:
+                        outcome = queue_worker.run_worker_once(
+                            conn, self.registry, should_abort=self._abort_checker(generation),
+                        )
+                    finally:
+                        with self._abort_lock:
+                            self._worker_pass_generation = None
                     self.note_install_job_outcome(conn, outcome)
                 except Exception:  # noqa: BLE001 -- one bad iteration must not kill the worker thread
                     log.exception("worker loop iteration failed")

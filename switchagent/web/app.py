@@ -30,6 +30,7 @@ from .schemas import (
     HistoryVerificationRequest,
     LibraryDirRequest,
     PreferencesRequest,
+    RemoveFromQueueRequest,
     RenameDeviceRequest,
 )
 
@@ -340,6 +341,8 @@ def create_app(ctx: WebContext) -> FastAPI:
             "groups": services.list_queue_grouped(conn), "devices": services.list_devices(conn, ctx),
             "worker_paused": ctx.worker_paused.is_set(), "active_page": "queue",
             "conflict_policy": config_mod.load_conflict_policy(),
+            "abort": services.abort_status(conn, ctx),
+            "removable_statuses": services._CANCELABLE_JOB_STATUSES,
         })
 
     @app.get("/history", response_class=HTMLResponse)
@@ -485,6 +488,20 @@ def create_app(ctx: WebContext) -> FastAPI:
     @app.get("/api/queue/grouped")
     def api_list_queue_grouped(conn=Depends(get_conn)):
         return services.list_queue_grouped(conn)
+
+    @app.get("/api/queue/dock")
+    def api_queue_dock(conn=Depends(get_conn), ctx: WebContext = Depends(get_ctx)):
+        """The dock along the bottom of every page -- one row per game."""
+        return services.queue_dock(conn, ctx.preparations.dock_items(), paused=ctx.worker_paused.is_set())
+
+    @app.post("/api/queue/remove")
+    def api_queue_remove(body: RemoveFromQueueRequest, ctx: WebContext = Depends(get_ctx), conn=Depends(get_conn)):
+        """Queue page "Remove from queue" -- one game's card, every part of
+        it that has not started sending (services.remove_from_queue)."""
+        try:
+            return services.remove_from_queue(conn, ctx, body.job_ids, body.library_item_ids)
+        except services.RemoveRefused as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
 
     @app.post("/api/preparations", status_code=202)
     def api_prepare_jobs(body: CreateJobsRequest, ctx: WebContext = Depends(get_ctx), conn=Depends(get_conn)):
@@ -698,6 +715,20 @@ def create_app(ctx: WebContext) -> FastAPI:
     def api_worker_resume(ctx: WebContext = Depends(get_ctx)):
         ctx.worker_paused.clear()
         return {"paused": False}
+
+    @app.get("/api/worker/status")
+    def api_worker_status(conn=Depends(get_conn), ctx: WebContext = Depends(get_ctx)):
+        """The Queue page's header controls, polled with the job list:
+        Pause/Resume state, whether Abort has anything to act on, and
+        whether an earlier Abort is still waiting for a transfer to stop."""
+        return services.abort_status(conn, ctx)
+
+    @app.post("/api/queue/abort")
+    def api_queue_abort(conn=Depends(get_conn), ctx: WebContext = Depends(get_ctx)):
+        """Queue page "Abort" -- see services.abort_all(). The transfer in
+        flight (stopping_job_ids) stops at its next safe point, not
+        necessarily before this returns."""
+        return {"ok": True, **services.abort_all(conn, ctx)}
 
     @app.post("/api/worker/restart")
     def api_worker_restart(ctx: WebContext = Depends(get_ctx)):

@@ -7,6 +7,7 @@ from .errors import (
     InvalidOperationError,
     MtpError,
     StorageNotFoundError,
+    TransferAborted,
     TransferFailedError,
 )
 from .mock import MockMtpBackend, MockStorage
@@ -31,6 +32,7 @@ __all__ = [
     "StorageNotFoundError",
     "DestinationNotFoundError",
     "FileAlreadyExistsError",
+    "TransferAborted",
     "TransferFailedError",
     "InvalidOperationError",
     "MockMtpBackend",

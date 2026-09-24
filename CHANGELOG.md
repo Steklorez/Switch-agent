@@ -7,6 +7,13 @@ Entries are one sentence per change, three to five lines per release, and
 only what a user would notice — no internals, no reasoning, no history.
 Those belong in the commit message. See [CLAUDE.md](CLAUDE.md#how-to-write-an-entry).
 
+## v1.0.19
+
+- A panel along the bottom of every page shows what is being installed, one line per game with its progress.
+- Queue shows one card per game, with its cover and a bar for every package it installs.
+- Abort stops the install in progress and everything waiting; Remove takes one game out of the queue at any stage.
+- Pause now shows on the page, and statuses read as words instead of codes.
+
 ## v1.0.18
 
 - The tray icon's menu opens the program, data and logs folders.

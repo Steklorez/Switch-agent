@@ -277,6 +277,14 @@ def _sd_fields(row) -> dict:
 # refuses everywhere else.
 # ---------------------------------------------------------------------------
 
+def cover_id_for_title(title_id_value: Optional[str]) -> Optional[str]:
+    """The id /api/covers/{id} knows a game's cover by: its family's base
+    TITLE_ID, the same one Library's cards use -- so an update, a DLC and a
+    mod all show their game's cover. None when there is no valid one."""
+    family = family_base_title_id(title_id_value)
+    return family if family and title_id_mod.is_valid_title_id(family) else None
+
+
 def family_base_title_id(title_id_value: Optional[str]) -> Optional[str]:
     """The family a TITLE_ID belongs to, via the SHARED arithmetic in
     title_id.classify_title_variant() -- never a second implementation.
@@ -1050,10 +1058,32 @@ def _job_variant_role(job_row) -> Optional[str]:
     return _TITLE_VARIANT_TO_ROLE.get(variant)
 
 
+# What a job's status pill says on the Queue page: words, not the stored
+# enum ("CONFIRMED" told nobody anything). RUNNING is worded by queue.js from
+# the target storage, and a CONFIRMED job reads "Paused" while the worker is.
+JOB_STATUS_LABELS = {
+    "PENDING_CONFIRM": "Preparing",
+    "CONFIRMED": "Up next",
+    "RUNNING": "Installing",
+    "VERIFYING": "Verifying",
+    "WAITING_FOR_BASE": "Waiting for the game",
+    "WAITING_FOR_DEVICE": "Waiting for the Switch",
+    "DEVICE_UNAVAILABLE": "Switch not connected",
+    "FAILED": "Failed",
+    "INTERRUPTED": "Interrupted",
+    "SOURCE_CHANGED": "File changed",
+    "BLOCKED_BY_DEPENDENCY": "Blocked",
+    "DESTINATION_CONFLICT": "Already on the Switch",
+    "DONE": "Installed",
+    "DONE_UNVERIFIED": "Sent",
+}
+
+
 def _job_view(conn, row) -> dict:
     from ..mtp.windows import device_fingerprint
 
     variant_role = _job_variant_role(row)
+    item = db.get_library_item_by_id(conn, row["library_item_id"]) if row["library_item_id"] is not None else None
     # Same helper the worker's history uses -- minus its " — Mod" suffix,
     # which the [Mod] badge below now says instead (History keeps it: no
     # badge there).
@@ -1063,10 +1093,13 @@ def _job_view(conn, row) -> dict:
         # Queue badge: what this job installs (see _job_variant_role).
         "variant_role": variant_role,
         "variant_label": _VARIANT_ROLE_LABEL.get(variant_role),
+        # Queue's row icon: the game's cover, whichever part this job is.
+        "cover_id": cover_id_for_title(item["title_id"]) if item is not None else None,
         "abandoned": bool(row["abandoned"]),
         "id": row["id"],
         "display_name": display_name,
         "status": row["status"],
+        "status_label": JOB_STATUS_LABELS.get(row["status"], row["status"].replace("_", " ").capitalize()),
         "target_device_id": row["target_device_id"],
         "target_device_label": device_label(conn, row["target_device_id"]),
         # W3-004: the safe, non-serial-bearing URL stand-in for this job's
@@ -1235,6 +1268,20 @@ def _package_variant_label(job_row) -> Optional[str]:
     return _VARIANT_DISPLAY_LABEL.get(variant)
 
 
+def group_jobs_by_game(jobs: list) -> list[dict]:
+    """Queue's cards: one per game, in the order its first job appears, each
+    holding every job that installs a part of it (base, update, DLCs, mods).
+    The key is the game's cover id -- its family's base TITLE_ID; a job with
+    none (unclassifiable file, inbox item) is a card of its own. queue.js's
+    renderGameGroups() applies the same rule to what it polls."""
+    games: dict = {}
+    for job in jobs:
+        key = job["cover_id"] or f"job-{job['id']}"
+        game = games.setdefault(key, {"cover_id": job["cover_id"], "name": job["display_name"], "jobs": []})
+        game["jobs"].append(job)
+    return list(games.values())
+
+
 def _batch_group_view(conn, batch_id: Optional[int], rows: list) -> dict:
     jobs = [_job_view(conn, r) for r in rows]
     # Multi-package-archive fan-out: several jobs in this SAME batch can
@@ -1269,6 +1316,7 @@ def _batch_group_view(conn, batch_id: Optional[int], rows: list) -> dict:
 
     display_name = jobs[0]["display_name"] if len(jobs) == 1 else f"{len(jobs)} items"
     return {
+        "games": group_jobs_by_game(jobs),
         "batch_id": batch_id,
         "display_name": display_name,
         "created_at": created_at,
@@ -1327,6 +1375,152 @@ def list_queue_grouped(conn) -> list[dict]:
 
     groups.sort(key=lambda g: g["created_at"])
     return groups
+
+
+# Queue dock: what one game's parts are doing, strongest first -- the game's
+# own row shows the first of these any part is in.
+_DOCK_STATE_ORDER = ("installing", "preparing", "attention", "waiting", "done")
+_DOCK_PREP_PHASE_STATE = {
+    "Waiting": "waiting", "Prepared": "waiting",
+    "Analyzing": "preparing", "Preparing": "preparing", "Installing": "preparing", "Cleaning": "preparing",
+    "Failed": "attention",
+}
+_DOCK_WAITING_FOR_SWITCH = ("WAITING_FOR_DEVICE", "DEVICE_UNAVAILABLE")
+
+
+def _dock_job_state(row) -> str:
+    if row["status"] in ("DONE", "DONE_UNVERIFIED"):
+        return "done"
+    bucket = _status_bucket(row["status"])
+    return {"active": "installing", "failed": "attention"}.get(bucket, "waiting")
+
+
+def queue_dock(conn, prep_items: list, *, paused: bool = False) -> dict:
+    """The dock along the bottom of every page: one row per GAME, not per
+    file -- its base, update, DLC and mods are parts of one row, with one
+    bar over all of their bytes. Built from the same two sources Queue
+    draws from (confirmed jobs, and preparation items that have no job
+    yet), grouped by the same family key Library uses."""
+    all_rows = db.list_jobs(conn)
+    # _not_settled(), with the "superseded by a retry" scan done once rather
+    # than per row -- this runs on every page, every couple of seconds.
+    superseded = {r["retry_of_job_id"] for r in all_rows if r["retry_of_job_id"] is not None}
+    visible = [
+        r for r in all_rows
+        if not _not_yet_queued(r) and r["status"] not in ("DONE", "DONE_UNVERIFIED")
+        and not r["abandoned"] and r["id"] not in superseded
+    ]
+    # A finished part still counts towards its game's bar while the rest
+    # of the batch it came in is on its way.
+    open_batches = {r["batch_id"] for r in visible if r["batch_id"] is not None}
+    rows = visible + [
+        r for r in all_rows
+        if r["batch_id"] in open_batches and r["status"] in ("DONE", "DONE_UNVERIFIED") and not r["abandoned"]
+    ]
+    rows.sort(key=lambda r: r["id"])
+
+    items: dict = {}
+
+    def library_item(item_id):
+        if item_id is None:
+            return None
+        if item_id not in items:
+            items[item_id] = db.get_library_item_by_id(conn, item_id)
+        return items[item_id]
+
+    games: dict[str, dict] = {}
+
+    def add_part(key, *, title_id, name, role, state, status, done, total):
+        game = games.get(key)
+        if game is None:
+            game = games[key] = {"key": key, "cover_id": title_id, "name": name, "parts": [], "seq": len(games)}
+        if role == "base" or not game["name"]:
+            game["name"] = name
+        game["parts"].append({"role": role, "state": state, "status": status, "done": done, "total": total})
+
+    def family_key(item, fallback):
+        cover_id = cover_id_for_title(item["title_id"]) if item is not None else None
+        return (cover_id, cover_id) if cover_id else (fallback, None)
+
+    for row in rows:
+        item = library_item(row["library_item_id"])
+        key, title_id = family_key(item, f"job-{row['id']}")
+        state = _dock_job_state(row)
+        total = row["bytes_total"] or (item["size"] if item is not None else 0) or 0
+        done = total if state == "done" else min(row["bytes_done"] or 0, total)
+        name = queue_worker.display_name_for_job(conn, row, mod_suffix=False)
+        add_part(key, title_id=title_id, name=history_title_name(name), role=_job_variant_role(row),
+                 state=state, status=row["status"], done=done, total=total)
+
+    job_ids = {r["id"] for r in all_rows if not _not_yet_queued(r)}
+    for prep in prep_items:
+        state = _DOCK_PREP_PHASE_STATE.get(prep["phase"])
+        # Ready, or already a confirmed job drawn above.
+        if state is None or any(job_id in job_ids for job_id in prep["job_ids"]):
+            continue
+        item = library_item(prep["library_item_id"])
+        key, title_id = family_key(item, f"item-{prep['library_item_id']}")
+        add_part(key, title_id=title_id, name=history_title_name(prep["name"] or ""), role=prep["role"],
+                 state=state, status=prep["phase"], done=0, total=(item["size"] if item is not None else 0) or 0)
+
+    result = []
+    for game in games.values():
+        parts = game["parts"]
+        states = {p["state"] for p in parts}
+        if states == {"done"}:
+            continue
+        state = next(s for s in _DOCK_STATE_ORDER if s in states)
+        current = next(p for p in parts if p["state"] == state)
+        total = sum(p["total"] for p in parts)
+        done = sum(p["done"] for p in parts)
+        result.append({
+            "key": game["key"],
+            "name": game["name"],
+            "cover_id": game["cover_id"],
+            "state": state,
+            "status_label": "Paused" if paused and state == "waiting" else _dock_status_label(state, current),
+            "parts_label": _dock_parts_label(parts),
+            "parts_done": sum(1 for p in parts if p["state"] == "done"),
+            "parts_total": len(parts),
+            "bytes_done": done,
+            "bytes_total": total,
+            "_seq": game["seq"],
+        })
+    # The game being installed first, then everything else in the order it
+    # was asked for.
+    result.sort(key=lambda g: (g["state"] != "installing", g["_seq"]))
+    for game in result:
+        del game["_seq"]
+    return {"games": result, "paused": paused}
+
+
+def _dock_status_label(state: str, part: dict) -> str:
+    if state == "installing":
+        what = _VARIANT_ROLE_LABEL.get(part["role"])
+        return f"Installing {what}" if what and part["role"] != "base" else "Installing"
+    if state == "preparing":
+        return "Preparing"
+    if state == "attention":
+        return "Needs a decision in Queue"
+    if part["status"] in _DOCK_WAITING_FOR_SWITCH:
+        return "Waiting for the Switch"
+    return "Queued"
+
+
+def _dock_parts_label(parts: list) -> str:
+    """"Game · Update · 2 DLC · Mod" -- what this one row stands for."""
+    counts: dict[str, int] = {}
+    for part in parts:
+        role = part["role"] or "other"
+        counts[role] = counts.get(role, 0) + 1
+    labels = []
+    for role in ("base", "update", "dlc", "mod", "sd", "other"):
+        n = counts.get(role)
+        if not n:
+            continue
+        label = _VARIANT_ROLE_LABEL.get(role, "File")
+        labels.append(label if n == 1 else f"{n} {label}{'' if label in ('DLC', 'SD files') else 's'}")
+    return " · ".join(labels)
 
 
 def get_job(conn, job_id: int) -> Optional[dict]:
@@ -1852,6 +2046,31 @@ def abandon_all_jobs_for_device(conn, device_id: str, reason: str) -> list[int]:
     return abandoned_ids
 
 
+class RemoveRefused(Exception):
+    """remove_from_queue() found a part already being sent."""
+
+
+def remove_from_queue(conn, ctx: WebContext, job_ids, library_item_ids) -> dict:
+    """Queue page "Remove from queue" on a game's card: every part of it
+    that has not started sending goes -- its jobs are cancelled (the same
+    cancel as a row's own, see cancel_job()), and preparation items still on
+    their way (waiting, unpacking, prepared) are dropped from their run (see
+    PreparationQueue.remove_items()). Refused as a whole, before anything
+    changes, while a part is already sending: that is Abort's to stop,
+    at a point where it can be stopped cleanly."""
+    rows = [row for job_id in job_ids if (row := db.get_job(conn, job_id)) is not None]
+    if any(row["status"] in ("RUNNING", "VERIFYING") for row in rows):
+        raise RemoveRefused("Part of this game is being sent right now -- use Abort to stop it.")
+    cancelled = []
+    for row in rows:
+        if row["abandoned"] or row["status"] not in _CANCELABLE_JOB_STATUSES:
+            continue
+        cancel_job(conn, row["id"])
+        cancelled.append(row["id"])
+    removed_items = ctx.preparations.remove_items(library_item_ids)
+    return {"cancelled_job_ids": cancelled, "removed_item_ids": removed_items}
+
+
 def cancel_job(conn, job_id: int) -> None:
     row = db.get_job(conn, job_id)
     if row is None:
@@ -1867,6 +2086,89 @@ def cancel_job(conn, job_id: int) -> None:
     db.log_job_event(conn, job_id, "cancelled by user before it started running")
     from ..work_cleanup import cleanup_batch_if_all_done
     cleanup_batch_if_all_done(conn, row["payload_batch_id"] or row["batch_id"])
+
+
+# What the Queue page's "Abort" cancels: every job that would still start on
+# its own -- a subset of _CANCELABLE_JOB_STATUSES. The rest of that set
+# (FAILED, INTERRUPTED, DEVICE_UNAVAILABLE, SOURCE_CHANGED,
+# BLOCKED_BY_DEPENDENCY) has already stopped and only moves again if the
+# user clicks Retry on it; Abort leaves those rows, and their Retry, alone.
+_ABORT_CANCELS_JOB_STATUSES = (
+    "PENDING_CONFIRM", "CONFIRMED", "WAITING_FOR_BASE", "WAITING_FOR_DEVICE",
+)
+
+ABORT_CANCEL_ERROR = "cancelled by user (Abort)"
+
+
+def _abortable_rows(conn) -> list:
+    placeholders = ",".join("?" * len(_ABORT_CANCELS_JOB_STATUSES))
+    return conn.execute(
+        f"SELECT * FROM jobs WHERE abandoned=0 AND status IN ({placeholders}) ORDER BY id",
+        _ABORT_CANCELS_JOB_STATUSES,
+    ).fetchall()
+
+
+def _running_job_ids(conn) -> list[int]:
+    return [row["id"] for row in conn.execute("SELECT id FROM jobs WHERE status='RUNNING' ORDER BY id")]
+
+
+def abort_all(conn, ctx: WebContext) -> dict:
+    """The Queue page's "Abort": stop everything, now.
+
+    In this order, each step closing a door the next one relies on:
+      1. preparation runs stop creating jobs (PreparationQueue.abort_all --
+         once it returns, none of their jobs can still be confirmed);
+      2. every job that would still start on its own is cancelled exactly
+         as a per-row Cancel would (FAILED, abandoned, staging released);
+      3. the transfer in flight, if any, is asked to stop at its next safe
+         point (WebContext.request_abort -- see queue_worker.
+         _run_job_transfer for what "safe" means and how soon that is).
+
+    Never pauses the worker: once the running job has stopped, the next
+    install the user starts runs normally. Returns what was done, including
+    the id of a job that is still stopping -- the caller must not claim it
+    has already stopped."""
+    from ..work_cleanup import cleanup_batch_if_all_done
+
+    preparations_stopped = ctx.preparations.abort_all()
+    cancelled = []
+    batches = set()
+    for row in _abortable_rows(conn):
+        db.update_job_status(conn, row["id"], "FAILED", error=ABORT_CANCEL_ERROR, finished_at=db.now_iso())
+        conn.execute("UPDATE jobs SET abandoned=1 WHERE id=?", (row["id"],))
+        conn.commit()
+        db.log_job_event(conn, row["id"], "cancelled by Abort before it started running")
+        cancelled.append(row["id"])
+        batches.add(row["payload_batch_id"] or row["batch_id"])
+    for batch_id in batches:
+        cleanup_batch_if_all_done(conn, batch_id)
+    running = _running_job_ids(conn)
+    ctx.request_abort()
+    return {
+        "cancelled_job_ids": cancelled,
+        "preparations_stopped": preparations_stopped,
+        "stopping_job_ids": running,
+    }
+
+
+def abort_status(conn, ctx: WebContext) -> dict:
+    """What the Queue page needs to draw its worker controls: whether Abort
+    has anything to act on (a transfer running, a job that would still
+    start, a preparation run still creating jobs), and whether an earlier
+    Abort is still waiting for the running transfer to stop."""
+    queued = len(_abortable_rows(conn))
+    running = _running_job_ids(conn)
+    preparing = ctx.preparations.has_running()
+    stopping_seconds = ctx.abort_stopping_seconds
+    return {
+        "worker_paused": ctx.worker_paused.is_set(),
+        "queued": queued,
+        "running_job_ids": running,
+        "preparing": preparing,
+        "abortable": bool(queued or running or preparing),
+        "stopping": stopping_seconds is not None and bool(running),
+        "stopping_seconds": stopping_seconds if running else None,
+    }
 
 
 # ---------------------------------------------------------------------------

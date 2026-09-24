@@ -39,7 +39,7 @@ import logging
 import sqlite3
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Optional
+from typing import Callable, Optional
 
 from . import db
 from . import manifest as manifest_mod
@@ -48,7 +48,7 @@ from . import title_id as title_id_mod
 from . import work_cleanup
 from .model import ContentType
 from .mtp.base import MtpBackend, TransferStatus
-from .mtp.errors import DeviceNotFoundError, FileAlreadyExistsError, MtpError
+from .mtp.errors import DeviceNotFoundError, FileAlreadyExistsError, MtpError, TransferAborted
 from .preview import PreviewReport
 from .transfer import STORAGE_SD_CARD, STORAGE_SD_INSTALL
 
@@ -83,6 +83,20 @@ class JobRunOutcome:
     job_id: int
     status: str
     error: Optional[str] = None
+    # False only for a job the user's Abort cancelled before a single byte
+    # moved (see _run_job_transfer): exactly like services.cancel_job() on a
+    # queued job, that leaves no History row -- nothing was attempted.
+    record_history: bool = True
+
+
+# Answers True once the user has pressed Abort on the Queue page (see
+# WebContext.request_abort()). Polled, never pushed: at every point below
+# where a transfer can stop without lying about what reached the device.
+ShouldAbort = Callable[[], bool]
+
+
+def _never_abort() -> bool:
+    return False
 
 
 def _target_storage_for(report: PreviewReport) -> str:
@@ -302,7 +316,9 @@ def _decide_device_absence_status(job_row: sqlite3.Row) -> str:
     return "WAITING_FOR_DEVICE"
 
 
-def run_worker_once(conn: sqlite3.Connection, registry: DeviceRegistry) -> Optional[JobRunOutcome]:
+def run_worker_once(
+    conn: sqlite3.Connection, registry: DeviceRegistry, *, should_abort: Optional[ShouldAbort] = None,
+) -> Optional[JobRunOutcome]:
     """Does at most one unit of work: finds the oldest CONFIRMED (or
     WAITING_FOR_BASE/WAITING_FOR_DEVICE) job whose target device is
     currently reachable AND whose install-order dependency (Base Game ->
@@ -326,8 +342,15 @@ def run_worker_once(conn: sqlite3.Connection, registry: DeviceRegistry) -> Optio
     Returns None if there was nothing processable right now -- either the
     queue is empty, or every remaining job's target device is unreachable
     or dependency-blocked. Never picks a different device than the one a
-    job was created with."""
+    job was created with.
+
+    should_abort: see ShouldAbort. Once it answers True, this pass starts
+    nothing new (the job list it read may predate the Abort that cancelled
+    those jobs), and a job already transferring stops at its next safe
+    point -- see _run_job_transfer."""
     from .mtp.windows import device_fingerprint
+
+    should_abort = should_abort or _never_abort
 
     for job in db.list_confirmed_jobs(conn):
         device_id = job["target_device_id"]
@@ -418,7 +441,9 @@ def run_worker_once(conn: sqlite3.Connection, registry: DeviceRegistry) -> Optio
         # dependency (if any) is satisfied -- process exactly this one and
         # stop (sequential: one worker, one job at a time, per this
         # stage's explicitly allowed minimal shape).
-        return _process_job(conn, backend, job)
+        if should_abort():
+            return None
+        return _process_job(conn, backend, job, should_abort=should_abort)
 
     return None
 
@@ -544,7 +569,10 @@ def _with_mod_suffix(name: str, job_row: sqlite3.Row, content_type: Optional[str
     return name
 
 
-def _process_job(conn: sqlite3.Connection, backend: MtpBackend, job_row: sqlite3.Row) -> JobRunOutcome:
+def _process_job(
+    conn: sqlite3.Connection, backend: MtpBackend, job_row: sqlite3.Row, *,
+    should_abort: ShouldAbort = _never_abort,
+) -> JobRunOutcome:
     """Thin wrapper around _run_job_transfer(): every outcome it can
     possibly return is already terminal for THIS attempt (there is no
     "still running" return value -- RUNNING is only ever an intermediate
@@ -570,7 +598,7 @@ def _process_job(conn: sqlite3.Connection, backend: MtpBackend, job_row: sqlite3
     reached the device -- same honesty standard already used for a
     detected mid-transfer disconnect."""
     try:
-        outcome = _run_job_transfer(conn, backend, job_row)
+        outcome = _run_job_transfer(conn, backend, job_row, should_abort=should_abort)
     except Exception as exc:  # noqa: BLE001 -- see docstring: must never leave a job silently stuck
         error = f"unexpected error during transfer: {type(exc).__name__}: {exc}"
         db.update_job_status(conn, job_row["id"], "INTERRUPTED", error=error)
@@ -597,13 +625,14 @@ def _process_job(conn: sqlite3.Connection, backend: MtpBackend, job_row: sqlite3
             f"could not reload manifest for history recording: {type(exc).__name__}: {exc}",
         )
 
-    db.record_install_history(
-        conn, job_id=job_row["id"], title_id=title_id,
-        display_name=display_name_for_job(conn, job_row),
-        target_device_id=job_row["target_device_id"], target_storage=job_row["target_storage"],
-        outcome=outcome.status, error=outcome.error,
-        bytes_total=bytes_total,
-    )
+    if outcome.record_history:
+        db.record_install_history(
+            conn, job_id=job_row["id"], title_id=title_id,
+            display_name=display_name_for_job(conn, job_row),
+            target_device_id=job_row["target_device_id"], target_storage=job_row["target_storage"],
+            outcome=outcome.status, error=outcome.error,
+            bytes_total=bytes_total,
+        )
     # The instant this job's own outcome is durable, see whether its whole
     # batch (if any) is now fully done and can have its shared staging
     # removed -- see work_cleanup.cleanup_batch_if_all_done's own docstring
@@ -615,7 +644,53 @@ def _process_job(conn: sqlite3.Connection, backend: MtpBackend, job_row: sqlite3
     return outcome
 
 
-def _run_job_transfer(conn: sqlite3.Connection, backend: MtpBackend, job_row: sqlite3.Row) -> JobRunOutcome:
+ABORTED_BEFORE_START_ERROR = "cancelled by user (Abort) before it started"
+
+
+def _aborted_between_files_error(done_count: int, total_count: int) -> str:
+    return (
+        f"stopped by Abort after {done_count} of {total_count} file(s) -- nothing was left half-written; "
+        "Retry continues from here"
+    )
+
+
+def _aborted_mid_file_error(dest_relative_path: str, storage: str) -> str:
+    if storage == STORAGE_SD_INSTALL:
+        return (
+            f"stopped by Abort while sending '{dest_relative_path}' -- DBI received only part of it, "
+            "so this install did not complete on the console; Retry sends it again from the start"
+        )
+    return (
+        f"stopped by Abort while sending '{dest_relative_path}' -- that file was not finished; "
+        "Retry replaces it and continues from there"
+    )
+
+
+def _run_job_transfer(
+    conn: sqlite3.Connection, backend: MtpBackend, job_row: sqlite3.Row, *,
+    should_abort: ShouldAbort = _never_abort,
+) -> JobRunOutcome:
+    """Abort (should_abort) takes effect at exactly three kinds of point,
+    each one where the job can stop without guessing what reached the
+    device:
+
+      - before the job goes RUNNING at all: nothing was sent, so it is
+        cancelled the same way a queued job is (FAILED, abandoned, no
+        History row);
+      - between two files: INTERRUPTED, every earlier file recorded as
+        delivered, nothing half-written -- Retry continues from there;
+      - mid-file, from inside the backend's own progress callback, which
+        raises TransferAborted: INTERRUPTED, and the file in flight is left
+        unfinished (jobs.current_file still names it, which is what lets a
+        Retry replace it -- see manifest.inherit_progress).
+
+    Mid-file only works on a backend that calls `progress` at all: the WPD
+    transport does, about once a second while bytes move; the Shell
+    fallback cannot, so there the job stops after the file being copied has
+    finished. Nor is the device's own finalising wait interrupted (the
+    commit after the last byte, up to ~80s for a big .nsz on DBI): the
+    callback's last call reports every byte, and aborting there would throw
+    away a file the console already has in full."""
     job_id = job_row["id"]
     storage = job_row["target_storage"]
     manifest = manifest_mod.load_manifest(job_id)
@@ -649,6 +724,17 @@ def _run_job_transfer(conn: sqlite3.Connection, backend: MtpBackend, job_row: sq
         db.update_job_status(conn, job_id, "SOURCE_CHANGED", error=error)
         db.log_job_event(conn, job_id, error + " -- create a new job from a fresh preview/confirmation")
         return JobRunOutcome(job_id=job_id, status="SOURCE_CHANGED", error=error)
+
+    if should_abort():
+        # Checking the sources can take a while (a changed mtime means
+        # re-hashing); an Abort pressed meanwhile still finds this job not
+        # yet started. Idempotent with the cancel services.abort_all()
+        # already applied to it while it was CONFIRMED.
+        db.update_job_status(conn, job_id, "FAILED", error=ABORTED_BEFORE_START_ERROR, finished_at=db.now_iso())
+        conn.execute("UPDATE jobs SET abandoned=1 WHERE id=?", (job_id,))
+        conn.commit()
+        db.log_job_event(conn, job_id, "cancelled by Abort before it started running")
+        return JobRunOutcome(job_id=job_id, status="FAILED", error=ABORTED_BEFORE_START_ERROR, record_history=False)
 
     delivered = manifest_mod.load_progress(job_id)
     # Files a previous attempt of this same transfer left half written (see
@@ -694,6 +780,13 @@ def _run_job_transfer(conn: sqlite3.Connection, backend: MtpBackend, job_row: sq
         if file.dest_relative_path in delivered:
             continue
 
+        if should_abort():
+            done_count = len(manifest_mod.load_progress(job_id))
+            error = _aborted_between_files_error(done_count, len(manifest.files))
+            db.update_job_status(conn, job_id, "INTERRUPTED", bytes_done=bytes_done, error=error)
+            db.log_job_event(conn, job_id, f"aborted by user between files -> INTERRUPTED ({error})")
+            return JobRunOutcome(job_id=job_id, status="INTERRUPTED", error=error)
+
         # UI-006 (stall detection): honest per-file "still actively
         # working" touch-point, in addition to the post-completion one
         # below -- for a single large file whose one send_file() call
@@ -720,10 +813,15 @@ def _run_job_transfer(conn: sqlite3.Connection, backend: MtpBackend, job_row: sq
             # the old behaviour. Runs on this same worker thread, inside
             # send_file, so it shares this function's own DB connection
             # safely.
-            def report_progress(sent: int, _total: int, _already: int = bytes_done) -> None:
+            def report_progress(sent: int, total: int, _already: int = bytes_done) -> None:
                 db.update_job_status(
                     conn, job_id, "RUNNING", last_progress_at=db.now_iso(), bytes_done=_already + sent,
                 )
+                # Never on the last call (sent == total): every byte is
+                # already across and only the device's commit is left --
+                # see this function's docstring.
+                if sent < total and should_abort():
+                    raise TransferAborted("aborted by user mid-transfer")
 
             # W3-006 Override: force_overwrite is only ever true on a job
             # created by services.override_job(), the user's explicit
@@ -745,6 +843,11 @@ def _run_job_transfer(conn: sqlite3.Connection, backend: MtpBackend, job_row: sq
                 # install node is not one (see mtp/windows.py).
                 expected_sha256=file.sha256 if storage == STORAGE_SD_CARD else None,
             )
+        except TransferAborted:
+            error = _aborted_mid_file_error(file.dest_relative_path, storage)
+            db.update_job_status(conn, job_id, "INTERRUPTED", bytes_done=bytes_done, error=error)
+            db.log_job_event(conn, job_id, f"aborted by user mid-file -> INTERRUPTED ({error})")
+            return JobRunOutcome(job_id=job_id, status="INTERRUPTED", error=error)
         except FileAlreadyExistsError:
             # Exists on the device, but WE have no record (progress.json) of
             # having put it there ourselves during this job -- cannot prove

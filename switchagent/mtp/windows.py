@@ -113,6 +113,7 @@ from .errors import (
     FileAlreadyExistsError,
     InvalidOperationError,
     StorageNotFoundError,
+    TransferAborted,
     TransferFailedError,
 )
 
@@ -820,6 +821,15 @@ class RealMtpBackend(MtpBackend):
                 # the other transport would only produce the same refusal a
                 # second time, so these propagate unchanged.
                 raise
+            except TransferAborted:
+                # The user pressed Abort (raised by the caller's own progress
+                # callback, mid-stream). Not a fault: no retry, no Shell
+                # fallback -- either would send the very file being stopped.
+                # The session is closed because an object was left created
+                # but never committed; the next transfer opens a fresh one.
+                log.info("op=%s aborted by the user mid-transfer -- the object was not committed", operation_id)
+                self._close_wpd()
+                raise
             except Exception as exc:  # noqa: BLE001 -- see _wpd_session(): any WPD fault falls back, never fails the job
                 self._close_wpd()
                 if isinstance(exc, _WpdWriteFailed) and storage in SIZE_VERIFIABLE_STORAGES:
@@ -957,6 +967,8 @@ class RealMtpBackend(MtpBackend):
                 parent_id, filename, source_path, progress=progress,
                 remember=storage in SIZE_VERIFIABLE_STORAGES,
             )
+        except TransferAborted:
+            raise  # the user's Abort, not a write failure -- see send_file
         except Exception as exc:  # noqa: BLE001 -- re-raised, marked as possibly half-written
             raise _WpdWriteFailed(exc) from exc
         log.info("wpd transfer dest=%r %s", dest_path, timing)

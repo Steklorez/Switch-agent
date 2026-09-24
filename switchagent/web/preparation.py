@@ -26,6 +26,14 @@ RESERVE_BYTES = 512 * 1024 * 1024
 _TITLE_VARIANT_TO_ROLE = {"BASE": "base", "UPDATE": "update", "DLC": "dlc"}
 
 
+# An item the user took out of the queue (PreparationQueue.remove_items()).
+REMOVED_PHASE = 'Removed'
+# Phases an item can still be removed in. "Installing" means its jobs are
+# with the worker: services.remove_from_queue() cancels those first and
+# refuses outright if one is already sending.
+_REMOVABLE_PHASES = ('Waiting', 'Analyzing', 'Extracting', 'Preparing', 'Prepared', 'Installing')
+
+
 def _library_item_role(row):
     """'base'/'update'/'dlc'/'mod' for a library item that has no job -- and
     therefore no frozen manifest -- yet. None when it cannot be told (no
@@ -173,11 +181,15 @@ class PreparationQueue:
         self.serial = threading.Lock()
         self.states = {}
         self.stop = threading.Event()
+        # task_id -> why its run was stopped from outside (abort_all(),
+        # clear_for_device()) -- what that run then reports as its reason.
+        self._stopped_reasons = {}
 
     def submit(self, item_ids, target):
         task_id = uuid.uuid4().hex
         item_ids = list(dict.fromkeys(item_ids))
         from .. import queue_worker
+        from .services import cover_id_for_title
         items = {}
         with db.open_db(self.db_path) as conn:
             chains = _group_by_title(conn, item_ids)
@@ -193,7 +205,8 @@ class PreparationQueue:
                 # No ' — Mod' suffix any more: the row now carries a [Mod]
                 # badge, and saying it twice on one line reads as a bug.
                 items[str(item_id)] = {'name': name, 'phase': 'Waiting', 'order': position,
-                                       'job_ids': [], 'role': _library_item_role(row)}
+                                       'job_ids': [], 'role': _library_item_role(row),
+                                       'cover_id': cover_id_for_title(row['title_id']) if row else None}
         with self.lock:
             # A finished ("Ready") preparation is meant to clear itself the
             # instant it completes (see the `run()` closure below) -- this
@@ -225,7 +238,12 @@ class PreparationQueue:
                     return
                 if item_id is not None:
                     fields.pop('name', None)  # Keep the resolved family name, especially for mods.
-                    state["items"][str(item_id)].update(fields)
+                    item = state["items"][str(item_id)]
+                    # Removed from the queue (remove_items()): whatever the
+                    # run is still doing with it, nothing brings it back.
+                    if item.get('phase') == REMOVED_PHASE:
+                        return
+                    item.update(fields)
                 else:
                     state.update(fields)
 
@@ -262,6 +280,9 @@ class PreparationQueue:
                         timer.start()
                 except Exception as exc:
                     update(phase="Failed", error=str(exc), finished=time.time())
+                finally:
+                    with self.lock:
+                        self._stopped_reasons.pop(task_id, None)
 
         # A preparation must finish writing manifests before normal process exit.
         threading.Thread(target=run, name="switchagent-preparation", daemon=False).start()
@@ -323,17 +344,33 @@ class PreparationQueue:
             def check_still_running():
                 if self.stop.is_set():
                     raise RuntimeError('Application stopped; remaining items were not prepared')
+                reason = stopped_reason()
+                if reason:
+                    # clear_for_device()/abort_all() removed this run's own
+                    # state -- update() would already silently no-op from
+                    # here on, but stop doing any further real work
+                    # (creating jobs, polling) too, not just the UI updates.
+                    raise RuntimeError(reason)
+
+            def stopped_reason():
                 with self.lock:
-                    cleared = task_id not in self.states
-                if cleared:
-                    # clear_for_device() removed this run's own state (the
-                    # target device's connection state changed mid-run) --
-                    # update() would already silently no-op from here on, but
-                    # stop doing any further real work (creating jobs,
-                    # polling) too, not just the UI updates.
-                    raise RuntimeError(
-                        'Preparation cleared (device connection changed); remaining items were not prepared',
-                    )
+                    return _stopped_reason_locked()
+
+            def _stopped_reason_locked():
+                if task_id in self.states:
+                    return None
+                return self._stopped_reasons.get(
+                    task_id, 'Preparation cleared (device connection changed); remaining items were not prepared',
+                )
+
+            def removed(member_id):
+                with self.lock:
+                    return _removed_locked(member_id)
+
+            def _removed_locked(member_id):
+                state = self.states.get(task_id)
+                item = state['items'].get(str(member_id)) if state else None
+                return bool(item) and item.get('phase') == REMOVED_PHASE
 
             def progress_for(member_id):
                 def preparing(item_id=None, **fields):
@@ -370,7 +407,7 @@ class PreparationQueue:
                 if next_index >= len(order):
                     return None
                 next_chain, next_item = order[next_index]
-                if next_chain in blocked_chains:
+                if next_chain in blocked_chains or removed(next_item):
                     return None
                 next_row = db.get_library_item_by_id(conn, next_item)
                 if next_row is None:
@@ -402,26 +439,36 @@ class PreparationQueue:
                     raise state['error']
                 return state['part']
 
-            def abandon_prepared(state, reason):
-                """A prepared-ahead item whose turn never came (its chain got
-                blocked, or the run stopped). Its jobs were never confirmed,
-                so nothing has been sent and nothing can be: mark them
-                abandoned for the record and release the staged payload."""
-                try:
-                    part = collect(state)
-                except Exception:  # noqa: BLE001 -- it never became a job; nothing to unwind
-                    record(event='Discarded a prepared-ahead item that had failed to prepare',
-                           item=state['item_id'], chain=state['chain_key'])
-                    return
+            def release_unconfirmed(part, reason):
+                """Jobs that were prepared but never confirmed: nothing has
+                been sent and nothing can be. Marked abandoned for the
+                record, their staged payload released."""
                 batch = part.get('batch_id') if part else None
                 if batch is None:
-                    return
+                    return False
                 conn.execute(
                     "UPDATE jobs SET status='FAILED', abandoned=1, error=? WHERE batch_id=? AND status='PENDING_CONFIRM'",
                     (reason, batch),
                 )
                 conn.commit()
                 cleanup_batch_if_all_done(conn, batch)
+                return True
+
+            def abandon_prepared(state, reason):
+                """A prepared-ahead item whose turn never came (its chain got
+                blocked, or the run stopped)."""
+                try:
+                    part = collect(state)
+                except Exception:  # noqa: BLE001 -- it never became a job; nothing to unwind
+                    record(event='Discarded a prepared-ahead item that had failed to prepare',
+                           item=state['item_id'], chain=state['chain_key'])
+                    return
+                if not release_unconfirmed(part, reason):
+                    return
+                if removed(state['item_id']):
+                    record(event='Discarded a prepared-ahead item removed from the queue',
+                           item=state['item_id'], chain=state['chain_key'])
+                    return
                 # Back to "Waiting", never "Failed": preparing this item early
                 # was OUR optimisation, and undoing it must leave exactly the
                 # state the strictly-sequential loop would have left -- an
@@ -440,6 +487,12 @@ class PreparationQueue:
                     if chain_key in blocked_chains:
                         continue
                     check_still_running()
+                    if removed(item_id):
+                        if lookahead is not None and lookahead['index'] == index:
+                            abandon_prepared(lookahead, 'Removed from the queue')
+                            lookahead = None
+                        record(event='Skipped: removed from the queue', item=item_id, chain=chain_key)
+                        continue
 
                     if lookahead is not None and lookahead['index'] == index:
                         part = collect(lookahead)
@@ -469,9 +522,34 @@ class PreparationQueue:
                     if batch is None:
                         continue
 
-                    # Only now does the worker get to see this item at all.
-                    for entry in part['created']:
-                        db.confirm_job(conn, entry['job_id'])
+                    # Only now does the worker get to see this item at all --
+                    # unless the run was stopped while this item was being
+                    # prepared (extracting an archive can take minutes, and
+                    # Abort or a reconnect may land in the middle of it).
+                    # Checked and confirmed under self.lock, the same lock
+                    # abort_all() removes states under: once abort_all() has
+                    # returned, no job of a run it stopped can still become
+                    # visible to the worker.
+                    with self.lock:
+                        reason = _stopped_reason_locked()
+                        if reason is None and self.stop.is_set():
+                            reason = 'Application stopped; remaining items were not prepared'
+                        # Removed from the queue while it was being prepared
+                        # (an archive can take minutes to unpack): decided
+                        # under the same lock remove_items() marks it under,
+                        # so it is either confirmed or dropped, never both.
+                        dropped = reason is None and _removed_locked(item_id)
+                        if reason is None and not dropped:
+                            for entry in part['created']:
+                                db.confirm_job(conn, entry['job_id'])
+                    if dropped:
+                        release_unconfirmed(part, 'Removed from the queue')
+                        record(event='Dropped after preparing: removed from the queue',
+                               item=item_id, chain=chain_key)
+                        continue
+                    if reason is not None:
+                        release_unconfirmed(part, f'Not started: {reason}')
+                        raise RuntimeError(reason)
                     update(item_id=item_id, phase='Installing')
 
                     # The console is busy from here on; use that time to get
@@ -482,6 +560,12 @@ class PreparationQueue:
                     previous = None
                     blocked_here = False
                     while True:
+                        if removed(item_id):
+                            # Its not-yet-running jobs were cancelled by
+                            # services.remove_from_queue(): not a failure to
+                            # stop the chain on, just nothing left to wait for.
+                            record(event='Removed from the queue before it started', item=item_id, chain=chain_key)
+                            break
                         jobs = db.list_jobs_by_batch(conn, batch)
                         statuses = [(j['id'], j['status'], j['error']) for j in jobs]
                         if statuses != previous:
@@ -504,12 +588,9 @@ class PreparationQueue:
                             break
                         if self.stop.wait(.5):
                             raise RuntimeError('Application stopped; remaining items were not prepared')
-                        with self.lock:
-                            if task_id not in self.states:
-                                raise RuntimeError(
-                                    'Preparation cleared (device connection changed); '
-                                    'remaining items were not prepared',
-                                )
+                        reason = stopped_reason()
+                        if reason:
+                            raise RuntimeError(reason)
                     if blocked_here:
                         update(item_id=item_id, phase='Failed',
                                error='Needs your action -- see the job above (Override/Retry/Skip)')
@@ -526,6 +607,12 @@ class PreparationQueue:
                             )
                             lookahead = None
                         continue  # stop just THIS chain; the outer loop moves to the next one
+                    if removed(item_id):
+                        # Nothing was installed; its cancelled jobs' staging
+                        # is released like any other finished batch's.
+                        cleanup_batch_if_all_done(conn, batch)
+                        record(event='Released after removal', item=item_id, chain=chain_key)
+                        continue
                     update(item_id=item_id, phase='Cleaning')
                     cleanup_batch_if_all_done(conn, batch)
                     if batch_work_dir(batch).exists():
@@ -562,6 +649,50 @@ class PreparationQueue:
             for task_id in [tid for tid, state in self.states.items() if state.get('target') == device_id]:
                 del self.states[task_id]
 
+    def abort_all(self) -> int:
+        """Queue page "Abort": every preparation run still in progress stops
+        creating jobs. Its panel goes away at once (like clear_for_device());
+        the run itself unwinds at its next check -- at the latest when the
+        item it is preparing right now is ready, at which point that item's
+        jobs are released unconfirmed instead of handed to the worker (see
+        _install_sequentially). Finished panels ("Ready"/"Failed") are left
+        alone: they describe runs that are already over. Returns how many
+        runs were stopped."""
+        with self.lock:
+            running = [task_id for task_id, state in self.states.items()
+                       if state.get('phase') not in ('Ready', 'Failed')]
+            for task_id in running:
+                self._stopped_reasons[task_id] = 'Aborted by user; remaining items were not prepared'
+                del self.states[task_id]
+        return len(running)
+
+    def remove_items(self, item_ids) -> list:
+        """Queue page "Remove from queue": items of a run still in progress
+        are dropped from it -- the run skips them when their turn comes, one
+        being prepared right now is released instead of confirmed, and one
+        whose jobs were already handed to the worker stops being waited on
+        (see _install_sequentially). Cancelling those jobs, and refusing when
+        one is already sending, is services.remove_from_queue()'s part.
+        Returns the ids actually removed."""
+        wanted = {str(item_id) for item_id in item_ids}
+        removed = []
+        with self.lock:
+            for state in self.states.values():
+                if state.get('phase') in ('Ready', 'Failed'):
+                    continue
+                for key, item in state['items'].items():
+                    if key in wanted and item.get('phase') in _REMOVABLE_PHASES:
+                        item['phase'] = REMOVED_PHASE
+                        removed.append(int(key))
+        return removed
+
+    def has_running(self) -> bool:
+        """Is any preparation run still going (i.e. would abort_all() stop
+        anything)? The Queue page shows Abort only while there is something
+        to abort."""
+        with self.lock:
+            return any(state.get('phase') not in ('Ready', 'Failed') for state in self.states.values())
+
     def continue_chain(self, resolved_job_id):
         """Called right after a job is successfully Overridden/Retried/
         Skipped (see app.py's override/cancel routes) -- if that job
@@ -596,10 +727,26 @@ class PreparationQueue:
         if remaining and target:
             self.submit(remaining, target)
 
+    def dock_items(self):
+        """What the queue dock needs from preparation, and nothing more:
+        one entry per library item still on its way to the console, in
+        submit order. A cheap copy under the lock -- unlike snapshot(), no
+        database reads, since the dock polls this on every page."""
+        with self.lock:
+            return [
+                {"library_item_id": int(item_id), "phase": item.get("phase"), "error": item.get("error"),
+                 "job_ids": list(item.get("job_ids", ())), "name": item.get("name"),
+                 "role": item.get("role"), "started": state["started"], "order": item.get("order", 0)}
+                for state in sorted(self.states.values(), key=lambda s: s["started"])
+                for item_id, item in state["items"].items()
+                if item.get("phase") != REMOVED_PHASE
+            ]
+
     def snapshot(self):
         with self.lock:
             result = copy.deepcopy(list(self.states.values()))
         for state in result:
+            state["items"] = {k: v for k, v in state["items"].items() if v.get("phase") != REMOVED_PHASE}
             state["elapsed"] = int(state.get("finished", time.time()) - state["started"])
         from .services import _job_view, _resolve_latest_retry
         with db.open_db(self.db_path) as conn:

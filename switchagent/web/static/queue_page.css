@@ -1,0 +1,66 @@
+/* Queue page, in the look of the queue dock: one glass card per game, its
+   cover once on the left, then one row per package it installs -- each with
+   a segmented bar whose blocks run while that package is being sent. The
+   text, badges, pills and buttons are the same as before -- only the frame
+   around them changes.
+
+   Scoped to Queue's own two lists: History reuses .job-row and keeps its
+   own look. */
+.game-group {
+  list-style: none;
+  display: grid; grid-template-columns: auto 1fr; gap: 14px; align-items: start;
+  padding: 12px; border: 1px solid #3d8bff29; border-radius: 14px;
+  background: rgba(10, 17, 31, .82);
+  transition: border-color .3s ease, box-shadow .3s ease;
+}
+.game-group + .game-group { margin-top: 8px; }
+.game-group:has(.job-row[data-status="RUNNING"]) {
+  border-color: #3d8bffa6;
+  box-shadow: 0 0 0 1px #0006, 0 0 26px #3d8bff33, inset 0 0 22px #3d8bff0d;
+}
+.game-group:has(:is(.job-row[data-status="FAILED"], .job-row[data-status="SOURCE_CHANGED"], .job-row[data-status="Failed"])) {
+  border-color: #e5484d66;
+}
+.game-group-thumb.game-thumb { width: 96px; height: 96px; border-radius: 10px; font-size: 1.6rem; }
+.game-group-jobs { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; min-width: 0; }
+
+/* A row inside a card: no frame of its own, a hairline between packages. */
+:is(#job-list, #preparation-list) .job-row {
+  gap: 6px 14px; padding: 4px 0 10px; margin: 0; min-height: 0;
+  border: 0; border-radius: 0; background: none;
+}
+:is(#job-list, #preparation-list) .game-group-jobs > .job-row + .job-row {
+  padding-top: 10px; border-top: 1px solid #ffffff0f;
+}
+:is(#job-list, #preparation-list) .game-group-jobs > .job-row:last-child { padding-bottom: 2px; }
+/* The old full-row tint and the sweeping underline give way to the bar. */
+:is(#job-list, #preparation-list) .job-row::before,
+:is(#job-list, #preparation-list) .job-row.progress-active::after { content: none; }
+
+.job-bar {
+  flex-basis: 100%; order: 99;
+  --seg-color: var(--stage-color);
+}
+.job-bar .seg-bar-fill { width: var(--progress, 0%); }
+.job-row[data-status="RUNNING"] .job-bar { --seg-color: linear-gradient(90deg, #2a6ff0, #5ab8ff); }
+
+@media (max-width: 640px) {
+  .game-group { gap: 10px; padding: 10px; }
+  .game-group-thumb.game-thumb { width: 56px; height: 56px; }
+}
+
+/* The cover column: the cover, and under it "Remove" for the whole game. */
+.game-group-side { display: flex; flex-direction: column; align-items: stretch; gap: 8px; }
+.game-remove-btn {
+  min-height: 0; padding: 4px 8px; font-size: .78rem;
+  background: none; border-color: #ffffff1f; color: var(--text-dim);
+}
+.game-remove-btn:hover:not(:disabled) { border-color: #e5484d99; color: #ff9da0; background: #e5484d14; }
+
+/* Paused: said where it is seen, not only in the header. */
+.paused-banner {
+  margin: 0 0 12px; padding: 10px 14px; border-radius: 12px;
+  border: 1px solid #f5a62366; background: #f5a62314; color: #ffd28a; font-size: .9rem;
+}
+.paused-banner[hidden] { display: none; }
+.status-pill.status-paused { background: #f5a62326; color: #ffc766; }

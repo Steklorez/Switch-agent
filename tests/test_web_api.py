@@ -1026,7 +1026,7 @@ def test_queue_page_shows_friendly_waiting_for_device_message_no_retry_button(cl
     # status -- the friendly message above is shown instead
     assert "is not registered with this worker" not in html
     assert f'data-job-action="retry" data-job-id="{job_id}"' not in html  # self-resolving, no retry button
-    assert f'data-job-action="cancel" data-job-id="{job_id}"' in html
+    assert f'data-remove-jobs="{job_id}"' in html  # taken out of the queue from its game card
 
 
 def test_waiting_for_device_error_message_never_contains_raw_device_id(client, web_ctx):
@@ -2930,3 +2930,114 @@ def test_a_missing_static_file_does_not_break_the_page(client):
     from switchagent.web import app as app_mod
 
     assert app_mod._static_url("no-such-file.js") == "/static/no-such-file.js"
+
+
+# ---------------------------------------------------------------------------
+# Queue dock: one row per game along the bottom of every page
+# ---------------------------------------------------------------------------
+
+def test_queue_dock_is_empty_with_nothing_queued(client):
+    assert client.get("/api/queue/dock").json() == {"games": [], "paused": False}
+
+
+def test_queue_dock_shows_one_row_per_game_not_per_file(client, web_ctx):
+    item_ids = _seed_four_items(web_ctx)
+    client.post("/api/jobs", json={"library_item_ids": item_ids, "target_device_id": "mock-switch-parent"})
+
+    games = client.get("/api/queue/dock").json()["games"]
+    assert [g["name"] for g in games] == ["Bread and Fred", "Quake II", "Sacred 2"]
+    bread = games[0]
+    assert bread["cover_id"] == "0100AF401B6A4000"
+    assert bread["parts_total"] == 2
+    assert bread["parts_label"] == "Game · Update"
+    assert bread["state"] == "waiting"
+    assert bread["status_label"] == "Queued"
+
+
+def test_queue_dock_puts_the_installing_game_first_with_its_bytes(client, web_ctx):
+    item_ids = _seed_four_items(web_ctx)
+    created = client.post("/api/jobs", json={
+        "library_item_ids": item_ids, "target_device_id": "mock-switch-parent",
+    }).json()["created"]
+    by_item = {c["library_item_id"]: c["job_id"] for c in created}
+    with db.open_db(web_ctx.db_path) as conn:
+        db.update_job_status(conn, by_item[item_ids[3]], "RUNNING", bytes_total=1000, bytes_done=250)
+
+    games = client.get("/api/queue/dock").json()["games"]
+    assert games[0]["name"] == "Sacred 2"
+    assert games[0]["state"] == "installing"
+    assert (games[0]["bytes_done"], games[0]["bytes_total"]) == (250, 1000)
+
+
+def test_queue_dock_counts_a_finished_part_and_drops_a_finished_game(client, web_ctx):
+    item_ids = _seed_four_items(web_ctx)
+    created = client.post("/api/jobs", json={
+        "library_item_ids": item_ids, "target_device_id": "mock-switch-parent",
+    }).json()["created"]
+    by_item = {c["library_item_id"]: c["job_id"] for c in created}
+    with db.open_db(web_ctx.db_path) as conn:
+        db.update_job_status(conn, by_item[item_ids[0]], "DONE_UNVERIFIED", finished_at=db.now_iso())
+        db.update_job_status(conn, by_item[item_ids[2]], "DONE_UNVERIFIED", finished_at=db.now_iso())
+
+    games = {g["name"]: g for g in client.get("/api/queue/dock").json()["games"]}
+    assert "Quake II" not in games
+    assert games["Bread and Fred"]["parts_done"] == 1
+    assert games["Bread and Fred"]["bytes_done"] > 0
+
+
+def test_queue_dock_marks_a_failed_part_as_needing_a_decision(client, web_ctx):
+    item_ids = _seed_four_items(web_ctx)
+    created = client.post("/api/jobs", json={
+        "library_item_ids": item_ids[2:3], "target_device_id": "mock-switch-parent",
+    }).json()["created"]
+    with db.open_db(web_ctx.db_path) as conn:
+        db.update_job_status(conn, created[0]["job_id"], "FAILED", error="disk full")
+
+    [game] = client.get("/api/queue/dock").json()["games"]
+    assert game["state"] == "attention"
+    assert game["status_label"] == "Needs a decision in Queue"
+
+
+def test_queue_dock_shows_an_item_still_being_prepared(client, web_ctx, monkeypatch):
+    item_ids = _seed_four_items(web_ctx)
+    monkeypatch.setattr(web_ctx.preparations, "dock_items", lambda: [{
+        "library_item_id": item_ids[2], "phase": "Analyzing", "error": None, "job_ids": [],
+        "name": "Quake II [010048F0195E8000][v0].nsp", "role": "base", "started": 0.0, "order": 0,
+    }])
+
+    [game] = client.get("/api/queue/dock").json()["games"]
+    assert game["name"] == "Quake II"
+    assert game["state"] == "preparing"
+    assert game["bytes_total"] > 0
+
+
+def test_every_page_carries_the_queue_dock(client):
+    for path in ("/", "/queue", "/history", "/devices", "/settings"):
+        assert 'id="queue-dock"' in client.get(path).text, path
+
+
+def test_queue_rows_carry_their_games_cover_id(client, web_ctx):
+    """Queue draws each row's game cover: an update shows its base game's."""
+    item_ids = _seed_four_items(web_ctx)
+    client.post("/api/jobs", json={"library_item_ids": item_ids[:2], "target_device_id": "mock-switch-parent"})
+
+    jobs = [j for g in client.get("/api/queue/grouped").json() for j in g["jobs"]]
+    assert {j["cover_id"] for j in jobs} == {"0100AF401B6A4000"}
+    assert 'class="game-thumb game-group-thumb"' in client.get("/queue").text
+
+
+def test_queue_groups_one_card_per_game_with_a_row_per_package(client, web_ctx):
+    item_ids = _seed_four_items(web_ctx)
+    client.post("/api/jobs", json={"library_item_ids": item_ids, "target_device_id": "mock-switch-parent"})
+
+    [batch] = client.get("/api/queue/grouped").json()
+    cards = [(g["cover_id"], len(g["jobs"])) for g in batch["games"]]
+    assert cards == [("0100AF401B6A4000", 2), ("010048F0195E8000", 1), ("010074402766A000", 1)]
+    html = client.get("/queue").text
+    assert html.count('class="game-group"') == 3
+    assert html.count('class="seg-bar job-bar') == 4
+
+
+def test_queue_page_switches_the_dock_off(client):
+    assert 'id="queue-dock" class="queue-dock" aria-label="Queue" hidden data-off' in client.get("/queue").text
+    assert "data-off" not in client.get("/history").text

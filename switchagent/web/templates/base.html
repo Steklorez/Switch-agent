@@ -7,6 +7,10 @@
 <link rel="stylesheet" href="{{ static_url('style.css') }}">
 {% block styles %}{% endblock %}
 <link rel="stylesheet" href="{{ static_url('showroom.css') }}">
+<link rel="stylesheet" href="{{ static_url('queue_dock.css') }}">
+{# Hold the first paint of the next page until the dock exists, so a page
+   change never shows a frame without it (see queue_dock.css). #}
+<link rel="expect" href="#queue-dock" blocking="render">
 </head>
 <body>
 <header class="topbar">
@@ -38,6 +42,26 @@
     <span class="nav-icon">⚙</span><span class="nav-label">Settings</span>
   </a>
 </nav>
+
+{#- Not on Queue itself: that page is the full version of the same list. -#}
+<aside id="queue-dock" class="queue-dock" aria-label="Queue" hidden{{ " data-off" if active_page == "queue" }}>
+  <div class="queue-dock-panel">
+  <div class="queue-dock-head">
+    <span class="queue-dock-title">Queue <span class="queue-dock-count" id="queue-dock-count"></span></span>
+    <span class="queue-dock-summary" id="queue-dock-summary"></span>
+    <button type="button" class="queue-dock-btn" id="queue-dock-toggle" aria-expanded="true" aria-controls="queue-dock-list" title="Minimize">
+      <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M3 8h10"/></svg>
+    </button>
+    <button type="button" class="queue-dock-btn" id="queue-dock-close" title="Hide until something new is queued">
+      <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M4 4l8 8M12 4l-8 8"/></svg>
+    </button>
+  </div>
+  <div class="queue-dock-line" id="queue-dock-line"><span></span></div>
+  <ol class="queue-dock-list" id="queue-dock-list"></ol>
+  <a class="queue-dock-more" id="queue-dock-more" href="/queue" hidden></a>
+  </div>
+</aside>
+<script src="{{ static_url('queue_dock.js') }}"></script>
 
 <main class="content">
 {% block content %}{% endblock %}

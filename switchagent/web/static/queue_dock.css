@@ -1,0 +1,132 @@
+/* Queue dock: a glowing panel along the bottom of every page while anything
+   is being installed -- one row per game, its whole bar across all parts.
+   Desktop only: on a phone the bottom nav already takes that space.
+
+   Page changes use the browser's cross-document view transitions: the dock,
+   top bar and nav are named, so they stay put while only the page content
+   between them changes. Browsers without it simply navigate as before. */
+@view-transition { navigation: auto; }
+/* On the panel, not its .queue-dock strip: a view-transition-name makes an
+   element a backdrop root, and the panel's blur would then sample only the
+   transparent strip -- the page underneath shows straight through. */
+.queue-dock-panel { view-transition-name: queue-dock; }
+.topbar { view-transition-name: topbar; }
+.main-nav { view-transition-name: main-nav; }
+::view-transition-group(root) { animation-duration: 160ms; }
+@media (prefers-reduced-motion: reduce) {
+  @view-transition { navigation: none; }
+}
+
+/* .queue-dock is a transparent strip the width of the content area (its
+   left/right insets stop at the scrollbar; a width in vw or % would not),
+   and .queue-dock-panel is the visible panel centred inside it -- over the
+   content column: 180px nav on the left, 16px gutters. */
+.queue-dock {
+  --dock-blue: #3d8bff;
+  --dock-cyan: #5ab8ff;
+  position: fixed; z-index: 24;
+  left: calc(180px + 16px); right: 16px; bottom: 14px;
+  pointer-events: none;
+}
+.queue-dock[hidden] { display: none; }
+.queue-dock-panel {
+  display: flex; flex-direction: column;
+  max-width: 920px; max-height: min(60vh, 420px); margin-inline: auto;
+  border: 1.5px solid #3d8bffa6; border-radius: 14px;
+  background: rgba(9, 15, 29, .9);
+  backdrop-filter: blur(12px);
+  box-shadow: 0 0 0 1px #0009, 0 14px 44px #000a, 0 0 30px #3d8bff4d, inset 0 0 26px #3d8bff12;
+  overflow: hidden;
+  pointer-events: auto;
+}
+body.has-queue-dock { padding-bottom: calc(24px + var(--queue-dock-h, 0px)); }
+
+@media (max-width: 767px) {
+  .queue-dock { display: none !important; }
+  body.has-queue-dock { padding-bottom: calc(var(--nav-h) + 8px); }
+}
+
+/* -- header ------------------------------------------------------------ */
+
+.queue-dock-head {
+  display: flex; align-items: center; gap: 12px;
+  padding: 8px 8px 8px 16px; border-bottom: 1px solid #3d8bff2e;
+}
+.queue-dock-title { font-size: 1.05rem; font-weight: 650; white-space: nowrap; }
+.queue-dock-count { font-variant-numeric: tabular-nums; }
+.queue-dock-summary {
+  flex: 1; min-width: 0; color: var(--text-dim); font-size: .85rem;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  opacity: 0; transition: opacity .2s ease;
+}
+.queue-dock-btn {
+  display: grid; place-items: center; width: 28px; height: 28px; flex: none;
+  border: 0; border-radius: 7px; background: none; color: #8fb6ff; cursor: pointer;
+}
+.queue-dock-btn:hover { background: #3d8bff26; color: #fff; }
+.queue-dock-btn svg { width: 14px; height: 14px; fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; }
+
+/* Minimized: the header plus a hairline of the game being installed. */
+.queue-dock-line { display: none; position: relative; height: 3px; background: #ffffff0d; }
+.queue-dock-line span {
+  position: absolute; inset: 0 auto 0 0; width: 0;
+  background: linear-gradient(90deg, var(--dock-blue), var(--dock-cyan)); box-shadow: 0 0 8px #3d8bffaa;
+  transition: width .6s cubic-bezier(.2,.8,.25,1);
+}
+.queue-dock.is-collapsed .queue-dock-head { border-bottom: 0; }
+.queue-dock.is-collapsed .queue-dock-line { display: block; }
+.queue-dock.is-collapsed .queue-dock-summary { opacity: 1; }
+.queue-dock.is-collapsed .queue-dock-list,
+.queue-dock.is-collapsed .queue-dock-more { display: none; }
+
+/* -- rows -------------------------------------------------------------- */
+
+.queue-dock-list { list-style: none; margin: 0; padding: 0 8px; overflow-y: auto; }
+.queue-dock-row + .queue-dock-row { border-top: 1px solid #ffffff0f; }
+.queue-dock-link {
+  display: grid; grid-template-columns: 64px minmax(120px, 210px) 1fr auto;
+  align-items: center; gap: 16px; padding: 8px; color: var(--text);
+  border-radius: 8px;
+}
+.queue-dock-link:hover { background: #3d8bff0f; }
+
+.queue-dock-title-col { display: grid; gap: 2px; min-width: 0; }
+.queue-dock-name { font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.queue-dock-parts { color: var(--text-dim); font-size: .75rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+.queue-dock-progress { display: grid; gap: 5px; min-width: 0; }
+.queue-dock-status { color: var(--text-dim); font-size: .82rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.queue-dock-row[data-state="installing"] .queue-dock-status { color: #6fb0ff; }
+.queue-dock-row[data-state="attention"] .queue-dock-status { color: var(--conflict); }
+
+/* The bar itself is the shared .seg-bar (style.css); only its colour per
+   state is the dock's. */
+.queue-dock-row[data-state="installing"] .seg-bar { --seg-color: linear-gradient(90deg, #2a6ff0, var(--dock-cyan)); }
+.queue-dock-row[data-state="preparing"] .seg-bar { --seg-color: #3d8bff99; }
+/* Stuck on a decision: the whole bar says so, whatever was already sent. */
+.queue-dock-row[data-state="attention"] .seg-bar-fill { width: 100% !important; }
+.queue-dock-row[data-state="attention"] .seg-bar { --seg-color: #ff8a0099; }
+
+.queue-dock-numbers {
+  display: flex; gap: 14px; justify-content: flex-end; min-width: 150px;
+  color: var(--text-dim); font-size: .85rem; font-variant-numeric: tabular-nums; white-space: nowrap;
+}
+.queue-dock-row[data-state="installing"] .queue-dock-numbers { color: var(--text); }
+.queue-dock-pct:empty { display: none; }
+
+.queue-dock-more {
+  display: block; padding: 6px 16px 10px; font-size: .82rem; color: var(--text-dim); text-align: right;
+  border-top: 1px solid #ffffff0f;
+}
+.queue-dock-more:hover { color: var(--text); }
+.queue-dock-more[hidden] { display: none; }
+
+/* A narrow window: the name column gives way first, the numbers stay. */
+@media (max-width: 1000px) {
+  .queue-dock-link { grid-template-columns: 56px minmax(100px, 160px) 1fr auto; gap: 12px; }
+  .queue-dock-link .game-thumb { width: 56px; height: 36px; }
+  .queue-dock-numbers { min-width: 0; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .queue-dock-line span, .queue-dock-summary { transition: none; }
+}

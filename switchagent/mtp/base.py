@@ -208,7 +208,12 @@ class MtpBackend(ABC):
         transfer mid-flight (the Shell copy engine cannot) simply never calls
         it. A backend that does call it must do so from the calling thread,
         while send_file is still running, and must not call it so often that
-        the callback's own cost matters -- roughly once a second. The parent
+        the callback's own cost matters -- roughly once a second. The
+        callback may raise errors.TransferAborted to stop the transfer (the
+        user pressed Abort); a backend must let that propagate unchanged --
+        never retry the file, never fall back to another transport. That is
+        also why a backend that cannot report progress cannot be stopped
+        mid-file: the callback is the only way in. The parent
         directory of dest_path must already exist (call ensure_directory
         first) -- raises DestinationNotFoundError otherwise, it does not
         create it implicitly.
