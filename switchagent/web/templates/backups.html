@@ -50,7 +50,7 @@
     <div class="backup-toolbar" id="backup-save-toolbar" hidden>
       <input id="backup-save-search" type="search" placeholder="Search games or profiles" aria-label="Search games or profiles">
       <label class="backup-checkbox-filter" for="backup-uncopied-only">
-        <input id="backup-uncopied-only" type="checkbox"> Not yet copied
+        <input id="backup-uncopied-only" type="checkbox"> Never backed up
       </label>
       <details class="backup-profile-options" id="backup-profile-options" hidden>
         <summary>Profiles</summary>
@@ -69,13 +69,16 @@
   </section>
 
   <section id="backup-panel-local" class="backup-panel" role="tabpanel" aria-labelledby="backup-tab-local" hidden>
-    <div class="backup-section-heading">
+    <div class="backup-section-heading backup-local-heading">
       <div><h3>Saved on this computer</h3><p class="backup-muted">These copies are ready to download as a ZIP.</p></div>
+      <button type="button" class="btn btn-primary" id="backup-download-all" disabled>Download all copies ZIP</button>
     </div>
-    <div class="backup-toolbar">
-      <button type="button" class="btn btn-secondary" id="backup-select-all-local">Select all ready</button>
-      <button type="button" class="btn btn-secondary" id="backup-clear-local">Clear</button>
-      <button type="button" class="btn btn-primary" id="backup-download-selected" disabled>Download selected ZIP</button>
+    <p id="backup-local-summary" class="backup-list-summary" hidden></p>
+    <div class="backup-toolbar" id="backup-local-toolbar" hidden>
+      <input id="backup-local-search" type="search" placeholder="Search saved games or profiles" aria-label="Search saved games or profiles">
+      <button type="button" class="btn btn-secondary" id="backup-select-all-local">Select shown</button>
+      <button type="button" class="btn btn-secondary" id="backup-clear-local" hidden>Clear</button>
+      <button type="button" class="btn btn-secondary" id="backup-download-selected" hidden>Download selected ZIP</button>
     </div>
     <div id="backup-local-list" class="backup-list" aria-live="polite"><p class="empty-state">No local copies yet.</p></div>
     <details class="backup-more-options">

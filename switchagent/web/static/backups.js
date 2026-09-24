@@ -18,6 +18,7 @@
   let readyCovers = new Set();
   let visibleSaveRows = [];
   let visibleSaveGroups = new Map();
+  let visibleLocalRows = [];
   const expandedGames = new Set();
 
   function el(tag, className, value) {
@@ -69,6 +70,12 @@
   function inventory(kind) { return state.inventory?.[chosenDevice()]?.[kind] || []; }
   function snapshots() { return state.catalog?.snapshots || []; }
   function gameExports() { return state.catalog?.games || []; }
+  function sourceDeviceLabel(item) {
+    const fingerprint = item.origin?.device_fingerprint;
+    const device = devices.find(row => row.device_fingerprint === fingerprint);
+    return device?.friendly_name || device?.display_name ||
+      (fingerprint ? `Switch •${fingerprint.slice(-4).toUpperCase()}` : "Source Switch unknown");
+  }
   function clearSelection(kind) { selected[kind].clear(); render(); }
   function titleId(row) {
     const id = row?.cover_id || row?.identity?.title_id || row?.title_id;
@@ -143,7 +150,7 @@
     visibleSaveRows = shown;
     const savedCount = rows.filter(item => copies.has(item.path)).length;
     const unavailableCount = rows.filter(item => !item.selectable).length;
-    const countLabel = `${shown.length} shown of ${rows.length} save entries · ${savedCount} copied` +
+    const countLabel = `${shown.length} shown of ${rows.length} save entries · ${savedCount} with a local copy` +
       (unavailableCount ? ` · ${unavailableCount} unavailable` : "");
     $("backup-save-counts").textContent = countLabel;
     $("backup-save-counts").hidden = rows.length === 0;
@@ -166,7 +173,7 @@
         `${item.file_count} ${item.file_count === 1 ? "file" : "files"}`;
       const lastCopy = copies.get(item.path);
       return [includeProfile ? parts[2] || "Profile unknown" : null, formatBytes(item.size), count,
-        lastCopy ? `Copied ${formatDate(lastCopy.created_at)}` : "No local copy"].filter(Boolean).join(" · ");
+        lastCopy ? `Last backup ${formatDate(lastCopy.created_at)}` : "Never backed up"].filter(Boolean).join(" · ");
     };
     const cards = [];
     for (const [key, groupRows] of groups) {
@@ -197,7 +204,7 @@
       const main = el("div", "backup-game-main");
       main.append(el("strong", "backup-row-title", game),
         el("span", "backup-row-meta", `${groupRows.length} save folders · ` +
-          `${groupRows.filter(item => copies.has(item.path)).length} copied`));
+          `${groupRows.filter(item => copies.has(item.path)).length} with a local copy`));
       const body = el("div", "backup-game-profiles");
       body.id = `backup-group-${cards.length}`;
       body.hidden = !expandedGames.has(key);
@@ -237,12 +244,25 @@
   function localRows() {
     const rows = snapshots();
     const list = $("backup-local-list");
+    const search = $("backup-local-search").value.trim().toLocaleLowerCase();
+    visibleLocalRows = rows.filter(item => !search ||
+      [item.source_path, sourceDeviceLabel(item)].some(value => String(value || "").toLocaleLowerCase().includes(search)));
+    const games = new Set(rows.map(item => item.origin?.game || String(item.source_path || "").split("/")[1]));
+    const consoles = new Set(rows.map(item => item.origin?.device_fingerprint || "unknown"));
+    const total = rows.reduce((sum, item) => sum + (item.files || []).reduce((n, file) => n + Number(file.size || 0), 0), 0);
+    $("backup-local-summary").textContent = `${rows.length} ${rows.length === 1 ? "copy" : "copies"} · ` +
+      `${games.size} ${games.size === 1 ? "game" : "games"} · ` +
+      `${consoles.size} ${consoles.size === 1 ? "Switch" : "Switches"} · ${formatBytes(total)} stored` +
+      (search ? ` · ${visibleLocalRows.length} shown` : "");
+    $("backup-local-summary").hidden = rows.length === 0;
+    $("backup-local-toolbar").hidden = rows.length === 0;
     if (!rows.length) { empty(list, "No local copies yet. Select saves to copy or import a ZIP."); return; }
-    list.replaceChildren(...rows.map(item => {
+    if (!visibleLocalRows.length) { empty(list, "No saved copies match this search."); return; }
+    list.replaceChildren(...visibleLocalRows.map(item => {
       const source = item.source_path || "";
       const size = Array.isArray(item.files) ? item.files.reduce((sum, file) => sum + Number(file.size || 0), 0) : null;
       const count = item.files?.length;
-      const meta = `${formatDate(item.created_at)} · ${formatBytes(size)} · ` +
+      const meta = `${sourceDeviceLabel(item)} · ${formatDate(item.created_at)} · ${formatBytes(size)} · ` +
         (count == null ? "Files not counted" : `${count} ${count === 1 ? "file" : "files"}`);
       return rowShell(item, "local", labelPath(source), meta);
     }));
@@ -289,14 +309,20 @@
     const availableLocal = new Set(snapshots().map(item => item.id));
     for (const id of selected.local) if (!availableLocal.has(id)) selected.local.delete(id);
     $("backup-clear-local").hidden = selected.local.size === 0;
-    $("backup-download-selected").disabled = selected.local.size === 0;
+    $("backup-download-selected").hidden = selected.local.size === 0;
+    $("backup-select-all-local").disabled = visibleLocalRows.length === 0;
+    const archiveBusy = (state.jobs || []).some(job => job.action === "create_archive" &&
+      (job.state === "queued" || job.state === "running"));
+    $("backup-download-all").disabled = availableLocal.size === 0 || archiveBusy;
+    $("backup-download-selected").disabled = selected.local.size === 0 || archiveBusy;
     syncSaveSelectionControls();
     restoreChoices();
   }
   function restoreChoices() {
     const sourceSelect = $("backup-restore-source");
     const sourcePrior = sourceSelect.value;
-    sourceSelect.replaceChildren(new Option("Choose a copy", ""), ...snapshots().map(item => new Option(labelPath(item.source_path) + " · " + formatDate(item.created_at), item.id)));
+    sourceSelect.replaceChildren(new Option("Choose a copy", ""), ...snapshots().map(item =>
+      new Option(`${labelPath(item.source_path)} · ${sourceDeviceLabel(item)} · ${formatDate(item.created_at)}`, item.id)));
     sourceSelect.value = snapshots().some(item => item.id === sourcePrior) ? sourcePrior : "";
     const source = snapshots().find(item => item.id === sourceSelect.value);
     const targetSelect = $("backup-restore-target");
@@ -331,6 +357,13 @@
         job.state === "running" ? "Working" : job.state === "queued" ? "Waiting" :
         job.state === "cancelled" ? "Cancelled" : "Failed");
       row.append(tag);
+      if (job.action === "create_archive" && job.state === "ready" &&
+          job.result?.download_url?.startsWith("/api/backups/download/")) {
+        const button = el("button", "btn btn-small btn-secondary backup-row-action", "Download ZIP");
+        button.type = "button";
+        button.addEventListener("click", () => download(job.result.download_url));
+        row.append(button);
+      }
       if (job.state === "running" || job.state === "queued") {
         if (job.action === "confirm_restore") {
           row.querySelector(".backup-row-main").append(el("div", "backup-row-reason",
@@ -380,6 +413,8 @@
     const jobs = [...(state.jobs || [])].reverse().filter(job => job.device_id === device || !job.device_id);
     const active = jobs.find(job => job.state === "queued" || job.state === "running");
     const latest = active || jobs[0];
+    const readyArchive = latest?.action === "create_archive" && latest.state === "ready" &&
+      latest.result?.download_url?.startsWith("/api/backups/download/") ? latest : null;
     const lastBackup = jobs.find(job => job.action === "create_snapshots" && job.state === "ready" &&
       Array.isArray(job.result) && job.result.length > 0);
     const rows = inventory("saves");
@@ -388,13 +423,11 @@
     const title = $("backup-overview-title"), detail = $("backup-overview-detail");
     const bar = $("backup-overview-progress");
     const latestDownload = $("backup-download-latest");
-    latestDownload.hidden = !lastBackup;
+    latestDownload.hidden = !lastBackup && !readyArchive;
     latestDownload.disabled = !!active;
+    latestDownload.textContent = readyArchive ? "Download prepared ZIP" : "Download last backup ZIP";
     overview.dataset.state = active ? "busy" : latest?.state === "failed" ? "error" : "idle";
-    if (!device) {
-      title.textContent = "Choose a connected Switch";
-      detail.textContent = `${snapshots().length} local copies remain available.`;
-    } else if (active) {
+    if (active) {
       const action = {inventory_saves:"Finding saves", create_snapshots:"Backing up saves", create_archive:"Preparing ZIP",
         inventory_games:"Finding game packages", export_games:"Exporting game packages"}[active.action] || "Working";
       title.textContent = active.state === "queued" ? `${action} · waiting` : action;
@@ -410,7 +443,10 @@
       detail.textContent = "Your copies are on this computer. Download a ZIP to keep them elsewhere.";
     } else if (latest?.action === "create_archive" && latest.state === "ready") {
       title.textContent = "ZIP ready";
-      detail.textContent = "The download should start automatically. Your local copies remain available below.";
+      detail.textContent = "Download it above or from Recent activity. Your local copies remain available below.";
+    } else if (!device) {
+      title.textContent = "Choose a connected Switch";
+      detail.textContent = `${snapshots().length} local copies remain available.`;
     } else if (rows.length) {
       title.textContent = `${available} of ${rows.length} ${rows.length === 1 ? "save" : "saves"} ready to back up`;
       detail.textContent = `${snapshots().length} local copies stored on this computer.`;
@@ -611,6 +647,7 @@
   $("backup-profile-filter").addEventListener("change", () => { saveRows(); updateSelection(); });
   $("backup-save-search").addEventListener("input", () => { saveRows(); updateSelection(); });
   $("backup-uncopied-only").addEventListener("change", () => { saveRows(); updateSelection(); });
+  $("backup-local-search").addEventListener("input", () => { localRows(); updateSelection(); });
   $("backup-restore-source").addEventListener("change", restoreChoices);
   $("backup-restore-target").addEventListener("change", restoreChoices);
   for (const kind of ["saves", "games"]) {
@@ -636,13 +673,23 @@
     try { await submit("/api/backups/games", { device_id: chosenDevice(), paths: [...selected.games] }); }
     catch (error) { notify(error.message, true); }
   });
-  $("backup-select-all-local").addEventListener("click", () => { snapshots().forEach(item => selected.local.add(item.id)); render(); });
+  $("backup-select-all-local").addEventListener("click", () => { visibleLocalRows.forEach(item => selected.local.add(item.id)); render(); });
   $("backup-clear-local").addEventListener("click", () => clearSelection("local"));
+  $("backup-download-all").addEventListener("click", async () => {
+    try { await submit("/api/backups/archives", { snapshot_ids: snapshots().map(item => item.id) }); }
+    catch (error) { notify(error.message, true); }
+  });
   $("backup-download-selected").addEventListener("click", async () => {
     try { await submit("/api/backups/archives", { snapshot_ids: [...selected.local] }); }
     catch (error) { notify(error.message, true); }
   });
   $("backup-download-latest").addEventListener("click", async () => {
+    const recent = [...(state.jobs || [])].reverse().find(job => job.device_id === chosenDevice() || !job.device_id);
+    if (recent?.action === "create_archive" && recent.state === "ready" &&
+        recent.result?.download_url?.startsWith("/api/backups/download/")) {
+      download(recent.result.download_url);
+      return;
+    }
     const latest = [...(state.jobs || [])].reverse().find(job => job.action === "create_snapshots" &&
       job.device_id === chosenDevice() && job.state === "ready" && Array.isArray(job.result) && job.result.length);
     if (!latest) return;
