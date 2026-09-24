@@ -9,6 +9,8 @@ about what is/isn't covered.
 
 from __future__ import annotations
 
+import sys
+
 from switchagent import tray
 from types import SimpleNamespace
 from unittest.mock import Mock
@@ -99,6 +101,8 @@ def test_popup_uses_menu_handle_and_dispatches_selection_then_releases_menu(sele
     # Strict real API arity reproduces the old missing-hMenu TypeError.
     def append_menu(handle, flags, command, label):
         assert handle == 99
+        # pywin32 refuses None here (TypeError) -- a separator needs "".
+        assert isinstance(label, str)
         entries.append((command, label))
 
     gui = Mock()
@@ -108,8 +112,8 @@ def test_popup_uses_menu_handle_and_dispatches_selection_then_releases_menu(sele
     gui.TrackPopupMenu.return_value = selected
     window._win32gui = gui
     window._show_menu()
-    assert entries == [(tray.MENU_OPEN_ID, "Open SwitchAgent"), (0, None),
-                       (tray.MENU_FOLDER_BASE_ID, "Open program folder"), (0, None),
+    assert entries == [(tray.MENU_OPEN_ID, "Open SwitchAgent"), (0, ""),
+                       (tray.MENU_FOLDER_BASE_ID, "Open program folder"), (0, ""),
                        (tray.MENU_EXIT_ID, "Exit")]
     gui.DestroyMenu.assert_called_once_with(99)
     if selected == tray.MENU_EXIT_ID:
@@ -127,3 +131,43 @@ def test_popup_uses_menu_handle_and_dispatches_selection_then_releases_menu(sele
     else:
         window._on_open.assert_not_called()
         gui.PostMessage.assert_called_once_with(42, 0, 0, 0)
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="real pywin32 menu")
+def test_menu_builds_with_the_real_win32_api(tmp_path, monkeypatch):
+    """The mocked test above cannot catch an argument pywin32 itself
+    rejects -- None as a separator's label passed it and broke the real
+    menu. This builds the menu through the real AppendMenu and only stubs
+    out showing it."""
+    import win32con
+    import win32gui
+
+    monkeypatch.setattr(tray, "_current_folder_entries", lambda: [("Open program folder", tmp_path)])
+    window = object.__new__(tray._TrayWindow)
+    window._hwnd = 0
+    window._exiting = False
+    window._on_open = Mock()
+    window._win32api = SimpleNamespace(LOWORD=lambda value: value & 0xffff)
+    window._win32con = win32con
+    built = {}
+
+    class RealMenuGui:
+        def __getattr__(self, name):
+            return getattr(win32gui, name)
+
+        def TrackPopupMenu(self, menu, *args):
+            built["count"] = win32gui.GetMenuItemCount(menu)
+            return 0
+
+        def GetCursorPos(self):
+            return (0, 0)  # needs an interactive desktop, not what's tested
+
+        def SetForegroundWindow(self, hwnd):
+            pass
+
+        def PostMessage(self, *args):
+            pass
+
+    window._win32gui = RealMenuGui()
+    window._show_menu()
+    assert built["count"] == 5  # Open, separator, 1 folder, separator, Exit

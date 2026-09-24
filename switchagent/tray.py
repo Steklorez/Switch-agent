@@ -197,10 +197,13 @@ class _TrayWindow:
             # one, does not until something has been logged.
             self._folders = [(label, path) for label, path in _current_folder_entries() if path.is_dir()]
             if self._folders:
-                win32gui.AppendMenu(menu, win32con.MF_SEPARATOR, 0, None)
+                # "" and not None: pywin32 raises TypeError on None, and
+                # that exception used to abort the whole menu before it
+                # could appear.
+                win32gui.AppendMenu(menu, win32con.MF_SEPARATOR, 0, "")
                 for index, (label, _path) in enumerate(self._folders):
                     win32gui.AppendMenu(menu, win32con.MF_STRING, MENU_FOLDER_BASE_ID + index, label)
-            win32gui.AppendMenu(menu, win32con.MF_SEPARATOR, 0, None)
+            win32gui.AppendMenu(menu, win32con.MF_SEPARATOR, 0, "")
             win32gui.AppendMenu(menu, win32con.MF_STRING, MENU_EXIT_ID, "Exit")
             pos = win32gui.GetCursorPos()
             win32gui.SetForegroundWindow(self._hwnd)
