@@ -19,7 +19,9 @@
   let visibleSaveRows = [];
   let visibleSaveGroups = new Map();
   let visibleLocalRows = [];
+  let visibleLocalGroups = new Map();
   const expandedGames = new Set();
+  const expandedLocalGames = new Set();
 
   function el(tag, className, value) {
     const node = document.createElement(tag);
@@ -105,9 +107,11 @@
       const input = el("input");
       input.type = "checkbox";
       if (kind === "saves") input.dataset.savePath = item.path;
+      if (kind === "local") input.dataset.snapshotId = item.id;
       input.disabled = !canSelect;
       input.checked = canSelect && selected[kind].has(kind === "local" ? item.id : item.path);
-      input.setAttribute("aria-label", `Select ${title}` + (kind === "local" ? ` saved ${formatDate(item.created_at)}` : ""));
+      input.setAttribute("aria-label", `Select ${title}` +
+        (kind === "local" ? ` from ${sourceDeviceLabel(item)} saved ${formatDate(item.created_at)}` : ""));
       input.addEventListener("change", () => {
         const key = kind === "local" ? item.id : item.path;
         if (input.checked) selected[kind].add(key); else selected[kind].delete(key);
@@ -252,20 +256,90 @@
     const total = rows.reduce((sum, item) => sum + (item.files || []).reduce((n, file) => n + Number(file.size || 0), 0), 0);
     $("backup-local-summary").textContent = `${rows.length} ${rows.length === 1 ? "copy" : "copies"} · ` +
       `${games.size} ${games.size === 1 ? "game" : "games"} · ` +
-      `${consoles.size} ${consoles.size === 1 ? "Switch" : "Switches"} · ${formatBytes(total)} stored` +
+      `${consoles.size} ${consoles.size === 1 ? "Switch" : "Switches"} · ${formatBytes(total)} of save files` +
       (search ? ` · ${visibleLocalRows.length} shown` : "");
     $("backup-local-summary").hidden = rows.length === 0;
     $("backup-local-toolbar").hidden = rows.length === 0;
+    visibleLocalGroups = new Map();
     if (!rows.length) { empty(list, "No local copies yet. Select saves to copy or import a ZIP."); return; }
     if (!visibleLocalRows.length) { empty(list, "No saved copies match this search."); return; }
-    list.replaceChildren(...visibleLocalRows.map(item => {
-      const source = item.source_path || "";
+    const copyMeta = item => {
       const size = Array.isArray(item.files) ? item.files.reduce((sum, file) => sum + Number(file.size || 0), 0) : null;
       const count = item.files?.length;
-      const meta = `${sourceDeviceLabel(item)} · ${formatDate(item.created_at)} · ${formatBytes(size)} · ` +
+      return `${sourceDeviceLabel(item)} · ${formatDate(item.created_at)} · ${formatBytes(size)} · ` +
         (count == null ? "Files not counted" : `${count} ${count === 1 ? "file" : "files"}`);
-      return rowShell(item, "local", labelPath(source), meta);
-    }));
+    };
+    const groups = new Map();
+    for (const item of visibleLocalRows) {
+      const parts = String(item.source_path || "").split("/");
+      const key = parts.length >= 2 ? JSON.stringify(parts.slice(0, 2)) : item.source_path;
+      if (!groups.has(key)) groups.set(key, []);
+      groups.get(key).push(item);
+    }
+    const cards = [];
+    for (const [key, groupRows] of groups) {
+      const first = groupRows[0];
+      const parts = String(first.source_path || "").split("/");
+      const game = parts.length >= 2 ? parts[1] : first.source_path || "Unknown game";
+      visibleLocalGroups.set(key, groupRows.map(item => item.id));
+      if (groupRows.length === 1) {
+        cards.push(rowShell(first, "local", labelPath(first.source_path), copyMeta(first)));
+        continue;
+      }
+      const card = el("section", "backup-game-card");
+      const header = el("div", "backup-game-header");
+      const checkbox = el("input", "backup-group-select");
+      checkbox.type = "checkbox";
+      checkbox.dataset.localGroupKey = key;
+      checkbox.setAttribute("aria-label", `Select all ${groupRows.length} local copies for ${game}`);
+      checkbox.addEventListener("change", () => {
+        for (const item of groupRows) {
+          if (checkbox.checked) selected.local.add(item.id);
+          else selected.local.delete(item.id);
+        }
+        updateSelection();
+      });
+      const main = el("div", "backup-game-main");
+      const profiles = new Set(groupRows.map(item => item.origin?.profile || String(item.source_path || "").split("/")[2]));
+      const sources = new Set(groupRows.map(item => item.origin?.device_fingerprint || "unknown"));
+      main.append(el("strong", "backup-row-title", game),
+        el("span", "backup-row-meta", `${groupRows.length} copies · ${profiles.size} ` +
+          `${profiles.size === 1 ? "profile" : "profiles"} · ` +
+          `${sources.size} ${sources.size === 1 ? "Switch" : "Switches"}`));
+      const body = el("div", "backup-game-profiles");
+      body.id = `backup-local-group-${cards.length}`;
+      body.hidden = !expandedLocalGames.has(key);
+      const toggle = el("button", "backup-group-toggle", body.hidden ? "Show copies" : "Hide copies");
+      toggle.type = "button";
+      toggle.setAttribute("aria-controls", body.id);
+      toggle.setAttribute("aria-expanded", String(!body.hidden));
+      toggle.addEventListener("click", () => {
+        body.hidden = !body.hidden;
+        if (body.hidden) expandedLocalGames.delete(key); else expandedLocalGames.add(key);
+        toggle.textContent = body.hidden ? "Show copies" : "Hide copies";
+        toggle.setAttribute("aria-expanded", String(!body.hidden));
+      });
+      header.append(checkbox, cover(first), main, toggle);
+      body.replaceChildren(...groupRows.map(item => {
+        const profile = item.origin?.profile || String(item.source_path || "").split("/")[2] || "Unknown profile";
+        return rowShell(item, "local", profile, copyMeta(item), true, false);
+      }));
+      card.append(header, body);
+      cards.push(card);
+    }
+    list.replaceChildren(...cards);
+  }
+  function syncLocalSelectionControls() {
+    const list = $("backup-local-list");
+    for (const input of list.querySelectorAll("input[data-snapshot-id]")) {
+      input.checked = selected.local.has(input.dataset.snapshotId);
+    }
+    for (const input of list.querySelectorAll("input[data-local-group-key]")) {
+      const ids = visibleLocalGroups.get(input.dataset.localGroupKey) || [];
+      const count = ids.filter(id => selected.local.has(id)).length;
+      input.checked = ids.length > 0 && count === ids.length;
+      input.indeterminate = count > 0 && count < ids.length;
+    }
   }
   function gameRows() {
     const rows = inventory("games");
@@ -310,12 +384,18 @@
     for (const id of selected.local) if (!availableLocal.has(id)) selected.local.delete(id);
     $("backup-clear-local").hidden = selected.local.size === 0;
     $("backup-download-selected").hidden = selected.local.size === 0;
+    const visibleLocalIds = new Set(visibleLocalRows.map(item => item.id));
+    const hiddenSelected = [...selected.local].filter(id => !visibleLocalIds.has(id)).length;
+    $("backup-local-selection").textContent = `${selected.local.size} ${selected.local.size === 1 ? "copy" : "copies"} selected` +
+      (hiddenSelected ? ` · ${hiddenSelected} outside current search` : "");
+    $("backup-local-selection").hidden = selected.local.size === 0;
     $("backup-select-all-local").disabled = visibleLocalRows.length === 0;
     const archiveBusy = (state.jobs || []).some(job => job.action === "create_archive" &&
       (job.state === "queued" || job.state === "running"));
     $("backup-download-all").disabled = availableLocal.size === 0 || archiveBusy;
     $("backup-download-selected").disabled = selected.local.size === 0 || archiveBusy;
     syncSaveSelectionControls();
+    syncLocalSelectionControls();
     restoreChoices();
   }
   function restoreChoices() {
