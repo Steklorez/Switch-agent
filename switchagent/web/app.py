@@ -36,6 +36,9 @@ from .schemas import (
 log = logging.getLogger("switchagent.web")
 
 _WEB_DIR = Path(__file__).resolve().parent
+# "Copy logs" (Settings): the last ~500 KB of the application log -- a
+# few days of normal use, still a comfortable clipboard paste.
+LOG_COPY_MAX_BYTES = 500_000
 _TEMPLATES = Jinja2Templates(directory=str(_WEB_DIR / "templates"))
 
 
@@ -673,6 +676,18 @@ def create_app(ctx: WebContext) -> FastAPI:
         if format == "txt":
             return PlainTextResponse(diagnostics.export_dict_to_text(payload))
         return payload
+
+    @app.get("/api/logs")
+    def api_logs():
+        """Settings' "Copy logs" -- the application log's recent end,
+        through the same redaction as the diagnostics export's log tail,
+        just a longer stretch of it. Empty (not 404) when there is no log
+        file yet, e.g. a dev `switch-agent web` run."""
+        from .. import config as config_mod
+        from .. import diagnostics
+
+        tail = diagnostics.read_sanitized_log_tail(config_mod.LOGS_DIR / "switchagent.log", max_bytes=LOG_COPY_MAX_BYTES)
+        return PlainTextResponse(tail or "")
 
     @app.post("/api/worker/pause")
     def api_worker_pause(ctx: WebContext = Depends(get_ctx)):

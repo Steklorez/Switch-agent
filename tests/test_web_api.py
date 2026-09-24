@@ -2591,6 +2591,32 @@ def test_export_diagnostics_sanitizes_a_real_log_tail(client, web_ctx, monkeypat
     assert "SERIALNUMBER1234" not in body["log_tail"]
 
 
+def test_logs_endpoint_returns_the_sanitized_log_as_plain_text(client, monkeypatch, tmp_path):
+    logs_dir = tmp_path / "logs"
+    logs_dir.mkdir()
+    monkeypatch.setattr(config, "LOGS_DIR", logs_dir)
+    raw_id = r"usb#vid_057e&pid_3000#SERIALNUMBER1234#{fingerprint-guid}"
+    (logs_dir / "switchagent.log").write_text(
+        f"2026-01-01 INFO first line\n2026-01-01 INFO connected to {raw_id}\n", encoding="utf-8")
+
+    res = client.get("/api/logs")
+    assert res.status_code == 200
+    assert "text/plain" in res.headers["content-type"]
+    assert "first line" in res.text
+    assert "SERIALNUMBER1234" not in res.text
+
+
+def test_logs_endpoint_is_empty_without_a_log_file(client, monkeypatch, tmp_path):
+    monkeypatch.setattr(config, "LOGS_DIR", tmp_path / "missing")
+    res = client.get("/api/logs")
+    assert res.status_code == 200
+    assert res.text == ""
+
+
+def test_settings_page_has_copy_logs_button(client):
+    assert 'id="copy-logs-btn"' in client.get("/settings").text
+
+
 # ---------------------------------------------------------------------------
 # health (readiness / single-instance detection / packaged smoke tests)
 # ---------------------------------------------------------------------------

@@ -62,14 +62,37 @@ def test_default_icon_path_returns_none_when_no_icon_asset_is_bundled():
     assert result is None or result.is_file()
 
 
-@pytest.mark.parametrize("selected", [tray.MENU_EXIT_ID, tray.MENU_OPEN_ID, 0])
-def test_popup_uses_menu_handle_and_dispatches_selection_then_releases_menu(selected):
+def test_classify_menu_command_folder_ids():
+    assert tray._classify_menu_command(tray.MENU_FOLDER_BASE_ID, 2) == "folder:0"
+    assert tray._classify_menu_command(tray.MENU_FOLDER_BASE_ID + 1, 2) == "folder:1"
+    assert tray._classify_menu_command(tray.MENU_FOLDER_BASE_ID + 2, 2) == "ignore"
+
+
+def test_folder_entries_installed_build_lists_program_data_and_logs(tmp_path):
+    program, data = tmp_path / "Program Files" / "SwitchAgent", tmp_path / "LocalAppData" / "SwitchAgent"
+    entries = tray._folder_entries(program_dir=program, data_dir=data, logs_dir=data / "logs")
+    assert entries == [("Open program folder", program), ("Open data folder", data),
+                       ("Open logs folder", data / "logs")]
+
+
+def test_folder_entries_portable_build_does_not_repeat_the_same_folder(tmp_path):
+    entries = tray._folder_entries(program_dir=tmp_path, data_dir=tmp_path, logs_dir=tmp_path / "logs")
+    assert entries == [("Open program folder", tmp_path), ("Open logs folder", tmp_path / "logs")]
+
+
+@pytest.mark.parametrize("selected", [tray.MENU_EXIT_ID, tray.MENU_OPEN_ID, tray.MENU_FOLDER_BASE_ID, 0])
+def test_popup_uses_menu_handle_and_dispatches_selection_then_releases_menu(selected, tmp_path, monkeypatch):
+    missing = tmp_path / "logs"  # not created -- must not be offered
+    monkeypatch.setattr(tray, "_current_folder_entries",
+                        lambda: [("Open program folder", tmp_path), ("Open logs folder", missing)])
+    opened = []
+    monkeypatch.setattr(tray.os, "startfile", opened.append, raising=False)
     window = object.__new__(tray._TrayWindow)
     window._hwnd = 42
     window._exiting = False
     window._on_open = Mock()
     window._win32api = SimpleNamespace(LOWORD=lambda value: value & 0xffff)
-    window._win32con = SimpleNamespace(MF_STRING=0, TPM_LEFTALIGN=0, TPM_RIGHTBUTTON=2,
+    window._win32con = SimpleNamespace(MF_STRING=0, MF_SEPARATOR=0x800, TPM_LEFTALIGN=0, TPM_RIGHTBUTTON=2,
         TPM_RETURNCMD=256, TPM_NONOTIFY=128, WM_NULL=0, WM_COMMAND=273, WM_CLOSE=16)
     entries = []
 
@@ -85,7 +108,8 @@ def test_popup_uses_menu_handle_and_dispatches_selection_then_releases_menu(sele
     gui.TrackPopupMenu.return_value = selected
     window._win32gui = gui
     window._show_menu()
-    assert entries == [(tray.MENU_OPEN_ID, "Open SwitchAgent"),
+    assert entries == [(tray.MENU_OPEN_ID, "Open SwitchAgent"), (0, None),
+                       (tray.MENU_FOLDER_BASE_ID, "Open program folder"), (0, None),
                        (tray.MENU_EXIT_ID, "Exit")]
     gui.DestroyMenu.assert_called_once_with(99)
     if selected == tray.MENU_EXIT_ID:
@@ -97,6 +121,9 @@ def test_popup_uses_menu_handle_and_dispatches_selection_then_releases_menu(sele
         assert window._exiting
     elif selected == tray.MENU_OPEN_ID:
         window._on_open.assert_called_once()
+    elif selected == tray.MENU_FOLDER_BASE_ID:
+        assert opened == [str(tmp_path)]
+        window._on_open.assert_not_called()
     else:
         window._on_open.assert_not_called()
         gui.PostMessage.assert_called_once_with(42, 0, 0, 0)

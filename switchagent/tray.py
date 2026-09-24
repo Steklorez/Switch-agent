@@ -1,6 +1,7 @@
 """Minimal Windows system tray icon for the desktop launcher
 (switchagent/desktop.py) -- pywin32's win32gui/Shell_NotifyIcon, no extra
-GUI dependency (wx/PyQt/tkinter). Two menu items only: "Open SwitchAgent"
+GUI dependency (wx/PyQt/tkinter). Menu: "Open SwitchAgent", one "Open ...
+folder" item per distinct folder the app lives in (see _folder_entries),
 and "Exit".
 
 Runs its own Win32 message loop (PumpMessages()) on whichever thread calls
@@ -24,12 +25,16 @@ manual verification.
 from __future__ import annotations
 
 import logging
+import os
+from pathlib import Path
 from typing import Callable, Optional
 
 log = logging.getLogger("switchagent.desktop")
 
 MENU_OPEN_ID = 1023
 MENU_EXIT_ID = 1024
+# Folder items get MENU_FOLDER_BASE_ID + their index in _folder_entries().
+MENU_FOLDER_BASE_ID = 1030
 
 # WM_APP + 20 -- an arbitrary, app-private window message id used as the
 # Shell_NotifyIcon callback message (must not collide with any standard
@@ -47,15 +52,45 @@ def _classify_tray_click(lparam: int, *, wm_lbuttonup: int, wm_lbuttondblclk: in
     return "ignore"
 
 
-def _classify_menu_command(menu_id: int) -> str:
+def _classify_menu_command(menu_id: int, folder_count: int = 0) -> str:
     """Pure decision logic for a WM_COMMAND menu selection -- "open" /
-    "exit" / "ignore" (anything else, e.g. a stray message not from our
-    own menu)."""
+    "exit" / "folder:<index>" / "ignore" (anything else, e.g. a stray
+    message not from our own menu)."""
     if menu_id == MENU_OPEN_ID:
         return "open"
     if menu_id == MENU_EXIT_ID:
         return "exit"
+    index = menu_id - MENU_FOLDER_BASE_ID
+    if 0 <= index < folder_count:
+        return f"folder:{index}"
     return "ignore"
+
+
+def _folder_entries(*, program_dir: Path, data_dir: Path, logs_dir: Path) -> list[tuple[str, Path]]:
+    """Pure: the "Open ... folder" menu items, in menu order. Where the
+    program and its data are one directory (portable, dev) that is one
+    item, not two pointing at the same place; the installed build keeps
+    them apart (Program Files vs %LOCALAPPDATA%) and gets both."""
+    entries: list[tuple[str, Path]] = []
+    seen: set[str] = set()
+    for label, path in (
+        ("Open program folder", program_dir),
+        ("Open data folder", data_dir),
+        ("Open logs folder", logs_dir),
+    ):
+        key = os.path.normcase(os.path.abspath(path))
+        if key in seen:
+            continue
+        seen.add(key)
+        entries.append((label, path))
+    return entries
+
+
+def _current_folder_entries() -> list[tuple[str, Path]]:
+    from . import config, paths
+
+    program_dir = paths.executable_dir() if paths.is_frozen() else paths.resource_root()
+    return _folder_entries(program_dir=program_dir, data_dir=paths.app_data_root(), logs_dir=config.LOGS_DIR)
 
 
 def _default_icon_path():
@@ -84,6 +119,7 @@ class _TrayWindow:
         self._on_open = on_open
         self._tooltip = tooltip
         self._exiting = False
+        self._folders: list[tuple[str, Path]] = []
 
         message_map = {
             WM_TRAYICON: self._on_tray_message,
@@ -157,6 +193,14 @@ class _TrayWindow:
             # AppendMenu requires the menu handle as its FIRST argument.
             # Omitting it raised TypeError before the popup could appear.
             win32gui.AppendMenu(menu, win32con.MF_STRING, MENU_OPEN_ID, "Open SwitchAgent")
+            # Only folders that exist right now -- the logs folder, for
+            # one, does not until something has been logged.
+            self._folders = [(label, path) for label, path in _current_folder_entries() if path.is_dir()]
+            if self._folders:
+                win32gui.AppendMenu(menu, win32con.MF_SEPARATOR, 0, None)
+                for index, (label, _path) in enumerate(self._folders):
+                    win32gui.AppendMenu(menu, win32con.MF_STRING, MENU_FOLDER_BASE_ID + index, label)
+            win32gui.AppendMenu(menu, win32con.MF_SEPARATOR, 0, None)
             win32gui.AppendMenu(menu, win32con.MF_STRING, MENU_EXIT_ID, "Exit")
             pos = win32gui.GetCursorPos()
             win32gui.SetForegroundWindow(self._hwnd)
@@ -177,12 +221,20 @@ class _TrayWindow:
 
     def _on_command(self, hwnd, msg, wparam, lparam):
         menu_id = self._win32api.LOWORD(wparam)
-        action = _classify_menu_command(menu_id)
+        action = _classify_menu_command(menu_id, len(self._folders))
         if action == "open":
             self._safe_on_open()
         elif action == "exit":
             self.close()
+        elif action.startswith("folder:"):
+            self._open_folder(self._folders[int(action.split(":", 1)[1])][1])
         return 0
+
+    def _open_folder(self, path: Path) -> None:
+        try:
+            os.startfile(str(path))
+        except Exception:
+            log.exception("tray: could not open folder %s", path)
 
     def _on_destroy(self, hwnd, msg, wparam, lparam):
         self._exiting = True

@@ -22,6 +22,8 @@
     // Graceful fallback for browsers/contexts without Clipboard API access
     // (e.g. no secure context): select the hidden textarea and use the
     // older execCommand copy path.
+    const original = textArea.value;
+    textArea.value = text;
     try {
       textArea.hidden = false;
       textArea.focus();
@@ -32,6 +34,8 @@
     } catch (e) {
       textArea.hidden = true;
       return false;
+    } finally {
+      textArea.value = original;
     }
   }
 
@@ -45,6 +49,31 @@
       btn.disabled = false;
     }
   });
+
+  // "Copy logs": fetched on click, not rendered into the page -- the log
+  // is far bigger than the diagnostics text and changes by the second.
+  const logsBtn = document.getElementById("copy-logs-btn");
+  if (logsBtn) {
+    logsBtn.addEventListener("click", async () => {
+      logsBtn.disabled = true;
+      status.textContent = "";
+      try {
+        const res = await fetch("/api/logs");
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        const text = await res.text();
+        if (!text) {
+          status.textContent = "The log is empty.";
+          return;
+        }
+        const ok = await copyText(text);
+        status.textContent = ok ? "Logs copied to clipboard." : "Could not copy automatically.";
+      } catch (e) {
+        status.textContent = "Could not read the log: " + (e.message || e);
+      } finally {
+        logsBtn.disabled = false;
+      }
+    });
+  }
 
   // -- UI-004: work directory cleanup (preview-then-confirm, never silent) --
 
