@@ -69,6 +69,7 @@
     return api(url, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
   }
   function chosenDevice() { return $("backup-device").value; }
+  function activeView() { return root.querySelector('[role="tab"][aria-selected="true"]')?.id || "backup-tab-saves"; }
   function inventory(kind) { return state.inventory?.[chosenDevice()]?.[kind] || []; }
   function snapshots() { return state.catalog?.snapshots || []; }
   function gameExports() { return state.catalog?.games || []; }
@@ -79,6 +80,23 @@
       (fingerprint ? `Switch •${fingerprint.slice(-4).toUpperCase()}` : "Source Switch unknown");
   }
   function clearSelection(kind) { selected[kind].clear(); render(); }
+  function renderDeviceStatus() {
+    const view = activeView(), local = view === "backup-tab-local", games = view === "backup-tab-games";
+    $("backup-heading-title").textContent = local ? "Your saved copies" :
+      games ? "Export game packages" : "Back up your Switch saves";
+    $("backup-device-label").textContent = local ? "Target Switch (for restore)" : "Switch";
+    $("backup-device").setAttribute("aria-label", local ? "Target Switch for restore" :
+      games ? "Switch for game export" : "Switch for save backup");
+    $("backup-heading-subtitle").textContent = local
+      ? "Find, check, and download copies saved on this computer."
+      : games ? "Export game packages separately from save copies."
+        : "Find saves on your console, then keep a copy on this computer.";
+    $("backup-device-status").textContent = local
+      ? chosenDevice() ? "Selected for restore" : "No Switch needed to download"
+      : chosenDevice() ? "Connected" :
+        !devices.some(device => device.connected) ? "No Switch connected" :
+          games ? "Choose a Switch to scan packages" : "Choose a Switch to find saves";
+  }
   function titleId(row) {
     const id = row?.cover_id || row?.identity?.title_id || row?.title_id;
     return /^[0-9a-f]{16}$/i.test(String(id || "")) ? String(id).toUpperCase() : null;
@@ -490,6 +508,7 @@
   }
   function renderOverview() {
     const device = chosenDevice();
+    const view = activeView(), localView = view === "backup-tab-local", gamesView = view === "backup-tab-games";
     const jobs = [...(state.jobs || [])].reverse().filter(job => job.device_id === device || !job.device_id);
     const active = jobs.find(job => job.state === "queued" || job.state === "running");
     const latest = active || jobs[0];
@@ -518,12 +537,23 @@
         : "Last task failed";
       detail.textContent = (latest.error || "Open Recent activity for details.") +
         (latest.action === "create_snapshots" && latest.items_done ? " Finished copies remain in Saved copies." : "");
-    } else if (latest?.action === "create_snapshots" && latest.state === "ready") {
-      title.textContent = `Backup complete · ${latest.items_done} of ${latest.items_total} copies saved`;
-      detail.textContent = "Your copies are on this computer. Download a ZIP to keep them elsewhere.";
     } else if (latest?.action === "create_archive" && latest.state === "ready") {
       title.textContent = "ZIP ready";
       detail.textContent = "Download it above or from Recent activity. Your local copies remain available below.";
+    } else if (localView) {
+      const count = snapshots().length;
+      title.textContent = count ? `${count} ${count === 1 ? "copy" : "copies"} saved on this computer` : "No local copies yet";
+      detail.textContent = count ? "Download copies as a ZIP. No Switch is needed." :
+        "Back up saves from a Switch or import a ZIP below.";
+    } else if (gamesView) {
+      const count = inventory("games").length;
+      title.textContent = !device ? "Choose a Switch to scan game packages" :
+        count ? `${count} game ${count === 1 ? "package" : "packages"} found` : "Ready to scan game packages";
+      detail.textContent = !device ? "Game packages are separate from save backups." :
+        count ? "Select packages below to export them." : "Press Scan games to read the connected Switch.";
+    } else if (latest?.action === "create_snapshots" && latest.state === "ready") {
+      title.textContent = `Backup complete · ${latest.items_done} of ${latest.items_total} copies saved`;
+      detail.textContent = "Your copies are on this computer. Download a ZIP to keep them elsewhere.";
     } else if (!device) {
       title.textContent = "Choose a connected Switch";
       detail.textContent = `${snapshots().length} local copies remain available.`;
@@ -578,7 +608,7 @@
     $("backup-discard-plan").disabled = cancellingPlans.has(reservation.plan_id);
     banner.hidden = false;
   }
-  function render() { saveRows(); localRows(); gameRows(); updateSelection(); activityRows(); renderPreparedPlan(); renderOverview(); }
+  function render() { saveRows(); localRows(); gameRows(); updateSelection(); activityRows(); renderPreparedPlan(); renderDeviceStatus(); renderOverview(); }
   function download(url) {
     const anchor = el("a");
     anchor.href = url;
@@ -641,12 +671,10 @@
       select.replaceChildren(new Option("Choose a connected Switch", ""), ...connected.map(d =>
         new Option(d.friendly_name || d.display_name || d.device_id, d.device_id)));
       select.value = connected.some(d => d.device_id === prior) ? prior : (connected.length === 1 ? connected[0].device_id : "");
-      $("backup-device-status").textContent = connected.length === 0 ? "No Switch connected" :
-        connected.length > 1 && !select.value ? "Choose a Switch to avoid mixing devices" : "Connected";
       if (select.value !== prior) {
         if (plan) $("backup-confirm-dialog").close();
         selected.saves.clear(); selected.games.clear(); render();
-      }
+      } else renderDeviceStatus();
     } catch (error) { notify(error.message, true); }
   }
   async function submit(url, body) {
@@ -688,6 +716,8 @@
       candidate.tabIndex = active ? 0 : -1;
       $(candidate.getAttribute("aria-controls")).hidden = !active;
     }
+    renderDeviceStatus();
+    renderOverview();
   }
   tabs.forEach((tab, index) => {
     tab.addEventListener("click", () => activateTab(tab));
@@ -702,8 +732,6 @@
   $("backup-device").addEventListener("change", () => {
     if (plan) $("backup-confirm-dialog").close();
     selected.saves.clear(); selected.games.clear(); render();
-    $("backup-device-status").textContent = chosenDevice() ? "Connected" :
-      devices.some(device => device.connected) ? "Choose a Switch to avoid mixing devices" : "No Switch connected";
   });
   $("backup-review-plan").addEventListener("click", () => {
     const current = reservationToReview();

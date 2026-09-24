@@ -5,12 +5,17 @@
 <div class="backup-lab" id="backup-lab">
   <div class="backup-heading">
     <div>
-      <h2>Back up your Switch saves</h2>
-      <p class="backup-muted">Find saves on your console, then keep a copy on this computer.</p>
+      <h2 id="backup-heading-title">Back up your Switch saves</h2>
+      <p class="backup-muted" id="backup-heading-subtitle">Find saves on your console, then keep a copy on this computer.</p>
     </div>
   </div>
+  <div class="backup-tabs" role="tablist" aria-label="Backup sections">
+    <button type="button" role="tab" id="backup-tab-saves" aria-controls="backup-panel-saves" aria-selected="true">Back up</button>
+    <button type="button" role="tab" id="backup-tab-local" aria-controls="backup-panel-local" aria-selected="false" tabindex="-1">Saved copies</button>
+    <button type="button" role="tab" id="backup-tab-games" aria-controls="backup-panel-games" aria-selected="false" tabindex="-1">Game packages</button>
+  </div>
   <div class="backup-device-bar">
-    <label for="backup-device">Switch</label>
+    <label for="backup-device" id="backup-device-label">Switch</label>
     <select id="backup-device" aria-label="Switch for backup operations"><option value="">Choose a connected Switch</option></select>
     <button type="button" class="btn btn-secondary" id="backup-refresh">Refresh</button>
     <span id="backup-device-status" class="backup-muted" role="status"></span>
@@ -33,12 +38,6 @@
       <button type="button" class="btn btn-secondary" id="backup-review-plan">Review and confirm</button>
       <button type="button" class="btn btn-secondary" id="backup-discard-plan">Cancel restore</button>
     </div>
-  </div>
-
-  <div class="backup-tabs" role="tablist" aria-label="Backup sections">
-    <button type="button" role="tab" id="backup-tab-saves" aria-controls="backup-panel-saves" aria-selected="true">On Switch</button>
-    <button type="button" role="tab" id="backup-tab-local" aria-controls="backup-panel-local" aria-selected="false" tabindex="-1">Saved copies</button>
-    <button type="button" role="tab" id="backup-tab-games" aria-controls="backup-panel-games" aria-selected="false" tabindex="-1">Game packages</button>
   </div>
 
   <section id="backup-panel-saves" class="backup-panel" role="tabpanel" aria-labelledby="backup-tab-saves">
