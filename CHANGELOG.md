@@ -7,6 +7,11 @@ Entries are one sentence per change, three to five lines per release, and
 only what a user would notice — no internals, no reasoning, no history.
 Those belong in the commit message. See [CLAUDE.md](CLAUDE.md#how-to-write-an-entry).
 
+## v1.0.18
+
+- The tray icon's menu opens the program, data and logs folders.
+- Settings has a Copy logs button that puts the recent application log on the clipboard, ready to paste into a bug report.
+
 ## v1.0.17
 
 - The Library says whether it is still loading: one line above the games shows a running scan, cover downloads and the console's installed-games read, each with its own count.
