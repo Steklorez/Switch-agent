@@ -19,6 +19,7 @@
 .backup-overview[data-state=busy] .backup-overview-dot { background: var(--accent); animation: backup-pulse 1.4s ease-in-out infinite; }
 .backup-overview[data-state=error] .backup-overview-dot { background: var(--danger); }
 .backup-overview-copy { flex: 1; min-width: 0; }
+.backup-overview-download { flex: none; align-self: center; }
 .backup-overview-copy strong { display: block; margin-bottom: 3px; }
 .backup-overview progress { display: block; width: 100%; height: 8px; margin-top: 10px; }
 .backup-overview progress[hidden] { display: none; }
@@ -31,11 +32,27 @@
 .backup-tabs { display: flex; gap: 4px; border-bottom: 1px solid var(--border); margin: 0 0 16px; }
 .backup-tabs button { flex: 1 1 0; min-width: 0; padding: 11px 6px; border: 0; border-bottom: 2px solid transparent; background: transparent; color: var(--text-dim); font: inherit; font-weight: 600; cursor: pointer; }
 .backup-tabs button[aria-selected=true] { border-bottom-color: var(--accent); color: var(--text); }
-.backup-tabs button:focus-visible, .backup-lab .btn:focus-visible, .backup-lab select:focus-visible, .backup-lab input:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.backup-tabs button:focus-visible, .backup-lab .btn:focus-visible, .backup-lab select:focus-visible, .backup-lab input:focus-visible, .backup-group-toggle:focus-visible, .backup-profile-options summary:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 .backup-panel { min-width: 0; }
 .backup-section-heading { margin-bottom: 14px; }
 .backup-toolbar { margin-bottom: 12px; }
+.backup-toolbar input[type=search] { flex: 1 1 220px; min-width: 0; min-height: 40px; padding: 8px 12px; border: 1px solid var(--border); border-radius: 8px; background: var(--surface-2); color: var(--text); font: inherit; }
+.backup-checkbox-filter { display: inline-flex; align-items: center; gap: 6px; white-space: nowrap; cursor: pointer; }
+.backup-checkbox-filter input { width: 18px; height: 18px; accent-color: var(--accent); }
+.backup-profile-options { position: relative; }
+.backup-profile-options summary { cursor: pointer; padding: 9px 10px; border: 1px solid var(--border); border-radius: 8px; }
+.backup-profile-options[open] { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.backup-profile-options[open] summary { width: 100%; }
+.backup-list-summary { margin: 0 0 10px !important; color: var(--text-dim); font-size: .84rem; }
 .backup-list { display: grid; gap: 8px; min-width: 0; }
+.backup-game-card { min-width: 0; overflow: hidden; border: 1px solid var(--border); border-radius: 11px; background: var(--surface); }
+.backup-game-header { display: flex; align-items: center; gap: 12px; padding: 12px; }
+.backup-group-select { flex: none; width: 20px; height: 20px; accent-color: var(--accent); }
+.backup-game-main { display: grid; min-width: 0; flex: 1; }
+.backup-group-toggle { flex: none; padding: 8px 10px; border: 1px solid var(--border); border-radius: 8px; background: var(--surface-2); color: var(--text); font: inherit; font-size: .82rem; cursor: pointer; }
+.backup-game-profiles { border-top: 1px solid var(--border); }
+.backup-game-profiles .backup-row { border: 0; border-radius: 0; background: transparent; padding: 9px 12px 9px 44px; }
+.backup-game-profiles .backup-row + .backup-row { border-top: 1px solid var(--border); }
 .backup-row, .backup-restore-card, .backup-upload-form, .backup-activity { border: 1px solid var(--border); background: var(--surface); border-radius: 11px; padding: 12px; min-width: 0; }
 .backup-row { display: flex; align-items: center; gap: 12px; }
 .backup-row input[type=checkbox] { flex: 0 0 auto; width: 20px; height: 20px; accent-color: var(--accent); }
@@ -77,10 +94,15 @@
 .backup-confirm-dialog #backup-profile-confirm-wrap { display: grid; gap: 8px; }
 .backup-dialog-actions { display: flex; justify-content: flex-end; flex-wrap: wrap; gap: 8px; }
 @media (max-width: 560px) {
+  .backup-overview { flex-wrap: wrap; }
+  .backup-overview-download { width: 100%; }
   .backup-device-bar select, .backup-device-bar .btn { flex: 1 1 100%; }
   .backup-device-bar label { flex: 1 1 100%; }
   .backup-toolbar .btn, .backup-toolbar select { flex: 1 1 calc(50% - 8px); }
   .backup-toolbar label { flex: 1 1 100%; }
+  .backup-toolbar input[type=search] { flex-basis: 100%; }
+  .backup-game-header { gap: 8px; }
+  .backup-group-toggle { max-width: 100px; white-space: normal; }
   .backup-selection-bar .btn, .backup-upload-form .btn, .backup-restore-card .btn { width: 100%; }
   .backup-prepared-actions, .backup-prepared-actions .btn { width: 100%; }
   .backup-row { gap: 8px; flex-wrap: wrap; }

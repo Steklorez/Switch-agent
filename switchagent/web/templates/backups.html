@@ -22,6 +22,7 @@
       <p id="backup-overview-detail" class="backup-muted">Your existing local copies remain available below.</p>
       <progress id="backup-overview-progress" hidden></progress>
     </div>
+    <button type="button" class="btn btn-primary backup-overview-download" id="backup-download-latest" hidden>Download last backup ZIP</button>
   </section>
   <div id="backup-prepared-plan" class="backup-prepared-plan" role="status" hidden>
     <div>
@@ -47,11 +48,19 @@
     </div>
     <p class="backup-inline-notice">Close the game before copying its save so the files do not change during backup.</p>
     <div class="backup-toolbar" id="backup-save-toolbar" hidden>
-      <label for="backup-profile-filter">Profile</label>
-      <select id="backup-profile-filter"><option value="">All profiles</option></select>
-      <button type="button" class="btn btn-secondary" id="backup-select-all-saves">Select all shown</button>
-      <button type="button" class="btn btn-secondary" id="backup-clear-saves">Clear</button>
+      <input id="backup-save-search" type="search" placeholder="Search games or profiles" aria-label="Search games or profiles">
+      <label class="backup-checkbox-filter" for="backup-uncopied-only">
+        <input id="backup-uncopied-only" type="checkbox"> Not yet copied
+      </label>
+      <details class="backup-profile-options" id="backup-profile-options" hidden>
+        <summary>Profiles</summary>
+        <label for="backup-profile-filter">Show profile</label>
+        <select id="backup-profile-filter"><option value="">All profiles</option></select>
+      </details>
+      <button type="button" class="btn btn-secondary" id="backup-select-all-saves">Select shown</button>
+      <button type="button" class="btn btn-secondary" id="backup-clear-saves" hidden>Clear</button>
     </div>
+    <p id="backup-save-counts" class="backup-list-summary" hidden></p>
     <div id="backup-save-list" class="backup-list" aria-live="polite"><p class="empty-state">Scan a connected Switch to see saves.</p></div>
     <div class="backup-selection-bar" id="backup-save-actions" hidden>
       <span id="backup-save-selection">No saves selected</span>
