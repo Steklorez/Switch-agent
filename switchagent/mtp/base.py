@@ -117,6 +117,14 @@ class TransferResult:
     already_present: bool = False
 
 
+@dataclass(frozen=True)
+class DirEntry:
+    """One child of a folder on a storage, as list_directory() reports it."""
+    name: str
+    is_dir: bool
+    size: Optional[int] = None  # files only; None when the device does not say
+
+
 class MtpBackend(ABC):
     """Everything the rest of SwitchAgent is allowed to know about talking
     to a Switch. No method here does anything Windows-specific or
@@ -262,6 +270,35 @@ class MtpBackend(ABC):
         concept (MockMtpBackend) doesn't need to implement this at all,
         same pattern as set_storage_overrides() above."""
         return None
+
+    # -- browsing, reading and removing (emuiibo support, 2026-09-25) --------
+    #
+    # Concrete defaults that refuse, not abstract methods: a backend that
+    # cannot do these simply does not offer them, and every caller treats
+    # InvalidOperationError as "this cannot be done on this connection" --
+    # never as an empty folder or a missing file.
+
+    def list_directory(self, storage: str, path: str) -> Optional[list[DirEntry]]:
+        """The children of folder `path` on `storage` ('' is the storage
+        root), or None when there is no such folder. Read-only."""
+        from .errors import InvalidOperationError
+        raise InvalidOperationError("this backend cannot list folders")
+
+    def read_file(self, storage: str, path: str, *, max_bytes: int) -> Optional[bytes]:
+        """The bytes of one file, or None when it does not exist or holds
+        more than `max_bytes`. Read-only."""
+        from .errors import InvalidOperationError
+        raise InvalidOperationError("this backend cannot read files back")
+
+    def delete(self, storage: str, path: str) -> None:
+        """Removes one FILE or one EMPTY folder. Deliberately not recursive:
+        a caller removing a tree lists it and removes it bottom-up, so it
+        always knows -- and can log -- every single thing it deleted, and a
+        device that stops answering halfway leaves an honest partial state
+        rather than an unknown one. No-op when `path` does not exist.
+        Raises InvalidOperationError for a non-empty folder."""
+        from .errors import InvalidOperationError
+        raise InvalidOperationError("this backend cannot delete")
 
     @abstractmethod
     def get_transfer_status(self, operation_id: str) -> TransferResult:

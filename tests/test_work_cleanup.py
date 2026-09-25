@@ -9,6 +9,7 @@ and preview's numbers match what execute_cleanup() actually does.
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 
 from switchagent import config, db, manifest as manifest_mod, work_cleanup
 
@@ -229,3 +230,56 @@ def test_total_work_size_includes_ineligible_jobs_too(isolated_db):
     preview = work_cleanup.preview_cleanup(conn)
     assert preview["eligible_job_count"] == 0
     assert preview["total_work_size_bytes"] >= 7000
+
+
+def test_two_threads_releasing_the_same_batch_never_see_it_half_removed(isolated_db, monkeypatch):
+    """The worker (after a job) and the preparation queue (before the next
+    archive) release a finished batch at the same moment. The one that loses
+    the race must not return while the winner is still emptying the folder:
+    its caller checks right afterwards that the folder is gone, and a
+    1,532-file amiibo collection made that check fail every time
+    (2026-09-25)."""
+    import threading
+    import time
+
+    conn, _ = isolated_db
+    job_id = _make_job(conn, status="DONE", finished_at=_iso(datetime.now(timezone.utc)))
+    batch_id = db.create_installation_batch(conn, target_device_id="dev-a")
+    conn.execute("UPDATE jobs SET batch_id=? WHERE id=?", (batch_id, job_id))
+    conn.commit()
+    batch_dir = manifest_mod.batch_work_dir(batch_id)
+    for i in range(200):
+        path = batch_dir / "copy" / f"amiibo-{i}" / "amiibo.json"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(b"{}")
+
+    real_rmtree = work_cleanup.shutil.rmtree
+    started = threading.Event()
+    calls = []
+
+    def slow_rmtree(path, *args, **kwargs):
+        # The first caller takes its time; a second one arriving meanwhile
+        # collides with it, as two rmtree()s over one folder do on Windows
+        # (a file already gone, a folder not yet empty).
+        calls.append(path)
+        if len(calls) > 1:
+            raise OSError("collided with the other thread's rmtree")
+        started.set()
+        time.sleep(0.3)
+        return real_rmtree(path, *args, **kwargs)
+
+    monkeypatch.setattr(work_cleanup.shutil, "rmtree", slow_rmtree)
+    db_path = Path(conn.execute("PRAGMA database_list").fetchone()["file"])
+    outcome = {}
+
+    def worker_side():
+        with db.open_db(db_path) as own:
+            outcome["worker"] = work_cleanup.cleanup_batch_if_all_done(own, batch_id)
+
+    thread = threading.Thread(target=worker_side)
+    thread.start()
+    assert started.wait(5), "the worker's cleanup never reached rmtree"
+    work_cleanup.cleanup_batch_if_all_done(conn, batch_id)
+    assert not batch_dir.exists()
+    thread.join(5)
+    assert outcome["worker"] is True

@@ -41,6 +41,16 @@
   <a href="/devices" class="{{ 'active' if active_page == 'devices' }}">
     <span class="nav-icon">🔌</span><span class="nav-label">Devices</span>
   </a>
+  {#- Only once emuiibo is on a console (app._nav_context): until then
+      there is nothing on it to manage, and Add-ons is where it comes from. -#}
+  {% if amiibo_tab %}
+  <a href="/amiibo" class="{{ 'active' if active_page == 'amiibo' }}">
+    <span class="nav-icon">⭐</span><span class="nav-label">Amiibo</span>
+  </a>
+  {% endif %}
+  <a href="/addons" class="{{ 'active' if active_page == 'addons' }}">
+    <span class="nav-icon">🧩</span><span class="nav-label">Add-ons</span>
+  </a>
   <a href="/settings" class="{{ 'active' if active_page == 'settings' }}">
     <span class="nav-icon">⚙</span><span class="nav-label">Settings</span>
   </a>

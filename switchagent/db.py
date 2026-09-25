@@ -187,6 +187,26 @@ CREATE TABLE IF NOT EXISTS device_installed_titles (
     confirmed_at    TEXT NOT NULL,
     PRIMARY KEY (device_id, base_title_id)
 );
+
+-- emuiibo on a console, as last READ off it over MTP (switchagent/emuiibo.py
+-- read_device): which of its parts are there, the overlay's version, and
+-- every virtual amiibo in emuiibo/amiibo/. What the console held when it was
+-- last looked at, never what SwitchAgent believes it sent -- replaced as a
+-- whole by every complete read, kept across disconnects and restarts so the
+-- Amiibo page still says something true about an unplugged console (with
+-- the time it was read).
+CREATE TABLE IF NOT EXISTS device_emuiibo (
+    device_id   TEXT PRIMARY KEY,
+    state_json  TEXT NOT NULL,
+    read_at     TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS device_amiibo (
+    device_id   TEXT NOT NULL,
+    path        TEXT NOT NULL,
+    data_json   TEXT NOT NULL,
+    PRIMARY KEY (device_id, path)
+);
 """
 
 # Full job status vocabulary. DEVICE_UNAVAILABLE and FAILED were added in
@@ -1435,6 +1455,8 @@ def forget_device(conn: sqlite3.Connection, device_id: str) -> bool:
         return False
     conn.execute("DELETE FROM device_storage_mappings WHERE device_id = ?", (device_id,))
     conn.execute("DELETE FROM device_installed_titles WHERE device_id = ?", (device_id,))
+    conn.execute("DELETE FROM device_emuiibo WHERE device_id = ?", (device_id,))
+    conn.execute("DELETE FROM device_amiibo WHERE device_id = ?", (device_id,))
     conn.execute("DELETE FROM devices WHERE device_id = ?", (device_id,))
     conn.commit()
     return True
@@ -1594,6 +1616,46 @@ def set_device_installed_base_title_ids(conn: sqlite3.Connection, device_id: str
         [(device_id, title_id, now) for title_id in base_title_ids],
     )
     conn.commit()
+
+
+def set_device_emuiibo(
+    conn: sqlite3.Connection, device_id: str, state: dict, amiibo: list[dict], *, read_at: Optional[str] = None,
+) -> None:
+    """Replaces everything known about emuiibo on this device with one
+    complete read (see the device_emuiibo schema comment). `read_at` keeps
+    an earlier read's time when the change is not a new read (amiibo just
+    removed and proven gone -- see web/emuiibo_service._forget_removed)."""
+    import json
+
+    conn.execute(
+        "INSERT INTO device_emuiibo (device_id, state_json, read_at) VALUES (?, ?, ?) "
+        "ON CONFLICT(device_id) DO UPDATE SET state_json = excluded.state_json, read_at = excluded.read_at",
+        (device_id, json.dumps(state, ensure_ascii=False), read_at or now_iso()),
+    )
+    conn.execute("DELETE FROM device_amiibo WHERE device_id = ?", (device_id,))
+    conn.executemany(
+        "INSERT OR REPLACE INTO device_amiibo (device_id, path, data_json) VALUES (?, ?, ?)",
+        [(device_id, a["path"], json.dumps(a, ensure_ascii=False)) for a in amiibo],
+    )
+    conn.commit()
+
+
+def get_device_emuiibo(conn: sqlite3.Connection, device_id: str) -> Optional[tuple[dict, list[dict], str]]:
+    """(state, amiibo, read_at) of the last complete read, or None if this
+    device was never read."""
+    import json
+
+    row = conn.execute("SELECT state_json, read_at FROM device_emuiibo WHERE device_id = ?",
+                       (device_id,)).fetchone()
+    if row is None:
+        return None
+    amiibo = [json.loads(r["data_json"]) for r in conn.execute(
+        "SELECT data_json FROM device_amiibo WHERE device_id = ? ORDER BY path COLLATE NOCASE", (device_id,))]
+    return json.loads(row["state_json"]), amiibo, row["read_at"]
+
+
+def list_devices_with_emuiibo(conn: sqlite3.Connection) -> list[str]:
+    return [row["device_id"] for row in conn.execute("SELECT device_id FROM device_emuiibo")]
 
 
 def get_all_confirmed_installed_base_title_ids(conn: sqlite3.Connection) -> set[str]:

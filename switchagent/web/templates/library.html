@@ -30,7 +30,7 @@
 {% endif %}
 {% endmacro %}
 
-{% macro destination_label(e) %}{% if e.content_type == "ATMOSPHERE_MOD" %}SD Card (merge){% elif e.content_type == "SD_FILES" %}SD Card (switch/){% else %}SD Card install{% endif %}{% endmacro %}
+{% macro destination_label(e) %}{% if e.content_type == "ATMOSPHERE_MOD" %}SD Card (merge){% elif e.content_type == "SD_FILES" %}SD Card (switch/){% elif e.content_type == "AMIIBO" %}SD Card (emuiibo/amiibo){% elif e.content_type == "EMUIIBO" %}SD Card (emuiibo){% else %}SD Card install{% endif %}{% endmacro %}
 
 {% macro game_card(e, family=None, family_name=None, warning=None) %}
 <div class="card {{ 'recent-transfer' if e.recent_transfer_until }}" data-id="{{ e.id }}" data-recent-until="{{ e.recent_transfer_until or '' }}">
@@ -52,6 +52,21 @@
     <div class="card-meta tile-meta"><span>{{ e.package_format or e.file_type }}</span><span>{{ e.size|filesize }}</span></div>
     <div class="card-meta tile-meta"><span>Added</span><time datetime="{{ e.first_seen_at }}">{{ e.first_seen_at[:16]|replace('T', ' ') }}</time></div>
     {% if e.content_type == "SD_FILES" %}<div class="card-meta sd-destination" title="Copied to the SD card as it is">→ {{ e.sd_destinations|join(", ") }}</div>{% endif %}
+    {% if e.content_type == "AMIIBO" and e.amiibo %}
+    <div class="card-meta amiibo-destination" title="Virtual amiibo for emuiibo, copied into emuiibo/amiibo on the SD card">
+      {{ e.amiibo.count }} amiibo in {{ e.amiibo.groups|length }} folder{{ "s" if e.amiibo.groups|length != 1 }} → sdmc:/emuiibo/amiibo
+    </div>
+    {% endif %}
+    {% if e.content_type == "EMUIIBO" %}
+    <div class="card-meta amiibo-destination" title="The emuiibo sysmodule and its overlay">
+      emuiibo {{ e.emuiibo_version or "(version unknown)" }} → atmosphere/contents, switch/.overlays
+    </div>
+    {% if e.emuiibo_outdated %}
+    <div class="card-warning" title="Older emuiibo builds may not start on current firmware">
+      Outdated — emuiibo {{ e.emuiibo_latest }} is current
+    </div>
+    {% endif %}
+    {% endif %}
     {% if warning %}
     <div class="card-warning" title="The game's icon on the Switch starts this file, and nothing in its folder puts it on the SD card">
       Needs {{ warning|join(", ") }} — not in this game's files
@@ -74,6 +89,9 @@
     {% if role == "sd" %}
     <span class="variant-label">{{ label }} — {{ e.sd_label }}</span>
     <span class="card-meta">→ {{ e.sd_destinations|join(", ") }}</span>
+    {% elif role == "amiibo" %}
+    <span class="variant-label">{{ label }} — {{ e.filename }}</span>
+    <span class="card-meta amiibo-destination">{{ e.amiibo.count if e.amiibo else "?" }} amiibo → sdmc:/emuiibo/amiibo</span>
     {% else %}
     <span class="variant-label">{{ label }} — {{ e.name }}</span>
     {% endif %}
@@ -128,7 +146,8 @@
        Mods kinds have no families to filter. #}
     <select name="filter" class="filter-select" onchange="this.form.submit()">
       {% for key, label in [("all","All"), ("base","Base Games"), ("updates","With updates"),
-                             ("dlc","With DLC"), ("mods","With mods"), ("duplicates","Duplicates")] %}
+                             ("dlc","With DLC"), ("mods","With mods"), ("amiibo","With amiibo"),
+                             ("duplicates","Duplicates")] %}
       <option value="{{ key }}" {{ "selected" if group_filter == key }}>{{ label }}</option>
       {% endfor %}
     </select>
@@ -211,6 +230,20 @@
 </section>
 
 {% if kind == "games" %}
+  {% if view.on_amiibo_tab %}
+  {#- emuiibo, amiibo collections and their PC tools are not games: they are
+      on the Amiibo tab -- or, before there is one, waiting for emuiibo.
+      One quiet line says so, so they do not seem to vanish. -#}
+  {% if amiibo_tab %}
+  <a class="library-elsewhere" href="/amiibo">
+    emuiibo and virtual amiibo from your Library ({{ view.on_amiibo_tab }}) are on the Amiibo tab →
+  </a>
+  {% else %}
+  <a class="library-elsewhere" href="/addons#addon-emuiibo">
+    Virtual amiibo from your Library ({{ view.on_amiibo_tab }}) are used through emuiibo — install it from Add-ons →
+  </a>
+  {% endif %}
+  {% endif %}
   {% if not view.games %}
   <p class="empty-state">
     No games found in the library yet. Drop files into the configured download
@@ -238,9 +271,10 @@
         <span class="extras-pill extras-pill-dlc {{ 'extras-pill-empty' if not g.dlc }}">{{ g.dlc|length }} DLC</span>
         <span class="extras-pill extras-pill-mod {{ 'extras-pill-empty' if not g.mods }}">{{ g.mods|length }} mods</span>
         {% if g.sd_files %}<span class="extras-pill extras-pill-sd">{{ g.sd_files|length }} SD files</span>{% endif %}
+        {% if g.amiibo %}<span class="extras-pill extras-pill-amiibo" title="Virtual amiibo for emuiibo that came with this game -- installed together with it">{{ g.amiibo_count }} amiibo</span>{% endif %}
         {% if g.duplicates %}<span class="extras-pill">{{ g.duplicates|length }} copies</span>{% endif %}
       {% endset %}
-      {% if g.updates or g.dlc or g.mods or g.sd_files or g.duplicates %}
+      {% if g.updates or g.dlc or g.mods or g.sd_files or g.amiibo or g.duplicates %}
       <details class="game-variants">
         <summary>
           {{ extras_summary }}
@@ -251,6 +285,7 @@
         {% for d in g.dlc %}{{ variant_row(d, "DLC", family=g.base_title_id, role="dlc", family_name=g.name) }}{% endfor %}
         {% for m in g.mods %}{{ variant_row(m, "Mod", family=g.base_title_id, role="mod", family_name=g.name) }}{% endfor %}
         {% for f in g.sd_files %}{{ variant_row(f, "SD files", family=g.base_title_id, role="sd", family_name=g.name) }}{% endfor %}
+        {% for a in g.amiibo %}{{ variant_row(a, "Amiibo", family=g.base_title_id, role="amiibo", family_name=g.name) }}{% endfor %}
         {% for dup in g.duplicates %}{{ variant_row(dup, "Other copy", family=g.base_title_id, role="duplicate", family_name=g.name) }}{% endfor %}
         </div>
         {% if g.has_detail_page %}<a class="game-details-link" href="/games/{{ g.base_title_id }}">Game details →</a>{% endif %}
@@ -261,6 +296,8 @@
       {% endif %}
       {% if g.has_detail_page %}
       <a class="game-details-link" href="/games/{{ g.base_title_id }}">Game details →</a>
+      {% elif g.base and g.base.content_type in ("AMIIBO", "EMUIIBO") %}
+      <a class="game-details-link" href="{{ '/amiibo' if amiibo_tab else '/addons#addon-emuiibo' }}">{{ 'Amiibo' if amiibo_tab else 'emuiibo' }} →</a>
       {% endif %}
     </div>
     {% endfor %}

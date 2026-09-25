@@ -174,6 +174,7 @@ def build_game_detail_view(conn, ctx: WebContext, raw_base_title_id: str) -> Opt
         "dlc": family["dlc"],
         "mods": family["mods"],
         "sd_files": family["sd_files"],
+        "amiibo": family.get("amiibo", []),
         "launch_checks": family["launch_checks"],
         "duplicates": family["duplicates"],
         # Entries the scanner could not classify or that failed extraction.
@@ -187,6 +188,7 @@ def build_game_detail_view(conn, ctx: WebContext, raw_base_title_id: str) -> Opt
         "dlc_count": len(family["dlc"]),
         "mod_count": len(family["mods"]),
         "sd_count": len(family["sd_files"]),
+        "amiibo_count": family.get("amiibo_count", 0),
         "total_size": family["total_size"],
         "first_seen_at": family["first_seen_at"],
         "last_scanned_at": family["last_scanned_at"],
@@ -335,6 +337,26 @@ def build_device_detail_view(conn, ctx: WebContext, fingerprint: str) -> Optiona
         "batches": batches,
         "families": family_list,
         "summary": _summarize_activity(entries),
+        "emuiibo": _emuiibo_summary(conn, device_id),
+    }
+
+
+def _emuiibo_summary(conn, device_id: str) -> Optional[dict]:
+    """One line about emuiibo on this console, as last read off it (see
+    web/emuiibo_service.py) -- the Amiibo page has the rest."""
+    from .. import emuiibo
+
+    stored = db.get_device_emuiibo(conn, device_id)
+    if stored is None:
+        return None
+    state, amiibo, read_at = stored
+    components = state.get("components") or {}
+    return {
+        "installed": bool(components.get("sysmodule")),
+        "overlay_version": state.get("overlay_version"),
+        "missing": [c.name for c in emuiibo.COMPONENTS if not components.get(c.key)],
+        "amiibo": len(amiibo),
+        "read_at": read_at,
     }
 
 

@@ -37,6 +37,7 @@
     <div class="card-body" data-detail-url="/api/library/{{ e.id }}">{{ e.sd_label if role == "sd" else e.filename }}</div>
     {% if label == "Mod" and e.mod_name %}<div class="card-meta">mod folder: {{ e.mod_name }}</div>{% endif %}
     {% if role == "sd" %}<div class="card-meta sd-destination">→ {{ e.sd_destinations|join(", ") }} · {{ e.sd.files }} files</div>{% endif %}
+    {% if role == "amiibo" and e.amiibo %}<div class="card-meta amiibo-destination">{{ e.amiibo.count }} virtual amiibo for emuiibo → sdmc:/emuiibo/amiibo · {% if amiibo_tab %}<a href="/amiibo">Amiibo →</a>{% else %}<a href="/addons#addon-emuiibo">needs emuiibo →</a>{% endif %}</div>{% endif %}
     {% if e.launches %}<div class="card-meta">starts {{ e.launches }}</div>{% endif %}
   </td>
   <td>{{ label }}</td>
@@ -79,6 +80,7 @@
   <span class="detail-counter">DLC: <strong>{{ view.dlc_count }}</strong></span>
   <span class="detail-counter">Mods: <strong>{{ view.mod_count }}</strong></span>
   {% if view.sd_count %}<span class="detail-counter">SD files: <strong>{{ view.sd_count }}</strong></span>{% endif %}
+  {% if view.amiibo_count %}<span class="detail-counter">Amiibo: <strong>{{ view.amiibo_count }}</strong></span>{% endif %}
   <span class="detail-counter">Total size: <strong>{{ view.total_size|filesize }}</strong></span>
 </div>
 
@@ -96,6 +98,7 @@
 {{ content_section("DLC", view.dlc, "DLC", role="dlc") }}
 {{ content_section("Mods", view.mods, "Mod", role="mod") }}
 {{ content_section("SD card files", view.sd_files, "SD files", role="sd") }}
+{{ content_section("Amiibo", view.amiibo, "Amiibo", role="amiibo") }}
 {% if view.launch_checks %}
 <section class="detail-section" id="launch-checks">
   <h3>What the icon starts</h3>

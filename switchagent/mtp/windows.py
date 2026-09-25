@@ -105,7 +105,7 @@ from typing import Callable, Optional
 
 from . import wpd
 from .. import title_id as title_id_mod
-from .base import DeviceInfo, MtpBackend, StorageInfo, TransferResult, TransferStatus
+from .base import DeviceInfo, DirEntry, MtpBackend, StorageInfo, TransferResult, TransferStatus
 from .errors import (
     DestinationNotFoundError,
     DeviceDisconnectedError,
@@ -1146,6 +1146,88 @@ class RealMtpBackend(MtpBackend):
 
     # -- installed games (see MtpBackend.list_installed_title_ids()'s own
     # docstring for the contract) --------------------------------------------
+
+    # -- browsing, reading, removing (WPD only) -----------------------------
+    #
+    # The Shell namespace could list, but it cannot read a file back without a
+    # copy engine round trip and cannot delete without a confirmation dialog,
+    # so these are WPD-only: without a WPD session they refuse
+    # (InvalidOperationError), exactly as the base class promises. A WPD
+    # failure here closes the session so the next call reopens it, but never
+    # demotes transfers to the Shell -- reading a folder is not sending.
+
+    def _wpd_or_refuse(self):
+        self._require_connected()
+        session = self._wpd_session()
+        if session is None:
+            raise InvalidOperationError(
+                "reading or changing the console's folders needs the WPD transport, "
+                "which is not available on this connection"
+            )
+        return session
+
+    def _wpd_failed(self, what: str, exc: Exception):
+        self._close_wpd()
+        if not self._device_currently_present():
+            self._connected = False
+            return DeviceDisconnectedError(f"device disconnected while {what}")
+        return TransferFailedError(f"{what} failed: {type(exc).__name__}: {exc}")
+
+    def list_directory(self, storage: str, path: str) -> Optional[list[DirEntry]]:
+        session = self._wpd_or_refuse()
+        try:
+            folder = session.navigate(self._wpd_storage_id(session, storage), path, create_missing=False)
+            if folder is None:
+                return None
+            return [DirEntry(name=name, is_dir=is_dir, size=size)
+                    for name, _object_id, is_dir, size in session.list_children(folder)]
+        except StorageNotFoundError:
+            raise
+        except Exception as exc:  # noqa: BLE001 -- turned into an honest MtpError
+            raise self._wpd_failed(f"listing '{path}'", exc) from exc
+
+    def read_file(self, storage: str, path: str, *, max_bytes: int) -> Optional[bytes]:
+        session = self._wpd_or_refuse()
+        parent_path, name = split_dest_path(path)
+        try:
+            parent = session.navigate(self._wpd_storage_id(session, storage), parent_path, create_missing=False)
+            object_id = session.child_id(parent, name) if parent is not None else None
+            if object_id is None:
+                return None
+            size = session.object_size(object_id)
+            if size is not None and size > max_bytes:
+                return None
+            return session.read_file(object_id, max_bytes)
+        except StorageNotFoundError:
+            raise
+        except Exception as exc:  # noqa: BLE001 -- turned into an honest MtpError
+            raise self._wpd_failed(f"reading '{path}'", exc) from exc
+
+    def delete(self, storage: str, path: str) -> None:
+        parent_path, name = split_dest_path(path)
+        if not name:
+            raise InvalidOperationError("refusing to delete a storage root")
+        session = self._wpd_or_refuse()
+        try:
+            parent = session.navigate(self._wpd_storage_id(session, storage), parent_path, create_missing=False)
+            if parent is None:
+                return
+            found = next((c for c in session.list_children(parent) if c[0] == name), None)
+            if found is None:
+                return
+            _name, object_id, is_dir, _size = found
+            if is_dir and session.list_children(object_id):
+                raise InvalidOperationError(f"'{path}' is not empty")
+            session.delete_child(parent, name, object_id)
+            # Proof, not the device's word: the object is gone from a fresh
+            # listing of its folder.
+            if any(c[0] == name for c in session.list_children(parent)):
+                raise TransferFailedError(f"the device did not remove '{path}'")
+            log.info("deleted storage=%s path=%r (wpd)", storage, path)
+        except (StorageNotFoundError, InvalidOperationError, TransferFailedError):
+            raise
+        except Exception as exc:  # noqa: BLE001 -- turned into an honest MtpError
+            raise self._wpd_failed(f"deleting '{path}'", exc) from exc
 
     def list_installed_title_ids(self) -> Optional[set[str]]:
         """Real-hardware finding (2026-09-15, DBI's "Installed Games"

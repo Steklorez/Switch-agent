@@ -65,6 +65,8 @@ def transfer_report(
         return _transfer_atmosphere_mod(backend, report, overwrite=overwrite)
     if report.content_type is ContentType.SD_FILES:
         return _transfer_sd_files(backend, report, overwrite=overwrite)
+    if report.content_type in (ContentType.EMUIIBO, ContentType.AMIIBO):
+        return _transfer_copy_plan(backend, report, overwrite=overwrite)
     return TransferOutcome(
         ok=False,
         error=f"content type {report.content_type.value} is not eligible for transfer (NEEDS_REVIEW)",
@@ -162,6 +164,45 @@ def _transfer_sd_files(
         ok=bool(files), storage=STORAGE_SD_CARD, files_sent=sent, files_total=len(files),
         bytes_sent=total_bytes, per_file=per_file, error=None if files else "switch/ folder has no files",
     )
+
+
+def _transfer_copy_plan(
+    backend: MtpBackend, report: PreviewReport, *, overwrite: bool,
+) -> TransferOutcome:
+    """EMUIIBO / AMIIBO: exactly report.copy_plan (see emuiibo.py), one file
+    at a time, stopping at the first failure -- the CLI counterpart of
+    manifest._build_copy_plan_files, with the same destination checks."""
+    from .manifest import ManifestError, _check_copy_destination
+
+    if report.copy_root is None or not report.copy_plan:
+        return TransferOutcome(ok=False, error="nothing staged locally to copy (call preview_path(path, extract=True))")
+    try:
+        for _src, dest in report.copy_plan:
+            _check_copy_destination(report.content_type, dest)
+    except ManifestError as exc:
+        return TransferOutcome(ok=False, error=str(exc))
+    per_file: list[TransferResult] = []
+    sent = 0
+    total_bytes = 0
+    for src, dest in sorted(report.copy_plan, key=lambda pair: pair[1]):
+        parent = "/".join(dest.split("/")[:-1])
+        try:
+            backend.ensure_directory(STORAGE_SD_CARD, parent)
+            result = backend.send_file(STORAGE_SD_CARD, dest, report.copy_root / src,
+                                       overwrite=overwrite or report.content_type is ContentType.EMUIIBO)
+        except MtpError as exc:
+            return TransferOutcome(ok=False, storage=STORAGE_SD_CARD, files_sent=sent,
+                                   files_total=len(report.copy_plan), bytes_sent=total_bytes,
+                                   error=str(exc), per_file=per_file)
+        per_file.append(result)
+        if result.status is not TransferStatus.COMPLETED:
+            return TransferOutcome(ok=False, storage=STORAGE_SD_CARD, files_sent=sent,
+                                   files_total=len(report.copy_plan), bytes_sent=total_bytes,
+                                   error=result.error or f"transfer of '{dest}' did not complete", per_file=per_file)
+        sent += 1
+        total_bytes += result.bytes_sent
+    return TransferOutcome(ok=True, storage=STORAGE_SD_CARD, files_sent=sent, files_total=len(report.copy_plan),
+                           bytes_sent=total_bytes, per_file=per_file)
 
 
 def _transfer_atmosphere_mod(

@@ -1,0 +1,126 @@
+/* Amiibo page (templates/amiibo.html, amiibo.js). Built from the same
+   tokens as the rest of the app (style.css :root) -- nothing here defines a
+   colour of its own except the amiibo accent, --amiibo, which the Queue and
+   History badges use too (style.css .job-tag-amiibo). */
+
+.amiibo-title { margin: 0 0 4px; }
+.amiibo-device-bar { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.amiibo-device-bar .filter-select { min-width: 180px; }
+
+.amiibo-panel {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 14px 16px;
+}
+.amiibo-panel-head { display: flex; align-items: baseline; gap: 12px; flex-wrap: wrap; margin-bottom: 8px; }
+.amiibo-panel-head h3 { margin: 0; }
+
+.amiibo-activity {
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 8px 12px;
+  margin-bottom: 14px;
+  font-size: 0.85rem;
+  color: var(--text-dim);
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.amiibo-activity[hidden] { display: none; }
+.amiibo-activity.is-busy { border-color: #4f8ef766; color: var(--text); }
+.amiibo-activity.is-busy::before {
+  content: "";
+  height: 2px;
+  margin: -8px -12px 6px;
+  border-radius: 10px 10px 0 0;
+  background: linear-gradient(90deg, transparent, var(--accent), transparent);
+  background-size: 200% 100%;
+  animation: amiibo-sweep 1.4s linear infinite;
+}
+@keyframes amiibo-sweep { from { background-position: 100% 0; } to { background-position: -100% 0; } }
+@media (prefers-reduced-motion: reduce) { .amiibo-activity.is-busy::before { animation: none; } }
+
+.amiibo-components { list-style: none; margin: 0 0 10px; padding: 0; display: grid; gap: 6px; }
+.amiibo-component {
+  display: grid;
+  grid-template-columns: 22px minmax(140px, auto) 1fr auto;
+  gap: 10px;
+  align-items: baseline;
+  font-size: 0.88rem;
+}
+.amiibo-component-mark { font-weight: 700; text-align: center; }
+.amiibo-component.is-present .amiibo-component-mark { color: var(--ok); }
+.amiibo-component.is-missing .amiibo-component-mark { color: var(--danger-text); }
+.amiibo-component-name { font-weight: 600; }
+.amiibo-component.is-missing .amiibo-component-name { color: var(--danger-text); }
+.amiibo-component-purpose { color: var(--text-dim); font-size: 0.8rem; }
+.amiibo-component-source { font-size: 0.8rem; white-space: nowrap; }
+
+.amiibo-advice { list-style: none; margin: 8px 0; padding: 0; display: grid; gap: 8px; }
+.amiibo-advice li {
+  display: flex; align-items: center; justify-content: space-between; gap: 12px;
+  padding: 8px 12px; border-radius: 10px; background: var(--surface-2); font-size: 0.86rem;
+}
+.amiibo-advice .amiibo-advice-install_release { border-left: 3px solid var(--accent); }
+.amiibo-advice .amiibo-advice-link { border-left: 3px solid var(--warn); }
+.amiibo-advice .amiibo-advice-note { border-left: 3px solid var(--border); color: var(--text-dim); }
+.amiibo-howto { margin: 8px 0 0; }
+
+.amiibo-toolbar { display: flex; gap: 8px; align-items: center; margin: 4px 0 10px; }
+.amiibo-toolbar .search-box { max-width: 360px; }
+
+.amiibo-group { border-top: 1px solid var(--border); }
+.amiibo-group > summary {
+  display: flex; align-items: center; gap: 10px;
+  padding: 8px 2px; cursor: pointer; list-style: none; user-select: none;
+}
+.amiibo-group > summary::-webkit-details-marker { display: none; }
+.amiibo-group > summary::after { content: "›"; margin-left: 4px; color: var(--text-dim); transition: transform .15s; }
+.amiibo-group[open] > summary::after { transform: rotate(90deg); }
+.amiibo-group-name { font-weight: 600; font-size: 0.9rem; }
+.amiibo-group-count { color: var(--text-dim); font-size: 0.8rem; margin-left: auto; }
+.amiibo-rows { display: grid; gap: 2px; padding: 0 0 10px 26px; }
+
+.amiibo-row {
+  display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
+  padding: 4px 6px; border-radius: 6px; font-size: 0.86rem; cursor: pointer;
+}
+.amiibo-row:hover { background: var(--surface-2); }
+.amiibo-row.is-done .amiibo-label { color: var(--text-dim); }
+.amiibo-label { font-weight: 500; }
+.amiibo-name { color: var(--text-dim); font-size: 0.8rem; }
+.amiibo-id { color: var(--text-dim); font-size: 0.74rem; }
+.amiibo-badges { display: inline-flex; gap: 4px; margin-left: auto; }
+.amiibo-badge {
+  font-size: 0.7rem; padding: 1px 7px; border-radius: 999px;
+  background: var(--surface-2); color: var(--text-dim); border: 1px solid var(--border);
+}
+.amiibo-badge-on { color: var(--ok); border-color: #35c46f55; }
+.amiibo-badge-save { color: var(--warn); border-color: #f5a62355; }
+.amiibo-badge-fav { color: #ffd166; border-color: #ffd16655; }
+.amiibo-badge-bad { color: var(--danger-text); border-color: #e5484d55; }
+.amiibo-badge-dump { color: var(--sd); border-color: #b392f055; }
+
+.amiibo-release, .amiibo-collection-head {
+  display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap;
+}
+.amiibo-release { padding: 8px 0; border-bottom: 1px solid var(--border); }
+.amiibo-release-name { font-weight: 600; }
+.amiibo-release-get { border-bottom: 1px dashed var(--border); }
+.amiibo-collection { border: 1px solid var(--border); border-radius: 10px; padding: 10px 12px; margin-top: 12px; }
+.amiibo-collection-head { margin-bottom: 6px; }
+.amiibo-collection-name { font-weight: 600; }
+.amiibo-collection-actions { display: flex; gap: 8px; flex-wrap: wrap; }
+
+.amiibo-modal { max-width: 520px; }
+.amiibo-remove-list { margin: 8px 0; padding-left: 18px; font-size: 0.85rem; max-height: 220px; overflow: auto; }
+.amiibo-save-confirm { display: flex; gap: 8px; align-items: flex-start; font-size: 0.86rem; color: var(--warn); margin: 8px 0; }
+.amiibo-dialog-error { color: var(--danger-text); font-size: 0.85rem; }
+
+@media (max-width: 700px) {
+  .amiibo-component { grid-template-columns: 22px 1fr; }
+  .amiibo-component-purpose, .amiibo-component-source { grid-column: 2; }
+  .amiibo-rows { padding-left: 4px; }
+  .amiibo-badges { margin-left: 0; }
+}

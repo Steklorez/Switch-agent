@@ -357,7 +357,7 @@ def _cmd_web(args: argparse.Namespace) -> int:
     # here, where a console already exists).
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)-8s %(name)s: %(message)s")
 
-    ctx = build_mock_context(config.DB_PATH) if use_mock else build_real_context(config.DB_PATH)
+    ctx = build_mock_context(config.DB_PATH, seed_emuiibo=True) if use_mock else build_real_context(config.DB_PATH)
     ctx.start_worker()
     ctx.start_library_watcher()
     app = create_app(ctx)

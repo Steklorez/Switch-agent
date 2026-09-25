@@ -23,7 +23,8 @@
   // item looks the same in the dialog that queued it and in the Queue that
   // runs it. No role -> no badge: the backend returns null whenever it
   // cannot actually tell, and a guessed kind would be worse than none.
-  const ROLE_LABELS = { base: "Game", update: "Update", dlc: "DLC", mod: "Mod", sd: "SD files" };
+  const ROLE_LABELS = { base: "Game", update: "Update", dlc: "DLC", mod: "Mod", sd: "SD files",
+                        amiibo: "Amiibo", emuiibo: "emuiibo" };
 
   function buildRoleTag(role) {
     const label = ROLE_LABELS[role];
@@ -275,7 +276,11 @@
     const progressTextHtml = (j.status === "RUNNING" && j.bytes_total > 0)
       ? `<div class="job-progress-text"></div>` : "";
     const waitingForDevice = j.status === "WAITING_FOR_DEVICE";
-    const errorHtml = (j.error && !waitingForDevice) ? `<div class="job-error"></div>` : "";
+    // A finished job can still carry a sentence -- an amiibo collection
+    // saying how many were already on the console. That is a note, not a
+    // failure, and is not painted as one.
+    const errorClass = j.status === "DONE" ? "history-note" : "job-error";
+    const errorHtml = (j.error && !waitingForDevice) ? `<div class="${errorClass}"></div>` : "";
     const stallHtml = j.possibly_stalled ? `<div class="job-stall-warning"></div>` : "";
     // A stopped row keeps Retry. Taking something out of the queue is the
     // game card's "Remove" (appendGameGroups): a per-row Cancel only ever
@@ -315,7 +320,7 @@
         "Large MTP transfers may legitimately take a long time; this is not treated as a failure.";
     }
     if (j.error && !waitingForDevice) {
-      const errorEl = li.querySelector(".job-error");
+      const errorEl = li.querySelector("." + errorClass);
       errorEl.textContent = j.error;
       errorEl.title = j.error; // UX-001: long/technical errors are CSS-clamped -- full text via hover tooltip
     }

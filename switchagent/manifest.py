@@ -43,7 +43,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
 
-from . import config, sd_files
+from . import config, emuiibo, sd_files
 from .model import ContentType
 from .preview import PreviewReport
 from .scanner import sha256_file
@@ -167,6 +167,8 @@ def build_manifest_and_stage(
         files = _build_mod_files(report, payload_dir)
     elif report.content_type is ContentType.SD_FILES:
         files = _build_sd_files(report, payload_dir)
+    elif report.content_type in (ContentType.EMUIIBO, ContentType.AMIIBO):
+        files = _build_copy_plan_files(report, payload_dir)
     else:
         raise ManifestError(f"content type {report.content_type.value} is not eligible for transfer")
 
@@ -333,6 +335,73 @@ def _build_sd_files(report: PreviewReport, payload_dir: Path) -> list[ManifestFi
         ))
     if not files:
         raise ManifestError(f"switch/ folder has no files: {report.sd_source_dir}")
+    return files
+
+
+# Where each kind of copy-plan job may write, and nowhere else: whatever an
+# archive's names looked like, an AMIIBO job only ever writes inside
+# emuiibo/amiibo/, an EMUIIBO job only emuiibo's own three places.
+_COPY_PLAN_PREFIXES = {
+    ContentType.AMIIBO: (emuiibo.AMIIBO_DIR + "/",),
+    ContentType.EMUIIBO: (emuiibo.SYSMODULE_DIR + "/", emuiibo.OVERLAY_DATA_DIR + "/"),
+}
+_COPY_PLAN_EXACT = {ContentType.EMUIIBO: (emuiibo.OVERLAY_FILE,)}
+
+
+def _check_copy_destination(content_type: ContentType, dest: str) -> None:
+    parts = dest.split("/")
+    if (not dest or dest.startswith("/") or "\\" in dest
+            or any(p in ("", ".", "..") or ":" in p for p in parts)):
+        raise ManifestError(f"refusing an unsafe destination path: {dest!r}")
+    if not (dest.startswith(_COPY_PLAN_PREFIXES[content_type])
+            or dest in _COPY_PLAN_EXACT.get(content_type, ())):
+        raise ManifestError(f"{content_type.value} content may not be written to {dest!r}")
+
+
+def _build_copy_plan_files(report: PreviewReport, payload_dir: Path) -> list[ManifestFile]:
+    """EMUIIBO / AMIIBO: exactly the (source, destination) pairs emuiibo.py
+    planned (report.copy_plan), each checked against the only places that
+    kind of job may write. Frozen and verified like a mod: files of a bare
+    folder under a scanned root are hashed in place and re-verified before
+    sending; an archive's extracted files are moved into the payload dir --
+    only the planned ones, so an amiibo selection freezes just those."""
+    if report.copy_root is None or not report.copy_plan:
+        raise ManifestError("nothing staged locally to copy -- call preview_path(path, extract=True) first")
+    for _src, dest in report.copy_plan:
+        _check_copy_destination(report.content_type, dest)
+
+    files = []
+    if report.work_dir is None:
+        source_kind, bare_root = _classify_bare_source_root(report.copy_root)
+        for src, dest in sorted(report.copy_plan, key=lambda pair: pair[1]):
+            f = report.copy_root / src
+            if not f.is_file():
+                raise ManifestError(f"planned file not found on disk: {f}")
+            file_stat = f.stat()
+            files.append(ManifestFile(
+                dest_relative_path=dest, source_kind=source_kind,
+                source_relative_path=f.relative_to(bare_root).as_posix(),
+                size=file_stat.st_size, sha256=sha256_file(f),
+                source_root=str(bare_root) if source_kind == "library" else None,
+                mtime_ns=file_stat.st_mtime_ns,
+            ))
+        return files
+
+    import uuid
+    frozen_root = payload_dir / ("copy-" + uuid.uuid4().hex)
+    for src, dest in sorted(report.copy_plan, key=lambda pair: pair[1]):
+        extracted = report.copy_root / src
+        if not extracted.is_file():
+            raise ManifestError(f"planned file not found in the extraction: {extracted}")
+        frozen = frozen_root / src
+        frozen.parent.mkdir(parents=True, exist_ok=True)
+        shutil.move(str(extracted), str(frozen))
+        file_stat = frozen.stat()
+        files.append(ManifestFile(
+            dest_relative_path=dest, source_kind="frozen",
+            source_relative_path=frozen.relative_to(payload_dir).as_posix(),
+            size=file_stat.st_size, sha256=sha256_file(frozen), mtime_ns=file_stat.st_mtime_ns,
+        ))
     return files
 
 

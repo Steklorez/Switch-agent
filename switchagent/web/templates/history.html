@@ -34,6 +34,10 @@
       </div>
       {% if h.error and h.flag in ("failed", "conflict") %}
       <div class="job-error" title="{{ h.error }}">{{ h.error }}</div>
+      {% elif h.error and h.flag == "ok" %}
+      {#- A transfer that went through and still has something to say --
+          an amiibo collection saying how many were already on the console. -#}
+      <div class="history-note" title="{{ h.error }}">{{ h.error }}</div>
       {% endif %}
       {# An address, not a control: it says where this is decided, and shows
          only while there is actually something in Queue to decide. #}

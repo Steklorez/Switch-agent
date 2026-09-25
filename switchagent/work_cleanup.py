@@ -30,6 +30,7 @@ from __future__ import annotations
 
 import shutil
 import sqlite3
+import threading
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -117,6 +118,16 @@ def preview_cleanup(conn: sqlite3.Connection, *, retention_days: float = DEFAULT
     }
 
 
+# The worker (after a job) and the preparation queue (before extracting the
+# next archive) both release a finished batch, often at the same moment. Two
+# rmtree()s over the same folder race: one fails on files the other already
+# removed, and the preparation's "is it gone?" check then saw the folder the
+# other thread was still emptying -- "Temporary payload cleanup failed" on a
+# batch that was being cleaned up just fine. Harmless with one .nsp; hit every
+# time with a 1,532-file amiibo collection (2026-09-25). One at a time.
+_BATCH_CLEANUP_LOCK = threading.Lock()
+
+
 def cleanup_batch_if_all_done(conn: sqlite3.Connection, batch_id: Optional[int]) -> bool:
     """Immediate cleanup of a batch's shared staging
     (manifest.batch_work_dir(batch_id) -- see manifest.py) the moment every
@@ -144,13 +155,15 @@ def cleanup_batch_if_all_done(conn: sqlite3.Connection, batch_id: Optional[int])
     if not jobs or any(j["id"] not in released for j in jobs):
         return False
     batch_dir = manifest_mod.batch_work_dir(batch_id)
-    if not batch_dir.is_dir() or batch_dir.is_symlink() or batch_dir.resolve().parent != config.WORK_DIR.resolve():
-        return False
-    try:
-        shutil.rmtree(batch_dir)
-    except OSError:
-        return False
-    return not batch_dir.exists()
+    with _BATCH_CLEANUP_LOCK:
+        if (not batch_dir.is_dir() or batch_dir.is_symlink()
+                or batch_dir.resolve().parent != config.WORK_DIR.resolve()):
+            return False
+        try:
+            shutil.rmtree(batch_dir)
+        except OSError:
+            return False
+        return not batch_dir.exists()
 
 
 def execute_cleanup(conn: sqlite3.Connection, *, retention_days: float = DEFAULT_RETENTION_DAYS) -> dict:

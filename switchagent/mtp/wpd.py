@@ -21,8 +21,8 @@ No third-party dependency: this is plain ctypes over the COM vtables, so it
 survives PyInstaller packaging unchanged (comtypes' runtime code generation
 does not).
 
-READ-ONLY apart from create_file_object()/create_folder(), which are the
-only two functions here that write anything to a device.
+READ-ONLY apart from create_file_object()/create_folder(), which write to
+a device, and delete_object(), which removes one object from it.
 """
 from __future__ import annotations
 
@@ -126,6 +126,9 @@ IID_IPortableDeviceProperties = "{7F6D695C-03DF-4439-A809-59266BEEE3A6}"
 IID_IPortableDeviceResources = "{FD8878AC-D841-4D17-891C-E6829CDB6934}"
 IID_IStream = "{0000000C-0000-0000-C000-000000000046}"
 IID_IPortableDeviceDataStream = "{88E04DB3-1012-4D64-9996-F703A950D3F4}"
+# Both read off this machine's registry (HKCR CLSID / Interface) 2026-09-25.
+CLSID_PortableDevicePropVariantCollection = "{08A99E2F-6D6D-4B80-AF5A-BAF2BCBE4CB9}"
+IID_IPortableDevicePropVariantCollection = "{89B2E422-4F1B-4316-BCEF-A44AFEA83EB3}"
 
 # -- Well-known WPD property keys (verified against the device by dump) ------
 _OBJ = "{EF6B490D-5CD8-437A-AFFC-DA8B60EE4A3C}"
@@ -153,6 +156,10 @@ S_FALSE = 1
 WPD_CONTENT_TYPE_FOLDER = GUID("{27E2E392-A111-48E0-AB0C-E17705A05F85}")
 WPD_CONTENT_TYPE_GENERIC_FILE = GUID("{0085E0A6-8D34-45D7-BC5C-447E59C73D48}")
 WPD_OBJECT_FORMAT_UNSPECIFIED = GUID("{30000000-AE6C-4804-98BA-C57B46965FE7}")
+# MTP's "association": how a responder that reports no content type marks a folder.
+WPD_OBJECT_FORMAT_PROPERTIES_ONLY = GUID("{30010000-AE6C-4804-98BA-C57B46965FE7}")
+PORTABLE_DEVICE_DELETE_NO_RECURSION = 0
+VT_LPWSTR = 31
 
 DEVICE_OBJECT_ID = "DEVICE"
 
@@ -485,6 +492,32 @@ def create_folder(content, parent_object_id, name):
         release(values)
 
 
+def delete_object(content, object_id):
+    """IPortableDeviceContent::Delete (vtable slot 8) for exactly one object,
+    never recursive -- a folder must already be empty, or the device refuses.
+    REMOVES from the device. The object id travels in an
+    IPortableDevicePropVariantCollection as a VT_LPWSTR; Add() copies it, so
+    the buffer only has to outlive that call."""
+    ids = co_create(CLSID_PortableDevicePropVariantCollection, IID_IPortableDevicePropVariantCollection)
+    try:
+        text = ctypes.create_unicode_buffer(object_id)
+        var = PROPVARIANT()
+        var.vt = VT_LPWSTR
+        ctypes.memmove(ctypes.addressof(var.data), ctypes.byref(c_void_p(ctypes.addressof(text))), 8)
+        vcall(ids, 5, (POINTER(PROPVARIANT),), byref(var), what="IPortableDevicePropVariantCollection::Add")
+        vcall(content, 8, (DWORD, c_void_p, c_void_p), PORTABLE_DEVICE_DELETE_NO_RECURSION, ids, None,
+              what="IPortableDeviceContent::Delete")
+    finally:
+        release(ids)
+
+
+def is_folder(props):
+    content_type = str(props.get(str(WPD_OBJECT_CONTENT_TYPE)) or "").upper()
+    object_format = str(props.get(str(WPD_OBJECT_FORMAT)) or "").upper()
+    return (content_type == str(WPD_CONTENT_TYPE_FOLDER).upper()
+            or object_format == str(WPD_OBJECT_FORMAT_PROPERTIES_ONLY).upper())
+
+
 # ---------------------------------------------------------------------------
 # Session-level API -- what RealMtpBackend actually talks to
 # ---------------------------------------------------------------------------
@@ -623,6 +656,32 @@ class WpdSession:
                 mapping[name] = object_id
         self._children_cache[parent_object_id] = mapping
         return mapping
+
+    def list_children(self, parent_object_id):
+        """[(name, object_id, is_folder, size)] for every child, read from the
+        device now -- never from the cache, which it refreshes as a side
+        effect. size is None for a folder."""
+        entries = []
+        mapping = {}
+        for object_id in enum_children(self._content, parent_object_id):
+            props = read_props(self._properties, object_id)
+            name = object_name(props)
+            if not name:
+                continue
+            mapping[name] = object_id
+            folder = is_folder(props)
+            entries.append((name, object_id, folder, None if folder else props.get(str(WPD_OBJECT_SIZE))))
+        self._children_cache[parent_object_id] = mapping
+        return entries
+
+    def delete_child(self, parent_object_id, name, object_id):
+        """Removes one object and forgets it -- and, if it was a folder,
+        everything cached under it."""
+        delete_object(self._content, object_id)
+        known = self._children_cache.get(parent_object_id)
+        if known is not None:
+            known.pop(name, None)
+        self._children_cache.pop(object_id, None)
 
     def child_id(self, parent_object_id, name):
         return self.children_by_name(parent_object_id).get(name)

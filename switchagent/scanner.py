@@ -11,12 +11,13 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import re
 import time
 from pathlib import Path
 from typing import Callable, Optional
 
-from . import config, db, extractor, sd_files, title_id
+from . import config, db, emuiibo, extractor, sd_files, title_id
 from .model import ContentType
 
 TITLE_ID_DIR_RE = re.compile(rf"^{config.TITLE_ID_RE}$")
@@ -29,13 +30,29 @@ TITLE_ID_DIR_RE = re.compile(rf"^{config.TITLE_ID_RE}$")
 # "switch" for good -- on exactly the libraries the change was made for.
 #   1  (no marker) -- before SD_FILES
 #   2  switch/ folders, forwarder launch paths
-CLASSIFICATION_REVISION = 2
+#   3  emuiibo releases and virtual amiibo; an .nsp inside atmosphere/contents/
+#      (a sysmodule's exefs.nsp) is no longer taken for an installable package
+CLASSIFICATION_REVISION = 3
+
+# A library item that is a program for this PC, not something for a Switch
+# (emuiibo's emutool / emuiigen): shown for what it is, never installable,
+# and not a question left open the way NEEDS_REVIEW is.
+NOT_FOR_SWITCH = "NOT_FOR_SWITCH"
 
 
-def _details_json(**parts) -> str:
+def _details_json(*, extra: Optional[dict] = None, **parts) -> str:
     return json.dumps(
-        {"classified": CLASSIFICATION_REVISION, **sd_files.details(**parts)}, ensure_ascii=False,
+        {"classified": CLASSIFICATION_REVISION, **sd_files.details(**parts), **(extra or {})},
+        ensure_ascii=False,
     )
+
+
+def emuiibo_details(plan: emuiibo.ReleasePlan, version: Optional[str]) -> dict:
+    return {"emuiibo": {**plan.to_dict(), "version": version}}
+
+
+def amiibo_details(collection: emuiibo.Collection) -> dict:
+    return {"amiibo": collection.summary()}
 
 
 def classified_revision(row) -> int:
@@ -144,7 +161,7 @@ def _classify_archive_file(abs_path: Path, ext: str) -> dict:
         )
 
     content_hash = extractor.hash_entries(entries)
-    cls = extractor.classify_entries(entries)
+    cls = extractor.classify_entries(entries, archive_name=abs_path.name)
     # A package or mod archive can carry a switch/ folder as well; it is
     # installed alongside (see services.create_and_confirm_jobs), and the
     # row says so rather than keeping it out of sight.
@@ -188,6 +205,30 @@ def _classify_archive_file(abs_path: Path, ext: str) -> dict:
             details_json=sd_details,
         )
 
+    if cls.content_type is ContentType.EMUIIBO:
+        plan = cls.emuiibo_release
+        version = None
+        if plan.overlay_source:
+            data = extractor.read_archive_member(abs_path, plan.overlay_source, max_bytes=emuiibo.OVERLAY_MAX_BYTES)
+            version = emuiibo.overlay_version(data) if data else None
+        version = version or emuiibo.version_from_name(abs_path.name)
+        return dict(
+            **common,
+            title_id=None, title_id_source=None, title_id_confident=False,
+            status="ANALYZED", suggested_action="COPY_MERGE", suggested_target="SD_CARD",
+            note="emuiibo (virtual amiibo sysmodule and overlay), copied to where its release lays it out",
+            details_json=_details_json(extra=emuiibo_details(plan, version)),
+        )
+
+    if cls.content_type is ContentType.AMIIBO:
+        return dict(
+            **common,
+            title_id=None, title_id_source=None, title_id_confident=False,
+            status="ANALYZED", suggested_action="COPY_MERGE", suggested_target="SD_CARD",
+            note="virtual amiibo for emuiibo, copied into emuiibo/amiibo/ on the SD card",
+            details_json=_details_json(sd=cls.sd_summary, extra=amiibo_details(cls.amiibo)),
+        )
+
     if cls.content_type is ContentType.SD_FILES:
         # No TITLE_ID inside a switch/ folder. A bracketed one in the
         # archive's own name is taken as the label it is; otherwise which
@@ -199,6 +240,19 @@ def _classify_archive_file(abs_path: Path, ext: str) -> dict:
             title_id=guess.title_id, title_id_source=guess.source, title_id_confident=False,
             status="ANALYZED", suggested_action="COPY_MERGE", suggested_target="SD_CARD",
             note="archive contains a switch/ folder for the SD card, will be safely extracted before sending",
+            details_json=sd_details,
+        )
+
+    tool = emuiibo.pc_tool(extractor.file_list(entries))
+    if tool is not None:
+        # Nothing to review and nothing to install: a program for this PC.
+        return dict(
+            **common,
+            title_id=None, title_id_source=None, title_id_confident=False,
+            status=NOT_FOR_SWITCH, suggested_action=None, suggested_target=None,
+            note=(f"{tool}: emuiibo's PC app for making virtual amiibo"
+                  + (" (emuiibo 1.1 replaced it with emuiigen)" if tool == "emutool" else "")
+                  + " -- it runs on a PC, nothing of it goes to the Switch"),
             details_json=sd_details,
         )
 
@@ -262,6 +316,144 @@ def find_mod_folders(inbox_dir: Path, *, should_stop: Optional[Callable[[], bool
                 if child.is_dir() and TITLE_ID_DIR_RE.fullmatch(child.name):
                     result.append(child)
     return result
+
+
+def emuiibo_release_folders(mod_folders: list[Path]) -> list[Path]:
+    """The unpacked emuiibo releases among `mod_folders`: an
+    atmosphere/contents/0100000000000352 holding exefs.nsp is emuiibo's
+    sysmodule, and the folder atmosphere/ sits in is the release (SdOut/, as
+    both real releases unpack)."""
+    roots = []
+    for folder in mod_folders:
+        if folder.name.upper() == emuiibo.PROGRAM_ID and (folder / "exefs.nsp").is_file():
+            roots.append(folder.parents[2])
+    return list(dict.fromkeys(roots))
+
+
+def _child_ci(folder: Path, name: str) -> Optional[Path]:
+    try:
+        for entry in folder.iterdir():
+            if entry.name.lower() == name.lower():
+                return entry
+    except OSError:
+        return None
+    return None
+
+
+def release_folder_files(root: Path) -> list[tuple[str, int]]:
+    """(path relative to `root`, size) for the files of an unpacked release
+    that are emuiibo's -- and only those, so a release unpacked straight
+    into a busy folder is never fingerprinted or copied as a whole."""
+    wanted: list[Path] = []
+    contents = _child_ci(root, "atmosphere")
+    contents = _child_ci(contents, "contents") if contents else None
+    program = _child_ci(contents, emuiibo.PROGRAM_ID) if contents else None
+    if program is not None:
+        wanted += [p for p in program.rglob("*") if p.is_file()]
+    overlays = _child_ci(root, "switch")
+    overlays = _child_ci(overlays, ".overlays") if overlays else None
+    ovl = _child_ci(overlays, "emuiibo.ovl") if overlays else None
+    if ovl is not None and ovl.is_file():
+        wanted.append(ovl)
+    data = _child_ci(root, "emuiibo")
+    data = _child_ci(data, "overlay") if data else None
+    if data is not None:
+        wanted += [p for p in data.rglob("*") if p.is_file()]
+    return sorted((p.relative_to(root).as_posix(), p.stat().st_size) for p in wanted)
+
+
+def hash_file_list(root: Path, files: list[tuple[str, int]]) -> tuple[str, int, float]:
+    """hash_mod_folder's fingerprint over a chosen set of files."""
+    h = hashlib.sha256()
+    total_size = 0
+    max_mtime = 0.0
+    for rel, _size in sorted(files):
+        st = (root / rel).stat()
+        h.update(rel.encode("utf-8", "surrogateescape"))
+        h.update(str(st.st_size).encode())
+        h.update(str(st.st_mtime_ns).encode())
+        total_size += st.st_size
+        max_mtime = max(max_mtime, st.st_mtime)
+    return h.hexdigest(), total_size, max_mtime
+
+
+def _looks_like_dump_file(path: Path) -> bool:
+    try:
+        size = path.stat().st_size
+        if size not in emuiibo.RAW_DUMP_SIZES:
+            return False
+        with path.open("rb") as handle:
+            head = handle.read(32)
+    except OSError:
+        return False
+    return emuiibo.looks_like_raw_dump(path.name, size, head)
+
+
+def find_amiibo_collections(amiibo_jsons: list[Path], bin_files: list[Path], roots: list[Path]) -> list[Path]:
+    """The folders in the library that are virtual amiibo collections: for
+    every folder holding an amiibo.json (and every raw amiibo dump), the
+    topmost folder above it that holds nothing but amiibo -- "ALL amiibo
+    (flag_json)" for the real pack, not the release folder it sits in next
+    to two archives. Never above a Library folder."""
+    amiibo_dirs: list[Path] = []
+    for folder in sorted({p.parent for p in amiibo_jsons}, key=lambda p: (len(p.parts), str(p))):
+        if not any(folder.is_relative_to(done) for done in amiibo_dirs):
+            amiibo_dirs.append(folder)
+    amiibo_set = set(amiibo_dirs)
+    dumps = {p for p in bin_files
+             if not any(p.is_relative_to(d) for d in amiibo_dirs) and _looks_like_dump_file(p)}
+
+    memo: dict[Path, bool] = {}
+
+    def pure(folder: Path) -> bool:
+        """Nothing in `folder` but amiibo (and files that say nothing, like
+        Thumbs.db)."""
+        if folder in amiibo_set:
+            return True
+        if folder in memo:
+            return memo[folder]
+        memo[folder] = False  # a link loop reads as "not pure", never as a hang
+        result = True
+        try:
+            with os.scandir(folder) as it:
+                for entry in it:
+                    path = Path(entry.path)
+                    if entry.is_dir(follow_symlinks=False):
+                        if not pure(path):
+                            result = False
+                            break
+                    elif path not in dumps and entry.name.lower() not in emuiibo._IGNORABLE_FILES:
+                        result = False
+                        break
+        except OSError:
+            result = False
+        memo[folder] = result
+        return result
+
+    def library_root_of(path: Path) -> Optional[Path]:
+        return next((r for r in roots if path.is_relative_to(r)), None)
+
+    found: list[Path] = []
+    for item in [*amiibo_dirs, *sorted(dumps)]:
+        root = library_root_of(item)
+        if root is None:
+            continue
+        candidate = item if item in amiibo_set else item.parent
+        if candidate not in amiibo_set and not pure(candidate):
+            continue  # a lone dump among other files is nobody's collection
+        while candidate != root and pure(candidate.parent):
+            candidate = candidate.parent
+        found.append(candidate)
+    outermost: list[Path] = []
+    for folder in sorted(set(found), key=lambda p: (len(p.parts), str(p))):
+        if not any(folder.is_relative_to(done) for done in outermost):
+            outermost.append(folder)
+    return outermost
+
+
+def folder_collection(folder: Path) -> Optional[emuiibo.Collection]:
+    files = [(p.relative_to(folder).as_posix(), p.stat().st_size) for p in folder.rglob("*") if p.is_file()]
+    return emuiibo.find_collection(files, root_name=folder.name)
 
 
 def path_is_inside_any(path: Path, roots: list[Path]) -> bool:
@@ -522,6 +714,54 @@ def scan_library_once(
     ))
     if _stopped():
         return _cancelled()
+    # An unpacked emuiibo release is one item of its own, not "a mod" for a
+    # program id that is no game (see emuiibo.py).
+    release_roots = emuiibo_release_folders(mod_folders)
+    # Its sysmodule folder belongs to the release item -- and its exefs.nsp
+    # is no package to install either (see the file walk below).
+    release_programs = [m for m in mod_folders
+                        if m.name.upper() == emuiibo.PROGRAM_ID and m.parents[2] in release_roots]
+    mod_folders = [m for m in mod_folders if m not in release_programs]
+    for root in release_roots:
+        if _stopped():
+            return _cancelled()
+        abs_path = str(root)
+        seen_absolute_paths.add(abs_path)
+        if on_file is not None:
+            on_file(abs_path)
+        files = release_folder_files(root)
+        plan = emuiibo.plan_release(files)
+        existing = db.get_library_item(conn, abs_path)
+        content_hash, total_size, max_mtime = hash_file_list(root, files)
+        if (existing is not None and existing["status"] != db.LIBRARY_ITEM_RETIRED
+                and existing["content_hash"] == content_hash
+                and classified_revision(existing) >= CLASSIFICATION_REVISION):
+            db.touch_library_item_scanned(conn, existing["id"])
+            unchanged_count += 1
+            continue
+        version = None
+        if plan is not None and plan.overlay_source:
+            try:
+                version = emuiibo.overlay_version((root / plan.overlay_source).read_bytes())
+            except OSError:
+                version = None
+        db.upsert_library_item(
+            conn, absolute_path=abs_path, item_type="MOD_FOLDER", file_type=ContentType.EMUIIBO.value,
+            size=total_size, mtime=max_mtime, content_hash=content_hash,
+            content_type=ContentType.EMUIIBO.value, package_format=None,
+            title_id=None, title_id_source=None, title_id_confident=False,
+            status="AVAILABLE", suggested_action="COPY_MERGE", suggested_target="SD_CARD",
+            note="emuiibo (virtual amiibo sysmodule and overlay), copied to where its release lays it out",
+            error=None,
+            details_json=_details_json(extra=emuiibo_details(
+                plan, version or emuiibo.version_from_name(root.name))) if plan else None,
+        )
+        if existing is None:
+            new_count += 1
+            newly_indexed_paths.add(abs_path)
+        else:
+            updated_count += 1
+
     for folder in mod_folders:
         if _stopped():
             return _cancelled()
@@ -583,6 +823,10 @@ def scan_library_once(
     # Folders called "switch" are noted during the SAME walk rather than a
     # second one: on a network share this enumeration is most of a scan.
     switch_dirs: list[Path] = []
+    # Virtual amiibo (their amiibo.json) and possible raw amiibo dumps, from
+    # the same walk -- see find_amiibo_collections.
+    amiibo_jsons: list[Path] = []
+    bin_files: list[Path] = []
     walked = 0
     for root in library_dirs:
         if not root.is_dir():
@@ -593,23 +837,82 @@ def scan_library_once(
             walked += 1
             if walked % 25 == 0:
                 _progress("walking", walked, None)
-            if candidate.name.lower() == sd_files.SD_ROOT_DIR:
+            lowered_name = candidate.name.lower()
+            if lowered_name == sd_files.SD_ROOT_DIR:
                 if candidate.is_dir():
                     switch_dirs.append(candidate)
                 continue
+            if lowered_name == emuiibo.AMIIBO_JSON:
+                amiibo_jsons.append(candidate)
+                continue
+            if lowered_name.endswith(".bin"):
+                bin_files.append(candidate)
+                continue
             if (candidate.suffix.lower() in config.ALL_TRACKED_EXTENSIONS
                     and candidate.is_file()
-                    and not path_is_inside_any(candidate, mod_folders)):
+                    and not path_is_inside_any(candidate, mod_folders)
+                    and not path_is_inside_any(candidate, release_programs)):
                 candidate_files.append(candidate)
     candidate_files = list(dict.fromkeys(candidate_files))
 
     # switch/ folders already unpacked in the library (a homebrew port's
     # .nro often ships that way, next to an archive of its data): each is
     # one SD_FILES item, fingerprinted exactly like a mod folder.
-    sd_folders = sd_files.find_sd_folders(switch_dirs, exclude=mod_folders)
-    to_index = len(sd_folders) + len(candidate_files)
+    amiibo_folders = [
+        f for f in find_amiibo_collections(amiibo_jsons, bin_files, [r for r in library_dirs if r.is_dir()])
+        if not path_is_inside_any(f, mod_folders)
+    ]
+    # A release's own switch/ holds only its overlay, which the release item
+    # already copies; anything more in it is somebody's homebrew as usual.
+    release_switch_dirs = [
+        d for d in switch_dirs
+        if d.parent in release_roots and all(
+            p.relative_to(d).as_posix().lower() == ".overlays/emuiibo.ovl"
+            for p in d.rglob("*") if p.is_file())
+    ]
+    sd_folders = sd_files.find_sd_folders(
+        switch_dirs, exclude=[*mod_folders, *amiibo_folders, *release_switch_dirs],
+    )
+    candidate_files = [c for c in candidate_files if not path_is_inside_any(c, amiibo_folders)]
+    to_index = len(amiibo_folders) + len(sd_folders) + len(candidate_files)
     indexed = 0
     _progress("indexing", 0, to_index)
+    for folder in amiibo_folders:
+        if _stopped():
+            return _cancelled()
+        indexed += 1
+        _progress("indexing", indexed, to_index)
+        abs_path = str(folder)
+        seen_absolute_paths.add(abs_path)
+        if on_file is not None:
+            on_file(abs_path)
+        existing = db.get_library_item(conn, abs_path)
+        content_hash, total_size, max_mtime = hash_mod_folder(folder)
+        if (existing is not None and existing["status"] != db.LIBRARY_ITEM_RETIRED
+                and existing["content_hash"] == content_hash
+                and classified_revision(existing) >= CLASSIFICATION_REVISION):
+            db.touch_library_item_scanned(conn, existing["id"])
+            unchanged_count += 1
+            continue
+        collection = folder_collection(folder)
+        db.upsert_library_item(
+            conn, absolute_path=abs_path, item_type="MOD_FOLDER", file_type=ContentType.AMIIBO.value,
+            size=total_size, mtime=max_mtime, content_hash=content_hash,
+            content_type=ContentType.AMIIBO.value, package_format=None,
+            title_id=None, title_id_source=None, title_id_confident=False,
+            status="AVAILABLE" if collection else "NEEDS_REVIEW",
+            suggested_action="COPY_MERGE" if collection else None,
+            suggested_target="SD_CARD" if collection else None,
+            note="virtual amiibo for emuiibo, copied into emuiibo/amiibo/ on the SD card",
+            error=None,
+            details_json=_details_json(extra=amiibo_details(collection) if collection else None),
+        )
+        if existing is None:
+            new_count += 1
+            newly_indexed_paths.add(abs_path)
+        else:
+            updated_count += 1
+
     for folder in sd_folders:
         if _stopped():
             return _cancelled()
@@ -787,10 +1090,79 @@ def scan_library_once(
     )
 
 
+def index_library_file(conn, path: Path):
+    """Indexes ONE file of a Library folder right away -- exactly what the
+    next full scan would record for it (classify_file, AVAILABLE for
+    ANALYZED) -- and returns its row. For a file SwitchAgent itself just put
+    there (an emuiibo release downloaded from GitHub), which is meant to be
+    installable at once rather than after the next scan. The full scan then
+    finds it unchanged."""
+    st = path.stat()
+    fields = dict(classify_file(path))
+    if fields.get("status") == "ANALYZED":
+        fields["status"] = "AVAILABLE"
+    db.upsert_library_item(conn, absolute_path=str(path), size=st.st_size, mtime=st.st_mtime, **fields)
+    return db.get_library_item(conn, str(path))
+
+
+def amiibo_owners(rows) -> dict[int, tuple[Optional[str], Optional[str]]]:
+    """{row id: (family TITLE_ID or None, how it was decided)} for every
+    AMIIBO row: the game a virtual amiibo collection came with, so its card
+    can say so and installing the game installs them too.
+
+      1. a [TITLE_ID] in the collection's own name;
+      2. otherwise its release folder: the nearest folder above it holding
+         any game. One game there owns it. Several: the one whose own
+         package lies directly in that folder -- the release's game, where
+         the others sit in sub-folders (Animal Crossing's release keeps the
+         game, its update and a DLC at the top and the Island Transfer Tool
+         in "Official Transfer Tool/"). Still more than one: nobody --
+         never a guess.
+
+    Unlike a switch/ folder, a collection is useful without its game, so an
+    unowned one is not a problem, just shown on the Amiibo tab alone."""
+    families_below: dict[str, set[str]] = {}
+    families_direct: dict[str, set[str]] = {}
+    for row in rows:
+        if row["content_type"] != ContentType.GAME_PACKAGE.value or not row["title_id"]:
+            continue
+        try:
+            family = title_id.classify_title_variant(row["title_id"]).base_title_id
+        except (ValueError, TypeError):
+            continue
+        path = Path(row["absolute_path"])
+        families_direct.setdefault(str(path.parent), set()).add(family)
+        for parent in path.parents:
+            families_below.setdefault(str(parent), set()).add(family)
+
+    owners: dict[int, tuple[Optional[str], Optional[str]]] = {}
+    for row in rows:
+        if row["content_type"] != ContentType.AMIIBO.value:
+            continue
+        guess = title_id.from_filename(Path(row["absolute_path"]).name)
+        if guess.title_id is not None:
+            owners[row["id"]] = (title_id.classify_title_variant(guess.title_id).base_title_id, "filename")
+            continue
+        owner = None
+        for parent in Path(row["absolute_path"]).parents:
+            found = families_below.get(str(parent))
+            if not found:
+                continue
+            if len(found) == 1:
+                owner = next(iter(found))
+            else:
+                direct = families_direct.get(str(parent), set())
+                owner = next(iter(direct)) if len(direct) == 1 else None
+            break
+        owners[row["id"]] = (owner, "folder" if owner else None)
+    return owners
+
+
 def assign_sd_file_owners(conn) -> int:
-    """Records, on every SD_FILES row, the game it belongs to (see
-    sd_files.assign_owners for the rules) as that row's title_id. Rows whose
-    answer did not change are not written. Returns how many changed.
+    """Records, on every SD_FILES and AMIIBO row, the game it belongs to
+    (sd_files.assign_owners and amiibo_owners for the rules) as that row's
+    title_id. Rows whose answer did not change are not written. Returns how
+    many changed.
 
     Stored rather than worked out on every read because everything
     downstream already keys off library_items.title_id -- Library's grouping,
@@ -799,7 +1171,8 @@ def assign_sd_file_owners(conn) -> int:
     rows = [row for row in db.list_library_items(conn) if row["status"] != db.LIBRARY_ITEM_RETIRED]
     by_id = {row["id"]: row for row in rows}
     changed = 0
-    for row_id, (owner, source) in sd_files.assign_owners(rows).items():
+    owners = {**sd_files.assign_owners(rows), **amiibo_owners(rows)}
+    for row_id, (owner, source) in owners.items():
         row = by_id[row_id]
         if row["title_id"] == owner and row["title_id_source"] == source:
             continue

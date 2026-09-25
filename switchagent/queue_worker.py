@@ -35,6 +35,7 @@ reachable, skipping (not redirecting) any it passes over.
 
 from __future__ import annotations
 
+import hashlib
 import logging
 import sqlite3
 from dataclasses import dataclass
@@ -42,6 +43,7 @@ from pathlib import Path
 from typing import Callable, Optional
 
 from . import db
+from . import emuiibo
 from . import manifest as manifest_mod
 from . import sd_files
 from . import title_id as title_id_mod
@@ -102,7 +104,8 @@ def _never_abort() -> bool:
 def _target_storage_for(report: PreviewReport) -> str:
     if report.content_type is ContentType.GAME_PACKAGE:
         return STORAGE_SD_INSTALL
-    if report.content_type in (ContentType.ATMOSPHERE_MOD, ContentType.SD_FILES):
+    if report.content_type in (ContentType.ATMOSPHERE_MOD, ContentType.SD_FILES,
+                               ContentType.EMUIIBO, ContentType.AMIIBO):
         return STORAGE_SD_CARD
     raise manifest_mod.ManifestError(
         f"content type {report.content_type.value} is not eligible for transfer"
@@ -564,6 +567,10 @@ def _with_mod_suffix(name: str, job_row: sqlite3.Row, content_type: Optional[str
     # would be wrong: it is half of the game, not a change to one.
     if content_type == ContentType.SD_FILES.value:
         return f"{name} — SD files"
+    if content_type == ContentType.AMIIBO.value:
+        return f"{name} — Amiibo"
+    if content_type == ContentType.EMUIIBO.value:
+        return name  # "emuiibo-v1.1.3.zip" already says what it is
     if job_row["target_storage"] == STORAGE_SD_CARD:
         return f"{name} — Mod"
     return name
@@ -645,6 +652,132 @@ def _process_job(
 
 
 ABORTED_BEFORE_START_ERROR = "cancelled by user (Abort) before it started"
+
+
+@dataclass
+class AmiiboPlan:
+    """What an AMIIBO job decided, amiibo by amiibo, before sending anything
+    (see _plan_amiibo)."""
+    skip: set                 # destinations not to send
+    already: list             # amiibo already on the console, left exactly as they are
+    conflicts: list           # a different amiibo already has that place -- left untouched
+    replace: list             # a different amiibo has that place and the job may replace it
+    aborted: bool = False
+
+    def note(self, total: int) -> Optional[str]:
+        """One sentence for History when not every amiibo was simply added."""
+        if not (self.already or self.conflicts or self.replace):
+            return None
+        parts = [f"{total - len(self.already) - len(self.conflicts)} of {total} amiibo added"]
+        if self.already:
+            parts.append(f"{len(self.already)} already on the console, left as they are")
+        if self.replace:
+            parts.append(f"{len(self.replace)} replaced a different amiibo in the same folder")
+        if self.conflicts:
+            names = ", ".join(u.split("/", 2)[-1] for u in self.conflicts[:3])
+            more = f" and {len(self.conflicts) - 3} more" if len(self.conflicts) > 3 else ""
+            parts.append(f"{len(self.conflicts)} not copied because a different amiibo already uses "
+                         f"that folder ({names}{more})")
+        return "; ".join(parts)
+
+
+def _read_amiibo_json(path) -> Optional["emuiibo.AmiiboInfo"]:
+    try:
+        return emuiibo.parse_amiibo_json(path.read_bytes())
+    except OSError:
+        return None
+
+
+def _plan_amiibo(
+    conn: sqlite3.Connection, backend: MtpBackend, job_row: sqlite3.Row, manifest, *,
+    delivered: set, replaceable: set, should_abort: ShouldAbort,
+) -> AmiiboPlan:
+    """An AMIIBO job decides per AMIIBO, never per file. A virtual amiibo is
+    its folder, and emuiibo rewrites that folder as soon as the amiibo is
+    used (areas.json, a mii, a UUID, save data under areas/), so the same
+    amiibo installed yesterday no longer matches its source byte for byte --
+    the file-level "already there, not ours, stop the job" rule would fail
+    a 766-amiibo collection on its first amiibo. Instead, for every amiibo
+    not already delivered by this job (or the attempt it retries):
+
+      - its folder is free: sent as usual;
+      - it holds the SAME amiibo (figure and UUID, read back off the
+        console): already there, left exactly as it is -- its save data too;
+      - it holds a DIFFERENT amiibo: not touched under Settings' default
+        "skip" policy; under "override" (or an Override job) that folder is
+        removed and the new amiibo written in its place.
+
+    One listing per destination folder, one small read per amiibo that is
+    already there -- nothing is read for a folder that does not exist."""
+    storage = job_row["target_storage"]
+    force = bool(job_row["force_overwrite"])
+    job_id = job_row["id"]
+    by_dest = {f.dest_relative_path: f for f in manifest.files}
+    plan = AmiiboPlan(skip=set(), already=[], conflicts=[], replace=[])
+    listings: dict = {}
+
+    def names_in(folder: str):
+        if folder not in listings:
+            entries = backend.list_directory(storage, folder)
+            listings[folder] = None if entries is None else {e.name.lower() for e in entries}
+        return listings[folder]
+
+    for index, (unit, dests) in enumerate(emuiibo.manifest_units(by_dest).items()):
+        if should_abort():
+            plan.aborted = True
+            return plan
+        if index % 25 == 0:
+            db.update_job_status(conn, job_id, "RUNNING", last_progress_at=db.now_iso())
+        if any(d in delivered or d in replaceable for d in dests):
+            continue  # this job's own amiibo, part way through: carried on as usual
+        parent, _, name = unit.rpartition("/")
+        present = names_in(parent)
+        if present is None or name.lower() not in present:
+            continue
+        if unit in by_dest:
+            # A raw dump: the same bytes already there is the ordinary
+            # already-present case the file loop handles on its own.
+            data = backend.read_file(storage, unit, max_bytes=by_dest[unit].size)
+            if data is not None and hashlib.sha256(data).hexdigest() == by_dest[unit].sha256:
+                continue
+        else:
+            # Its own amiibo.json -- not the v2/amiibo.json a converted amiibo
+            # keeps inside itself.
+            own_json = f"{unit}/{emuiibo.AMIIBO_JSON}".lower()
+            json_dest = next((d for d in dests if d.lower() == own_json), None)
+            local = remote = None
+            if json_dest is not None:
+                local = _read_amiibo_json(manifest_mod.resolve_source_path(
+                    by_dest[json_dest], job_id, batch_id=manifest.batch_id))
+                data = backend.read_file(storage, f"{unit}/{emuiibo.AMIIBO_JSON}",
+                                         max_bytes=emuiibo.AMIIBO_JSON_MAX_BYTES)
+                remote = emuiibo.parse_amiibo_json(data) if data else None
+            if local is not None and remote is not None and local.same_amiibo(remote):
+                plan.already.append(unit)
+                plan.skip.update(dests)
+                continue
+        if force:
+            plan.replace.append(unit)
+        else:
+            plan.conflicts.append(unit)
+            plan.skip.update(dests)
+    return plan
+
+
+def _replace_amiibo_folders(backend: MtpBackend, storage: str, units: list, conn, job_id: int) -> None:
+    """Removes what a replaced amiibo's folder held -- files first, then the
+    folders, one object at a time -- so nothing of the old amiibo (its save
+    data least of all) ends up mixed into the new one."""
+    for unit in units:
+        if not emuiibo.is_inside_amiibo_dir(unit):
+            continue
+        entries = backend.list_directory(storage, unit)
+        if entries is None:
+            backend.delete(storage, unit)  # a file (raw dump) -- overwritten anyway
+            continue
+        for path in emuiibo.removal_order(backend, storage, unit):
+            backend.delete(storage, path)
+        db.log_job_event(conn, job_id, f"removed '{unit}' to replace it with a different amiibo")
 
 
 def _aborted_between_files_error(done_count: int, total_count: int) -> str:
@@ -776,8 +909,40 @@ def _run_job_transfer(
     # write 4,625 of them.
     already_present = 0
 
+    # AMIIBO: decided amiibo by amiibo first (see _plan_amiibo); EMUIIBO:
+    # emuiibo's own program files are replaced whatever is there -- they
+    # belong to emuiibo, not to anybody's data, and installing a release
+    # over another one is exactly what updating emuiibo means.
+    amiibo_plan: Optional[AmiiboPlan] = None
+    always_overwrite = manifest.content_type == ContentType.EMUIIBO.value
+    if manifest.content_type == ContentType.AMIIBO.value:
+        try:
+            amiibo_plan = _plan_amiibo(conn, backend, job_row, manifest, delivered=delivered,
+                                       replaceable=replaceable, should_abort=should_abort)
+            if not amiibo_plan.aborted:
+                _replace_amiibo_folders(backend, storage, amiibo_plan.replace, conn, job_id)
+        except MtpError as exc:
+            error = f"could not check what is already on the console: {exc}"
+            db.update_job_status(conn, job_id, "FAILED", bytes_done=bytes_done, error=error, finished_at=db.now_iso())
+            db.log_job_event(conn, job_id, f"failed: {error}")
+            return JobRunOutcome(job_id=job_id, status="FAILED", error=error)
+        if amiibo_plan.aborted:
+            error = _aborted_between_files_error(len(delivered), len(manifest.files))
+            db.update_job_status(conn, job_id, "INTERRUPTED", bytes_done=bytes_done, error=error)
+            db.log_job_event(conn, job_id, f"aborted by user while checking the console -> INTERRUPTED ({error})")
+            return JobRunOutcome(job_id=job_id, status="INTERRUPTED", error=error)
+        if amiibo_plan.already or amiibo_plan.conflicts or amiibo_plan.replace:
+            db.log_job_event(
+                conn, job_id,
+                f"amiibo on the console: {len(amiibo_plan.already)} already there, "
+                f"{len(amiibo_plan.conflicts)} held by a different amiibo (skipped), "
+                f"{len(amiibo_plan.replace)} replaced",
+            )
+    skipped = amiibo_plan.skip if amiibo_plan else set()
+    replace_units = tuple(u + "/" for u in amiibo_plan.replace) if amiibo_plan else ()
+
     for file in manifest.files:
-        if file.dest_relative_path in delivered:
+        if file.dest_relative_path in delivered or file.dest_relative_path in skipped:
             continue
 
         if should_abort():
@@ -837,7 +1002,9 @@ def _run_job_transfer(
             # MTP round-trips this loop doesn't need.
             result = backend.send_file(
                 storage, file.dest_relative_path, source_path,
-                overwrite=bool(job_row["force_overwrite"]) or file.dest_relative_path in replaceable,
+                overwrite=(bool(job_row["force_overwrite"]) or always_overwrite
+                           or file.dest_relative_path in replaceable
+                           or file.dest_relative_path.startswith(replace_units)),
                 progress=report_progress,
                 # Only a real filesystem can be read back meaningfully -- DBI's
                 # install node is not one (see mtp/windows.py).
@@ -938,9 +1105,13 @@ def _run_job_transfer(
             conn, job_id,
             f"{already_present} file(s) were already on the device with exactly these contents -- not sent again",
         )
-    db.update_job_status(conn, job_id, "DONE", bytes_done=bytes_done, finished_at=db.now_iso())
-    db.log_job_event(conn, job_id, f"done, {len(manifest.files)} file(s)")
-    return JobRunOutcome(job_id=job_id, status="DONE")
+    note = None
+    if amiibo_plan is not None:
+        note = amiibo_plan.note(len(emuiibo.manifest_units(f.dest_relative_path for f in manifest.files)))
+    db.update_job_status(conn, job_id, "DONE", bytes_done=bytes_done, finished_at=db.now_iso(), error=note)
+    db.log_job_event(conn, job_id, f"done, {len(manifest.files) - len(skipped)} file(s)"
+                     + (f" -- {note}" if note else ""))
+    return JobRunOutcome(job_id=job_id, status="DONE", error=note)
 
 
 def run_worker_loop(

@@ -270,7 +270,8 @@
 
   // role -> tag label shown on child/flat rows in the confirm list. "base"
   // and null are intentionally absent -- those rows never get a tag.
-  const CONFIRM_ROLE_LABELS = { update: "Update", dlc: "DLC", mod: "Mod", sd: "SD files", duplicate: "Other copy" };
+  const CONFIRM_ROLE_LABELS = { update: "Update", dlc: "DLC", mod: "Mod", sd: "SD files", amiibo: "Amiibo",
+                                duplicate: "Other copy" };
 
   // Cover-art loader for the confirm-list thumbnails. covers.js's own loader
   // can't be reused here -- it hard-depends on #cover-status-text existing on
@@ -489,6 +490,83 @@
       : destinations.size + " different (see list below)";
     confirmInstallBtn.disabled = selected.size === 0;
     if (selected.size === 0) confirmModal.close();
+    // Dropping the last amiibo from the list drops the emuiibo offer too.
+    if (!selectionHasAmiibo()) emuiiboBox.hidden = true;
+  }
+
+  // -- emuiibo, offered with a game's amiibo --------------------------------
+  //
+  // Amiibo do nothing on a Switch without emuiibo. When the selection holds
+  // some and the target Switch does not have it (as of its last read --
+  // GET /api/amiibo/emuiibo/offer), the confirmation offers its download
+  // from GitHub and install in the same click: POST /api/amiibo/emuiibo/download
+  // queues it, and the selection is queued once that has succeeded.
+  const emuiiboBox = document.getElementById("confirm-emuiibo");
+  const emuiiboCheck = document.getElementById("confirm-emuiibo-check");
+  const emuiiboWhy = document.getElementById("confirm-emuiibo-why");
+  const emuiiboTesla = document.getElementById("confirm-emuiibo-tesla");
+  let offerRequest = 0;
+
+  function selectionHasAmiibo() {
+    return Array.from(selected.values()).some((v) => v.role === "amiibo");
+  }
+
+  async function refreshEmuiiboOffer(device) {
+    const request = ++offerRequest;
+    emuiiboBox.hidden = true;
+    if (!device || !selectionHasAmiibo()) return;
+    let offer;
+    try {
+      const res = await fetch("/api/amiibo/emuiibo/offer?device=" + encodeURIComponent(device));
+      if (!res.ok) return;
+      offer = await res.json();
+    } catch (_) {
+      return;
+    }
+    if (request !== offerRequest || !offer.offer || !selectionHasAmiibo()) return;
+    const known = offer.state !== "unknown";
+    emuiiboWhy.textContent = offer.state === "partial"
+      ? "emuiibo is incomplete on this Switch, and these amiibo need it."
+      : known ? "these amiibo need it, and this Switch does not have it."
+      : "these amiibo need it. SwitchAgent has not checked this Switch for it yet.";
+    // Checked when the Switch is known to lack it; left to the user when
+    // nobody knows yet.
+    emuiiboCheck.checked = known;
+    emuiiboTesla.hidden = !offer.tesla_missing.length;
+    emuiiboTesla.textContent = offer.tesla_missing.length
+      ? "Its menu also needs " + offer.tesla_missing.join(" and ") +
+        ", which SwitchAgent does not install — see Add-ons."
+      : "";
+    emuiiboBox.hidden = false;
+  }
+
+  function describeDownload(d) {
+    const version = d.version ? "emuiibo " + d.version : "emuiibo";
+    const kb = (n) => Math.round((n || 0) / 1024) + " KB";
+    switch (d.state) {
+      case "checking": return "Asking GitHub for the current emuiibo…";
+      case "downloading": return "Downloading " + version + " from GitHub… " + kb(d.received) + (d.total ? " of " + kb(d.total) : "");
+      case "adding": return version + " downloaded and checked — adding it to your Library…";
+      default: return "";
+    }
+  }
+
+  // Resolves with the download's final state ("done" / "failed").
+  async function installEmuiibo(device) {
+    const res = await fetch("/api/amiibo/emuiibo/download", {
+      method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ device }),
+    });
+    let d = await res.json();
+    if (!res.ok) return { state: "failed", error: d.detail || ("HTTP " + res.status) };
+    while (d.state !== "done" && d.state !== "failed") {
+      confirmResult.textContent = describeDownload(d);
+      await new Promise((resolve) => setTimeout(resolve, 700));
+      try {
+        const poll = await fetch("/api/amiibo/activity?device=" + encodeURIComponent(device));
+        if (poll.ok) d = (await poll.json()).download || d;
+      } catch (_) { /* keep waiting */ }
+    }
+    return d;
   }
 
   // Lets the user drop an individual Update/DLC/Mod (or anything else)
@@ -535,6 +613,7 @@
     renderConfirmList();
     confirmResult.hidden = true;
     confirmResult.textContent = "";
+    refreshEmuiiboOffer(targetSelect.value);
     confirmModal.showModal();
   });
 
@@ -554,6 +633,22 @@
     const originalBtnText = confirmInstallBtn.textContent;
     confirmInstallBtn.disabled = true;
     confirmInstallBtn.textContent = "Preparing…";
+    if (!emuiiboBox.hidden && emuiiboCheck.checked && selectionHasAmiibo()) {
+      confirmResult.hidden = false;
+      emuiiboCheck.disabled = true;
+      const d = await installEmuiibo(targetSelect.value);
+      emuiiboCheck.disabled = false;
+      if (d.state !== "done") {
+        // Nothing is queued: installing the amiibo without emuiibo is the
+        // user's call (untick it), never a silent fallback.
+        confirmResult.textContent = "emuiibo could not be installed: " + (d.error || "unknown error") +
+          ". Nothing was queued — try again, or untick “Also install emuiibo” to install without it.";
+        confirmInstallBtn.disabled = false;
+        confirmInstallBtn.textContent = originalBtnText;
+        return;
+      }
+      emuiiboBox.hidden = true;
+    }
     // Queue owns preparation progress; this request only accepts the batch.
     confirmResult.hidden = false;
     confirmResult.textContent =

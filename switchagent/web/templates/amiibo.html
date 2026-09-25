@@ -1,0 +1,56 @@
+{% extends "base.html" %}
+{% block title %}Amiibo — SwitchAgent{% endblock %}
+{% block styles %}<link rel="stylesheet" href="{{ static_url('amiibo.css') }}">{% endblock %}
+
+{#-
+  Virtual amiibo with emuiibo (see switchagent/emuiibo.py). Three questions,
+  in the order a person asks them:
+
+    1. Can this Switch use virtual amiibo at all -- which of emuiibo's parts
+       are on it, which are missing, and where each missing one comes from;
+    2. Which amiibo are on it -- as the console itself reported them, with
+       what emuiibo wrote into them (save data, favorites, hidden ones);
+    3. Which amiibo of the Library are not on it yet.
+
+  Rendered entirely by amiibo.js from GET /api/amiibo, so the first paint and
+  every refresh after a read or a removal come from one source. The raw,
+  serial-bearing device id never appears here: the page is addressed by the
+  console's fingerprint, like Device Details.
+-#}
+
+{% block content %}
+<div class="page-header">
+  <div>
+    <h2 class="amiibo-title">Amiibo</h2>
+    <p class="page-sub">Virtual amiibo with emuiibo — what each Switch has, and what your Library can add to it.</p>
+  </div>
+  <div class="amiibo-device-bar">
+    <label class="settings-hint" for="amiibo-device">Switch</label>
+    <select id="amiibo-device" class="filter-select" aria-label="Switch"></select>
+    <button type="button" class="btn btn-secondary btn-small" id="amiibo-refresh"
+            title="Read emuiibo and every amiibo off this Switch again">Read again</button>
+  </div>
+</div>
+
+<div id="amiibo-root" data-device="{{ device }}">
+  <p class="empty-state" id="amiibo-loading">Loading…</p>
+</div>
+
+<dialog id="amiibo-remove-dialog" class="modal amiibo-modal">
+  <h3 id="amiibo-remove-title">Remove amiibo</h3>
+  <p class="settings-hint" id="amiibo-remove-text"></p>
+  <ul class="amiibo-remove-list" id="amiibo-remove-list"></ul>
+  <label class="amiibo-save-confirm" id="amiibo-remove-save" hidden>
+    <input type="checkbox" id="amiibo-remove-save-box">
+    <span id="amiibo-remove-save-text"></span>
+  </label>
+  <p class="amiibo-dialog-error" id="amiibo-remove-error" hidden></p>
+  <div class="modal-actions">
+    <button type="button" class="btn btn-secondary" id="amiibo-remove-cancel">Cancel</button>
+    <button type="button" class="btn btn-danger" id="amiibo-remove-confirm">Remove from the Switch</button>
+  </div>
+</dialog>
+{% endblock %}
+{% block scripts %}
+<script src="{{ static_url('amiibo.js') }}"></script>
+{% endblock %}

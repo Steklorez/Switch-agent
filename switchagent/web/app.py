@@ -14,15 +14,18 @@ from pathlib import Path
 from typing import Optional
 
 from fastapi import Depends, FastAPI, HTTPException, Request
-from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, PlainTextResponse
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, PlainTextResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
 from .. import __version__, db
 from .. import title_id as title_id_mod
-from . import detail_views, error_reporting, onboarding, services
+from . import addons_views, amiibo_views, detail_views, error_reporting, onboarding, services
 from .context import WebContext
 from .schemas import (
+    AmiiboDeviceRequest,
+    AmiiboRemoveRequest,
+    EmuiiboDownloadRequest,
     ConflictPolicyRequest,
     CreateJobsRequest,
     DeviceStorageMappingClearRequest,
@@ -40,7 +43,27 @@ _WEB_DIR = Path(__file__).resolve().parent
 # "Copy logs" (Settings): the last ~500 KB of the application log -- a
 # few days of normal use, still a comfortable clipboard paste.
 LOG_COPY_MAX_BYTES = 500_000
-_TEMPLATES = Jinja2Templates(directory=str(_WEB_DIR / "templates"))
+
+
+def _nav_context(request: Request) -> dict:
+    """What every page's navigation needs: whether there is an Amiibo tab
+    (amiibo_views.amiibo_tab_visible). Never allowed to break a page -- an
+    error page included -- so a failed read just leaves the tab out."""
+    ctx = getattr(request.app.state, "ctx", None)
+    if ctx is None:
+        return {"amiibo_tab": False}
+    try:
+        conn = db.get_connection(ctx.db_path)
+        try:
+            return {"amiibo_tab": amiibo_views.amiibo_tab_visible(conn)}
+        finally:
+            conn.close()
+    except Exception:  # noqa: BLE001
+        log.debug("could not tell whether emuiibo is installed anywhere", exc_info=True)
+        return {"amiibo_tab": False}
+
+
+_TEMPLATES = Jinja2Templates(directory=str(_WEB_DIR / "templates"), context_processors=[_nav_context])
 
 
 def _format_size(num_bytes) -> str:
@@ -99,6 +122,7 @@ _TEMPLATES.env.filters["mtime"] = _format_mtime
 _TEMPLATES.env.globals["app_version"] = __version__
 _TEMPLATES.env.globals["static_url"] = _static_url
 _TEMPLATES.env.filters["game_name"] = title_id_mod.strip_release_tags
+_TEMPLATES.env.filters["rich"] = addons_views.rich
 
 
 # ---------------------------------------------------------------------------
@@ -380,6 +404,77 @@ def create_app(ctx: WebContext) -> FastAPI:
             "cleanup": services.get_work_cleanup_preview(conn),
         })
 
+    # -- Amiibo (emuiibo) ----------------------------------------------------
+
+    @app.get("/amiibo", response_class=HTMLResponse)
+    def page_amiibo(request: Request, device: Optional[str] = None, conn=Depends(get_conn)):
+        # No tab before emuiibo is on a console (amiibo_tab_visible): an old
+        # link lands where it gets installed.
+        if not amiibo_views.amiibo_tab_visible(conn):
+            return RedirectResponse("/addons#addon-emuiibo", status_code=303)
+        # Everything on the page is rendered by amiibo.js from
+        # GET /api/amiibo -- one source for the first paint and every
+        # refresh after a read or a removal.
+        return _TEMPLATES.TemplateResponse(request, "amiibo.html", {
+            "active_page": "amiibo", "device": device or "",
+        })
+
+    @app.get("/addons", response_class=HTMLResponse)
+    def page_addons(request: Request, device: Optional[str] = None, conn=Depends(get_conn),
+                    ctx: WebContext = Depends(get_ctx)):
+        return _TEMPLATES.TemplateResponse(request, "addons.html", {
+            "active_page": "addons", "view": addons_views.page(conn, ctx, device),
+        })
+
+    @app.get("/api/amiibo")
+    def api_amiibo(device: Optional[str] = None, conn=Depends(get_conn), ctx: WebContext = Depends(get_ctx)):
+        return amiibo_views.page(conn, ctx, device)
+
+    @app.get("/api/amiibo/activity")
+    def api_amiibo_activity(device: str, conn=Depends(get_conn), ctx: WebContext = Depends(get_ctx)):
+        """The cheap poll: what the worker is doing with this console's
+        emuiibo right now, and when it was last read -- the page reloads its
+        whole view only when that changes."""
+        device_id = _resolve_fingerprint_or_404(conn, device)
+        stored = db.get_device_emuiibo(conn, device_id)
+        return {**ctx.emuiibo.snapshot(device_id), "read_at": stored[2] if stored else None,
+                "download": ctx.emuiibo_downloads.snapshot()}
+
+    @app.get("/api/amiibo/emuiibo/offer")
+    def api_emuiibo_offer(device: str, conn=Depends(get_conn), ctx: WebContext = Depends(get_ctx)):
+        """Installing amiibo onto this console: should emuiibo come too?"""
+        return amiibo_views.emuiibo_offer(conn, ctx, _resolve_fingerprint_or_404(conn, device))
+
+    @app.post("/api/amiibo/emuiibo/download", status_code=202)
+    def api_emuiibo_download(body: EmuiiboDownloadRequest, conn=Depends(get_conn),
+                             ctx: WebContext = Depends(get_ctx)):
+        """Download emuiibo's current release from GitHub into the Library
+        and, given a console, queue it for install there."""
+        from .emuiibo_service import DownloadRefused
+
+        device_id = _resolve_fingerprint_or_404(conn, body.device) if body.device else None
+        try:
+            return ctx.emuiibo_downloads.start(device_id)
+        except DownloadRefused as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+    @app.post("/api/amiibo/refresh")
+    def api_amiibo_refresh(body: AmiiboDeviceRequest, conn=Depends(get_conn), ctx: WebContext = Depends(get_ctx)):
+        device_id = _resolve_fingerprint_or_404(conn, body.device)
+        ctx.emuiibo.request_read(device_id)
+        return {"ok": True}
+
+    @app.post("/api/amiibo/remove")
+    def api_amiibo_remove(body: AmiiboRemoveRequest, conn=Depends(get_conn), ctx: WebContext = Depends(get_ctx)):
+        from .emuiibo_service import RemovalRefused
+
+        device_id = _resolve_fingerprint_or_404(conn, body.device)
+        try:
+            return ctx.emuiibo.request_removal(conn, device_id, body.paths,
+                                               confirm_save_data=body.confirm_save_data)
+        except RemovalRefused as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+
     # -- JSON API: devices ------------------------------------------------
 
     @app.get("/api/devices")
@@ -507,7 +602,8 @@ def create_app(ctx: WebContext) -> FastAPI:
     def api_prepare_jobs(body: CreateJobsRequest, ctx: WebContext = Depends(get_ctx), conn=Depends(get_conn)):
         target = services.resolve_target_device_id(conn, body.target_device_id)
         try:
-            return {"preparation_id": ctx.preparations.submit(body.library_item_ids, target)}
+            return {"preparation_id": ctx.preparations.submit(
+                body.library_item_ids, target, amiibo_selection=body.amiibo_selection)}
         except ValueError as exc:
             raise HTTPException(status_code=409, detail=str(exc)) from exc
 
@@ -517,7 +613,8 @@ def create_app(ctx: WebContext) -> FastAPI:
 
     @app.post("/api/jobs")
     def api_create_jobs(body: CreateJobsRequest, conn=Depends(get_conn)):
-        result = services.create_and_confirm_jobs(conn, body.library_item_ids, body.target_device_id)
+        result = services.create_and_confirm_jobs(
+            conn, body.library_item_ids, body.target_device_id, amiibo_selection=body.amiibo_selection)
         if result["created"] and not result["errors"]:
             status_code = 201
         elif result["created"]:

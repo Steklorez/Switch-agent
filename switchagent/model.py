@@ -18,6 +18,11 @@ class ContentType(str, Enum):
     # A `switch/` folder copied verbatim onto the SD card -- a homebrew
     # port's .nro and its data (see switchagent/sd_files.py).
     SD_FILES = "SD_FILES"
+    # emuiibo itself -- its sysmodule, overlay and the overlay's own files,
+    # copied to where emuiibo's release lays them out (switchagent/emuiibo.py).
+    EMUIIBO = "EMUIIBO"
+    # Virtual amiibo for emuiibo: folders copied into emuiibo/amiibo/.
+    AMIIBO = "AMIIBO"
     MIXED = "MIXED"
     UNKNOWN = "UNKNOWN"
 

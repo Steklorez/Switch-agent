@@ -20,7 +20,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Optional
 
-from .base import DeviceInfo, MtpBackend, StorageInfo, TransferResult, TransferStatus
+from .base import DeviceInfo, DirEntry, MtpBackend, StorageInfo, TransferResult, TransferStatus
 from .errors import (
     DestinationNotFoundError,
     DeviceDisconnectedError,
@@ -424,6 +424,55 @@ class MockMtpBackend(MtpBackend):
         )
         self._transfers[operation_id] = result
         return result
+
+    def list_directory(self, storage: str, path: str) -> Optional[list[DirEntry]]:
+        self._require_connected()
+        s = self._get_storage_obj(storage)
+        norm = s.normalize(path)
+        if not s.is_dir(norm):
+            return None
+        prefix = f"{norm}/" if norm else ""
+        out = []
+        for node_path, node in s.nodes.items():
+            if node_path.startswith(prefix) and "/" not in node_path[len(prefix):] and node_path != norm:
+                out.append(DirEntry(name=node_path[len(prefix):], is_dir=node.is_dir,
+                                    size=None if node.is_dir else len(node.data or b"")))
+        self._log_op("LIST", {"storage": storage, "path": path, "count": len(out)})
+        return sorted(out, key=lambda e: e.name)
+
+    def read_file(self, storage: str, path: str, *, max_bytes: int) -> Optional[bytes]:
+        self._require_connected()
+        s = self._get_storage_obj(storage)
+        node = s.nodes.get(s.normalize(path))
+        self._log_op("READ", {"storage": storage, "path": path})
+        if node is None or node.is_dir or len(node.data or b"") > max_bytes:
+            return None
+        return node.data or b""
+
+    def delete(self, storage: str, path: str) -> None:
+        self._require_connected()
+        s = self._get_storage_obj(storage)
+        norm = s.normalize(path)
+        if not norm:
+            raise InvalidOperationError("refusing to delete a storage root")
+        node = s.nodes.get(norm)
+        if node is None:
+            return
+        # Only a fault armed for this exact path: one armed for "the next
+        # send_file" (match_path None) is not a delete's to consume.
+        fault = next((f for f in self._armed_faults
+                      if f.match_path == norm and f.match_storage in (None, storage)), None)
+        if fault is not None:
+            self._armed_faults.remove(fault)
+        if fault is not None and fault.mode == "disconnect":
+            self._connected = False
+            raise DeviceDisconnectedError("device disconnected while deleting")
+        if fault is not None:
+            raise TransferFailedError(f"simulated failure deleting '{norm}'")
+        if node.is_dir and any(p.startswith(norm + "/") for p in s.nodes):
+            raise InvalidOperationError(f"'{norm}' is not empty")
+        del s.nodes[norm]
+        self._log_op("DELETE", {"storage": storage, "path": norm})
 
     def get_transfer_status(self, operation_id: str) -> TransferResult:
         result = self._transfers.get(operation_id)

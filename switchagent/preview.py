@@ -13,7 +13,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional
 
-from . import config, extractor, scanner, sd_files, title_id
+from . import config, emuiibo, extractor, scanner, sd_files, title_id
 from .model import ConflictEntry, ConflictState, ContentType
 
 
@@ -68,6 +68,21 @@ class PreviewReport:
     # that only reads the singular fields to gain by also consulting this).
     package_entries: list[PackageEntryPreview] = field(default_factory=list)
 
+    # EMUIIBO / AMIIBO: what to copy, as (path relative to copy_root, SD-card
+    # destination) pairs -- decided by emuiibo.py from the release's or the
+    # collection's own structure, never by copying a tree wholesale.
+    copy_root: Optional[Path] = None
+    copy_plan: list[tuple[str, str]] = field(default_factory=list)
+    emuiibo_version: Optional[str] = None
+    # AMIIBO: the whole collection, so a selection can narrow copy_plan to
+    # some of its amiibo (see web/services.create_and_confirm_jobs).
+    amiibo_collection: Optional[emuiibo.Collection] = None
+
+
+def amiibo_copy_plan(collection: emuiibo.Collection, selected=None) -> list[tuple[str, str]]:
+    return [(src, dest) for a in (selected if selected is not None else collection.amiibo)
+            for src, dest, _size in a.destinations()]
+
 
 def _atmosphere_destination_dir(title_id_value: str) -> Path:
     return config.MOCK_SD_CARD_DIR / "atmosphere" / "contents" / title_id_value
@@ -109,7 +124,7 @@ def _preview_archive(path: Path, *, extract: bool) -> PreviewReport:
             note=f"could not open {archive_format}: {exc}",
         )
 
-    cls = extractor.classify_entries(entries)
+    cls = extractor.classify_entries(entries, archive_name=path.name)
     size = sum(e.size for e in entries if not e.is_dir)
     file_count = sum(1 for e in entries if not e.is_dir)
 
@@ -188,6 +203,45 @@ def _preview_archive(path: Path, *, extract: bool) -> PreviewReport:
         report.sd_summary = cls.sd_summary
         return report
 
+    if cls.content_type is ContentType.EMUIIBO:
+        plan = cls.emuiibo_release
+        report = PreviewReport(
+            content_type=ContentType.EMUIIBO, source=str(path),
+            size=sum(size for _s, _d, size in plan.files), file_count=len(plan.files),
+            destination="SD Card (emuiibo)", mode="MERGE",
+            emuiibo_version=emuiibo.version_from_name(path.name),
+        )
+        if extract:
+            job_id = extractor.new_job_id()
+            result = extractor.safe_extract(path, job_id)
+            report.job_id = job_id
+            report.work_dir = result.dest_root
+            report.copy_root = result.dest_root
+            report.copy_plan = [(src, dest) for src, dest, _size in plan.files]
+            if plan.overlay_source:
+                overlay = result.dest_root / plan.overlay_source
+                if overlay.is_file():
+                    report.emuiibo_version = emuiibo.overlay_version(overlay.read_bytes()) or report.emuiibo_version
+        return report
+
+    if cls.content_type is ContentType.AMIIBO:
+        summary = cls.amiibo.summary()
+        report = PreviewReport(
+            content_type=ContentType.AMIIBO, source=str(path),
+            size=summary["size"], file_count=summary["files"],
+            destination="SD Card (emuiibo/amiibo)", mode="MERGE",
+            amiibo_collection=cls.amiibo, sd_summary=cls.sd_summary,
+        )
+        if extract:
+            job_id = extractor.new_job_id()
+            result = extractor.safe_extract(path, job_id)
+            report.job_id = job_id
+            report.work_dir = result.dest_root
+            report.copy_root = result.dest_root
+            report.copy_plan = amiibo_copy_plan(cls.amiibo)
+            _attach_sd_part(report, cls, result.dest_root)
+        return report
+
     if cls.content_type is ContentType.SD_FILES:
         guess = title_id.from_filename(path.name)
         report = PreviewReport(
@@ -254,7 +308,21 @@ def _preview_directory(path: Path) -> PreviewReport:
             mod_source_dir=path,
         )
 
+    release = _preview_release_folder(path)
+    if release is not None:
+        return release
+
     mod_folders = scanner.find_mod_folders(path)
+    if not mod_folders:
+        collection = scanner.folder_collection(path)
+        if collection is not None:
+            summary = collection.summary()
+            return PreviewReport(
+                content_type=ContentType.AMIIBO, source=str(path),
+                size=summary["size"], file_count=summary["files"],
+                destination="SD Card (emuiibo/amiibo)", mode="MERGE",
+                amiibo_collection=collection, copy_root=path, copy_plan=amiibo_copy_plan(collection),
+            )
     if len(mod_folders) == 1:
         return _preview_directory(mod_folders[0])
     if len(mod_folders) > 1:
@@ -277,6 +345,28 @@ def _preview_directory(path: Path) -> PreviewReport:
     return PreviewReport(
         content_type=ContentType.UNKNOWN, source=str(path),
         note="folder contains neither a package, an atmosphere/contents/<TITLE_ID> structure nor a switch/ folder",
+    )
+
+
+def _preview_release_folder(path: Path) -> Optional[PreviewReport]:
+    """An unpacked emuiibo release (the folder atmosphere/ sits in)."""
+    program = scanner._child_ci(path, "atmosphere")
+    program = scanner._child_ci(program, "contents") if program else None
+    program = scanner._child_ci(program, emuiibo.PROGRAM_ID) if program else None
+    if program is None or not (program / "exefs.nsp").is_file():
+        return None
+    plan = emuiibo.plan_release(scanner.release_folder_files(path))
+    if plan is None or not plan.files:
+        return None
+    version = None
+    if plan.overlay_source:
+        version = emuiibo.overlay_version((path / plan.overlay_source).read_bytes())
+    return PreviewReport(
+        content_type=ContentType.EMUIIBO, source=str(path),
+        size=sum(size for _s, _d, size in plan.files), file_count=len(plan.files),
+        destination="SD Card (emuiibo)", mode="MERGE",
+        copy_root=path, copy_plan=[(src, dest) for src, dest, _size in plan.files],
+        emuiibo_version=version or emuiibo.version_from_name(path.name),
     )
 
 
@@ -351,9 +441,19 @@ def format_report(report: PreviewReport) -> str:
     if report.job_id:
         lines.append(f"JOB_ID: {report.job_id}")
         lines.append(f"WORK_DIR: {report.work_dir}")
+    if report.content_type is ContentType.EMUIIBO:
+        version = report.emuiibo_version or "unknown"
+        outdated = " (outdated -- latest known is " + emuiibo.LATEST_KNOWN_VERSION + ")"             if emuiibo.is_outdated(report.emuiibo_version) else ""
+        lines.append(f"EMUIIBO VERSION: {version}{outdated}")
+    if report.amiibo_collection is not None:
+        summary = report.amiibo_collection.summary()
+        lines.append(f"AMIIBO: {summary['count']} in {len(summary['groups'])} folder(s)"
+                     + (f", {summary['disabled']} without amiibo.flag (emuiibo ignores those)"
+                        if summary["disabled"] else ""))
     if report.note:
         lines.append(f"NOTE: {report.note}")
-    if report.title_id is None and report.content_type is not ContentType.UNKNOWN:
+    if (report.title_id is None and report.content_type not in (
+            ContentType.UNKNOWN, ContentType.EMUIIBO, ContentType.AMIIBO)):
         lines.append("ACTION: NEEDS_REVIEW")
 
     return "\n".join(lines)

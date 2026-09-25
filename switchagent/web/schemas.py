@@ -14,6 +14,10 @@ from pydantic import BaseModel, Field
 class CreateJobsRequest(BaseModel):
     library_item_ids: list[int] = Field(min_length=1)
     target_device_id: str = Field(min_length=1)
+    # AMIIBO items only: {library item id: [amiibo or folder paths under
+    # emuiibo/amiibo/]} -- install just those of the collection. An item
+    # not named here installs whole.
+    amiibo_selection: Optional[dict[str, list[str]]] = None
 
 
 class RenameDeviceRequest(BaseModel):
@@ -69,6 +73,24 @@ class PreferencesRequest(BaseModel):
     auto_scan: bool
     scan_interval: int = Field(ge=10, le=3600)
     covers: bool
+
+
+class AmiiboDeviceRequest(BaseModel):
+    device: str = Field(min_length=1)  # the console's fingerprint, never its raw id
+
+
+class EmuiiboDownloadRequest(BaseModel):
+    # The console to install it on (fingerprint); None only downloads it
+    # into the Library.
+    device: Optional[str] = None
+
+
+class AmiiboRemoveRequest(BaseModel):
+    device: str = Field(min_length=1)
+    # amiibo or folders, relative to emuiibo/amiibo/ on the SD card
+    paths: list[str] = Field(min_length=1)
+    # Must be true when any of them holds game save data (areas/).
+    confirm_save_data: bool = False
 
 
 class RemoveFromQueueRequest(BaseModel):

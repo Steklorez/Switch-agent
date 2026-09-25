@@ -78,4 +78,5 @@
 .extras-pill-dlc    { background: var(--ok);     color: var(--bg); }
 .extras-pill-mod    { background: var(--warn);   color: var(--bg); }
 .extras-pill-sd     { background: var(--sd);     color: var(--bg); }
+.extras-pill-amiibo { background: var(--amiibo); color: var(--bg); }
 .extras-pill-empty { background: #b85e13; color: #fff; }

@@ -70,6 +70,18 @@
 
   <div class="modal-body">
     <ul id="confirm-list" class="confirm-list"></ul>
+    {#- Shown by library.js when the selection holds amiibo and the target
+        Switch has no emuiibo (GET /api/amiibo/emuiibo/offer): its download
+        from GitHub and install, in the same click. -#}
+    <label id="confirm-emuiibo" class="confirm-emuiibo" hidden>
+      <input type="checkbox" id="confirm-emuiibo-check">
+      <span class="confirm-emuiibo-text">
+        <strong>Also install emuiibo</strong> — <span id="confirm-emuiibo-why"></span>
+        <span class="confirm-emuiibo-how">SwitchAgent downloads its current release from GitHub (XorTroll/emuiibo),
+          checks it and queues it with these. emuiibo starts once the Switch is restarted.</span>
+        <span id="confirm-emuiibo-tesla" class="confirm-emuiibo-how" hidden></span>
+      </span>
+    </label>
     <div id="confirm-result" class="confirm-result" hidden></div>
   </div>
 

@@ -28,6 +28,8 @@
   /* A game's switch/ folder for the SD card -- a kind of its own, so a
      colour of its own rather than one of the four above. */
   --sd: #b392f0;
+  /* Virtual amiibo (emuiibo) -- Amiibo page, and their Queue/History badge. */
+  --amiibo: #ff6b8b;
   --topbar-h: 52px;
   --nav-h: 60px;
 }
@@ -238,6 +240,7 @@ a { color: var(--accent); text-decoration: none; }
 }
 
 .status-available { color: var(--text-dim); }
+.status-not_for_switch { color: var(--text-dim); background: var(--surface-2); }
 .status-queued { color: var(--accent); background: rgba(79,142,247,0.15); }
 .status-installing { color: var(--warn); background: rgba(245,166,35,0.15); }
 .status-installed { color: var(--ok); background: rgba(53,196,111,0.15); }
@@ -274,6 +277,9 @@ a { color: var(--accent); text-decoration: none; }
 .card-warning { margin: 6px 0 0; padding: 6px 9px; border-radius: 8px; background: rgba(245,166,35,.12);
   color: var(--warn); font-size: 0.75rem; line-height: 1.35; overflow-wrap: anywhere; }
 .sd-destination { color: var(--sd); overflow-wrap: anywhere; }
+.amiibo-destination { color: var(--amiibo); overflow-wrap: anywhere; }
+.library-elsewhere { display: inline-block; margin: 0 0 12px; font-size: 0.82rem; color: var(--text-dim); }
+.library-elsewhere:hover { color: var(--accent); }
 
 .game-variants {
   margin-top: 4px; background: var(--surface); border: 1px solid var(--border); border-radius: 0 0 12px 12px;
@@ -477,6 +483,7 @@ a { color: var(--accent); text-decoration: none; }
 #confirm-modal .confirm-tag-dlc       { background: var(--ok); }
 #confirm-modal .confirm-tag-mod       { background: var(--warn); }
 #confirm-modal .confirm-tag-sd        { background: var(--sd); }
+#confirm-modal .confirm-tag-amiibo    { background: var(--amiibo); }
 #confirm-modal .confirm-tag-duplicate { background: var(--danger); }
 
 /* Tree line for nested Update/DLC/Mod/duplicate rows: a continuous vertical
@@ -524,6 +531,18 @@ a { color: var(--accent); text-decoration: none; }
 #confirm-modal .confirm-child-name { flex: 1 1 auto; }
 
 #confirm-modal .confirm-result { flex: none; margin-top: 10px; font-size: 0.85rem; }
+
+/* emuiibo, offered with a game's amiibo (library.js refreshEmuiiboOffer). */
+#confirm-modal .confirm-emuiibo {
+  flex: none; display: flex; gap: 10px; align-items: flex-start; margin-top: 10px;
+  padding: 10px 12px; border-radius: 10px; font-size: 0.85rem; cursor: pointer;
+  border: 1px solid rgba(255, 107, 139, 0.45);
+  background: rgba(255, 107, 139, 0.10);
+}
+#confirm-modal .confirm-emuiibo[hidden] { display: none; }
+#confirm-modal .confirm-emuiibo input { margin-top: 3px; flex: none; }
+#confirm-modal .confirm-emuiibo-how { display: block; margin-top: 4px; color: var(--text-dim); font-size: 0.8rem; }
+#confirm-modal .confirm-emuiibo-how[hidden] { display: none; }
 
 #confirm-modal .confirm-footer {
   flex: none; padding: 14px 22px 18px; border-top: 1px solid var(--border);
@@ -607,8 +626,11 @@ a { color: var(--accent); text-decoration: none; }
 .job-tag-dlc    { background: var(--ok); }
 .job-tag-mod    { background: var(--warn); }
 .job-tag-sd     { background: var(--sd); }
+.job-tag-amiibo { background: var(--amiibo); }
+.job-tag-emuiibo { background: var(--amiibo); }
 .job-meta, .history-meta { color: var(--text-dim); font-size: 0.8rem; margin-top: 2px; }
 .job-progress-text { color: var(--accent); font-size: 0.8rem; font-weight: 600; margin-top: 2px; }
+.history-note { color: var(--text-dim); font-size: 0.8rem; margin-top: 2px; overflow-wrap: anywhere; }
 .job-error, .history-error {
   color: var(--danger); font-size: 0.8rem; margin-top: 4px;
   /* UX-001: some error text is genuinely long/technical (e.g. a full

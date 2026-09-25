@@ -84,7 +84,7 @@ _VERSION_INFO = VSVersionInfo(
 # Path(__file__).resolve().parent` lookup then just works unmodified
 # inside the frozen bundle too (see switchagent/paths.py's module
 # docstring): no application code needs to know about sys._MEIPASS.
-datas = collect_data_files("switchagent.web", includes=["templates/*", "static/*"])
+datas = collect_data_files("switchagent.web", includes=["templates/*", "static/*", "addons/*"])
 
 # copy_metadata is what makes importlib.metadata.version("switchagent")
 # (switchagent/__init__.py's single source of truth for __version__)

@@ -1,0 +1,137 @@
+# SwitchAgent's Add-ons tab: open-source Switch utilities worth having, what
+# each one is, how it works, how it gets onto a console and how to use it.
+#
+# The list is curated by hand -- add an entry here and it shows up on the tab,
+# in this order. Loaded and checked by switchagent/web/addons_views.py
+# (tests/test_addons.py fails on an entry that breaks a rule below).
+#
+# Fields (all text is shown as written; `backticks` render as code):
+#   id            unique, lowercase, used by `requires`
+#   name          as the project spells it
+#   tagline       one line: what it gives you
+#   category      a short group name
+#   author, license, source (the project's page), releases (where builds are)
+#   preview       optional: an image in web/static/ (a small, honest picture
+#                 of the program), with preview_caption saying what it shows
+#   status        optional: a built-in check SwitchAgent runs against a
+#                 connected Switch -- one of: emuiibo, tesla_menu, ovlloader
+#   install       optional: SwitchAgent installs it itself -- one of: emuiibo
+#   requires      ids of other entries it cannot work without
+#   related       optional: {label, href} -- a SwitchAgent page for it
+#   about         paragraphs (blank line between them)
+#   how_it_works  list of sentences
+#   install_steps list of steps (what SwitchAgent does, or what to do by hand)
+#   usage         list of steps
+#   controls      optional: list of {keys, action}
+#   tips          list of {problem, answer} or plain sentences
+
+addons:
+  - id: emuiibo
+    name: emuiibo
+    tagline: Virtual amiibo — use any amiibo in games without the figure.
+    category: Amiibo
+    author: XorTroll
+    license: GPL-2.0
+    source: https://github.com/XorTroll/emuiibo
+    releases: https://github.com/XorTroll/emuiibo/releases/latest
+    preview: addon-emuiibo-overlay.svg
+    preview_caption: The emuiibo overlay in a game (illustration — its own labels and layout).
+    status: emuiibo
+    install: emuiibo
+    requires: [nx-ovlloader, tesla-menu]
+    related: {label: "Manage amiibo", href: "/amiibo"}
+    about: |
+      Games that read amiibo over NFC get a virtual one from emuiibo instead of a real figure:
+      villagers and items in Animal Crossing, gear in Splatoon, daily drops in Zelda, fighters in Smash.
+
+      emuiibo is two parts that always come from the same release: a background module that
+      answers the game, and an overlay you open during the game to choose which amiibo is
+      "on the reader". Virtual amiibo themselves are folders on the SD card — install whole
+      collections from the Amiibo tab.
+    how_it_works:
+      - The module starts with the console (Atmosphère launches it from `atmosphere/contents/0100000000000352`) and, while emulation is on, answers every game that asks for an amiibo.
+      - The overlay, opened through Tesla Menu, turns emulation on and off and picks the active amiibo. It works only with the module of its own version.
+      - Each virtual amiibo is a folder in `emuiibo/amiibo/` holding `amiibo.json` and `amiibo.flag`; sub-folders are how the overlay groups them.
+      - What a game saves on an amiibo is kept in that amiibo's `areas/` folder — and goes with it if the amiibo is removed.
+    install_steps:
+      - Connect the Switch with DBI's MTP responder running.
+      - Press Install on this card. SwitchAgent fetches the current `emuiibo.zip` from its GitHub releases, checks its size and published SHA-256, adds it to your Library and queues it for this Switch.
+      - Make sure Tesla Menu and nx-ovlloader show as installed too — the overlay cannot be opened without them.
+      - Restart the Switch. emuiibo loads only when the console starts.
+      - "By hand instead: extract `emuiibo.zip` and copy what is inside its `SdOut` folder to the root of the SD card, then restart."
+    usage:
+      - Open the overlay menu — hold L and D-pad Down, then press the right stick (R3) — and choose emuiibo.
+      - Turn emulation on with R. Do it before starting the game — some games only see emuiibo if it was on when they launched.
+      - Start the game and open its amiibo feature, where it asks you to touch an amiibo to the controller.
+      - Open the overlay again, go into a folder and select an amiibo with A. It becomes the active amiibo and is connected — as if the figure were on the reader. The game reads it.
+      - When the game asks you to remove the amiibo, disconnect it with R3 in the overlay (or select it again).
+    controls:
+      - {keys: "L + D-pad Down, then R3", action: "Open the overlay menu (Tesla Menu), then pick emuiibo"}
+      - {keys: "R / L", action: "Emulation on / off"}
+      - {keys: "A", action: "Open a folder, or make an amiibo the active one"}
+      - {keys: "R3", action: "Connect / disconnect the active amiibo"}
+      - {keys: "Y / X", action: "Add to / remove from favorites"}
+      - {keys: "ZR / ZL", action: "Random UUID on / off for the active amiibo"}
+      - {keys: "−", action: "Clear the active amiibo"}
+      - {keys: "+", action: "Help"}
+      - {keys: "B", action: "Back"}
+    tips:
+      - problem: The overlay says "emuiibo doesn't seem to be present".
+        answer: The module is not running. Restart the Switch; if it stays, install emuiibo again and check that `atmosphere/contents/0100000000000352/flags/boot2.flag` is on the card.
+      - problem: The overlay says emuiibo is outdated, or behaves oddly after an update.
+        answer: The module and the overlay are from different releases. Install one release over both (Install above does exactly that) and restart.
+      - problem: The game does not react to the amiibo.
+        answer: Check that emulation is on and the amiibo is connected. If emulation was turned on after the game started, close the game, turn it on, and start the game again.
+      - problem: A game lets you scan each amiibo only once a day.
+        answer: Turn Random UUID on for that amiibo (ZR) — every scan then looks like a different figure.
+      - problem: New amiibo do not show up in the overlay.
+        answer: The overlay lists folders when it opens — close and reopen it. An amiibo without `amiibo.flag` is hidden on purpose.
+      - Names longer than 10 characters are shortened in games; the folder name in the overlay stays as it is.
+
+  - id: tesla-menu
+    name: Tesla Menu
+    tagline: The overlay menu that emuiibo and other overlays open from.
+    category: Overlays
+    author: WerWolv
+    license: GPL-2.0
+    source: https://github.com/WerWolv/Tesla-Menu
+    releases: https://github.com/WerWolv/Tesla-Menu/releases/latest
+    status: tesla_menu
+    requires: [nx-ovlloader]
+    about: |
+      A small menu drawn over any game, listing every overlay installed in `switch/.overlays/`.
+      Ultrahand Overlay is a newer menu that installs under the same file name and works the same way.
+    how_it_works:
+      - It is itself an overlay, `switch/.overlays/ovlmenu.ovl`, loaded by nx-ovlloader when you press the key combination.
+      - Every other `.ovl` file in `switch/.overlays/` shows up in it as an entry.
+    install_steps:
+      - Download `ovlmenu.zip` from its releases page.
+      - Extract it and copy its `switch` folder to the root of the SD card — `ovlmenu.ovl` ends up in `switch/.overlays/`.
+      - nx-ovlloader has to be installed as well; restart the Switch after installing both.
+    usage:
+      - Hold L and D-pad Down, then press the right stick (R3), anywhere — in a game or on the home screen.
+      - Pick an overlay with A; B goes back.
+    tips:
+      - problem: Nothing happens on L + D-pad Down + R3.
+        answer: nx-ovlloader is missing or the console was not restarted after installing it.
+
+  - id: nx-ovlloader
+    name: nx-ovlloader
+    tagline: The background loader that makes overlays possible at all.
+    category: Overlays
+    author: WerWolv
+    license: ISC
+    source: https://github.com/WerWolv/nx-ovlloader
+    releases: https://github.com/WerWolv/nx-ovlloader/releases/latest
+    status: ovlloader
+    about: |
+      A background module that Atmosphère starts with the console. It waits for the overlay key
+      combination and loads Tesla Menu — and through it every other overlay.
+    how_it_works:
+      - Lives in `atmosphere/contents/420000000007E51A`; its `flags/boot2.flag` makes Atmosphère start it at boot.
+    install_steps:
+      - Download `nx-ovlloader.zip` from its releases page.
+      - Extract it and copy its `atmosphere` folder to the root of the SD card.
+      - Restart the Switch.
+    usage:
+      - Nothing to do by hand — once it runs, the Tesla Menu key combination works.

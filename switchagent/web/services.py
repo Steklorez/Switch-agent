@@ -14,7 +14,8 @@ import re
 from pathlib import Path
 from typing import Optional
 
-from .. import db, extractor, manifest as manifest_mod, preview, queue_worker, sd_files
+from .. import db, emuiibo, extractor, manifest as manifest_mod, preview, queue_worker, sd_files
+from .. import scanner as scanner_mod
 from .. import title_id as title_id_mod
 from ..model import ContentType
 from .context import WebContext
@@ -231,6 +232,26 @@ def _library_entry_view(
         "confirmed_on_device": confirmed_on_device,
         "hide_unverified_badge": hide_unverified_badge,
         **_sd_fields(row),
+        **_emuiibo_fields(row),
+    }
+
+
+def _emuiibo_fields(row) -> dict:
+    """An emuiibo release's version (and whether a newer one exists), or a
+    virtual amiibo collection's size -- what its card says instead of a
+    game's format (see switchagent/emuiibo.py)."""
+    # Only these two kinds carry anything to read -- the other thousands of
+    # rows of a big library are not parsed for nothing.
+    kind = row["content_type"]
+    details = sd_files.row_details(row) if kind in (ContentType.EMUIIBO.value, ContentType.AMIIBO.value) else {}
+    release = details.get("emuiibo") if kind == ContentType.EMUIIBO.value else None
+    amiibo = details.get("amiibo") if kind == ContentType.AMIIBO.value else None
+    version = release.get("version") if isinstance(release, dict) else None
+    return {
+        "emuiibo_version": version,
+        "emuiibo_outdated": emuiibo.is_outdated(version),
+        "emuiibo_latest": emuiibo.LATEST_KNOWN_VERSION,
+        "amiibo": amiibo if isinstance(amiibo, dict) else None,
     }
 
 
@@ -484,6 +505,7 @@ _GROUP_FILTER_PREDICATES = {
     "updates": lambda g: bool(g["updates"]),
     "dlc": lambda g: bool(g["dlc"]),
     "mods": lambda g: bool(g["mods"]),
+    "amiibo": lambda g: bool(g.get("amiibo")),
     "duplicates": lambda g: bool(g["duplicates"]),
 }
 
@@ -516,7 +538,7 @@ def _family_entries(game: dict) -> list[dict]:
     so they can never drift apart."""
     return [
         e for e in ([game["base"]] + game["updates"] + game["dlc"] + game["mods"]
-                    + game.get("sd_files", []) + game["duplicates"])
+                    + game.get("sd_files", []) + game.get("amiibo", []) + game["duplicates"])
         if e is not None
     ]
 
@@ -619,7 +641,13 @@ def list_library_view(
 
     packages = [e for e in all_entries if e["content_type"] == ContentType.GAME_PACKAGE.value]
     sd_parts = [e for e in all_entries if e["content_type"] == ContentType.SD_FILES.value]
-    others = [e for e in all_entries if e not in mods and e not in packages and e not in sd_parts]
+    # Not games, so not cards in a grid of games: emuiibo, virtual amiibo
+    # collections and the PC tools that come with them live on the Amiibo tab
+    # (web/amiibo_views.py), which has everything to do with them. Library
+    # only says how many are over there, so nothing seems to vanish.
+    elsewhere = [e for e in all_entries if _lives_on_amiibo_tab(e)]
+    others = [e for e in all_entries
+              if e not in mods and e not in packages and e not in sd_parts and e not in elsewhere]
 
     # Mods are tagged with the base game's own TITLE_ID directly (the
     # atmosphere/contents/<TITLE_ID>/ convention) -- no variant arithmetic
@@ -655,6 +683,20 @@ def list_library_view(
     # (sd_files.assign_owners, stored as its title_id). One that belongs to
     # no game in the library is shown on its own card rather than hidden:
     # a standalone homebrew app is a perfectly good thing to install.
+    # A virtual amiibo collection that came with a game (scanner.amiibo_owners,
+    # stored as its title_id) is part of that game's card, with a tag of its
+    # own, and is installed together with it. One without a game stays off
+    # the grid -- on the Amiibo tab, like emuiibo itself.
+    amiibo_by_base: dict[str, list] = {}
+    for e in elsewhere:
+        if e["content_type"] != ContentType.AMIIBO.value:
+            continue
+        family = family_base_title_id(e["title_id"])
+        if family is not None and family in families:
+            amiibo_by_base.setdefault(family, []).append(e)
+    attached = {e["id"] for parts in amiibo_by_base.values() for e in parts}
+    elsewhere = [e for e in elsewhere if e["id"] not in attached]
+
     sd_by_base: dict[str, list] = {}
     standalone_sd = []
     for e in sd_parts:
@@ -675,6 +717,7 @@ def list_library_view(
         duplicates = bases_sorted[1:]
         fam_mods = sorted(mods_by_base.get(fam["base_title_id"], []), key=lambda x: x["name"])
         fam_sd = sorted(sd_by_base.get(fam["base_title_id"], []), key=lambda x: x["sd_label"])
+        fam_amiibo = sorted(amiibo_by_base.get(fam["base_title_id"], []), key=lambda x: x["name"])
         name_source = primary or (fam["updates"] + fam["dlc"] + duplicates + fam_mods)[0]
         games.append(_finish_family({
             "base_title_id": fam["base_title_id"],
@@ -684,21 +727,25 @@ def list_library_view(
             "dlc": sorted(fam["dlc"], key=lambda x: x["name"]),
             "mods": fam_mods,
             "sd_files": fam_sd,
+            "amiibo": fam_amiibo,
+            "amiibo_count": sum((e.get("amiibo") or {}).get("count", 0) for e in fam_amiibo),
             "duplicates": sorted(duplicates, key=lambda x: x["name"]),
             "variant_count": (
-                len(fam["updates"]) + len(fam["dlc"]) + len(fam_mods) + len(fam_sd) + len(duplicates)
-                + (1 if primary else 0)
+                len(fam["updates"]) + len(fam["dlc"]) + len(fam_mods) + len(fam_sd) + len(fam_amiibo)
+                + len(duplicates) + (1 if primary else 0)
             ),
         }))
     for e in standalone_sd:
         games.append(_finish_family({
             "base_title_id": f"sd-{e['id']}", "name": e["name"], "base": e,
-            "updates": [], "dlc": [], "mods": [], "sd_files": [], "duplicates": [], "variant_count": 1,
+            "updates": [], "dlc": [], "mods": [], "sd_files": [], "amiibo": [], "amiibo_count": 0,
+            "duplicates": [], "variant_count": 1,
         }))
     for e in others:  # MIXED/UNKNOWN content_type -- shown, never dropped
         games.append(_finish_family({
             "base_title_id": f"other-{e['id']}", "name": e["name"], "base": e,
-            "updates": [], "dlc": [], "mods": [], "sd_files": [], "duplicates": [], "variant_count": 1,
+            "updates": [], "dlc": [], "mods": [], "sd_files": [], "amiibo": [], "amiibo_count": 0,
+            "duplicates": [], "variant_count": 1,
         }))
 
     if needle:
@@ -713,7 +760,12 @@ def list_library_view(
     family_key_fn = _FAMILY_SORT_KEYS.get(sort, _FAMILY_SORT_KEYS["date_added"])
     games.sort(key=family_key_fn, reverse=reverse)
 
-    return {"kind": "games", "games": games}
+    return {"kind": "games", "games": games, "on_amiibo_tab": len(elsewhere)}
+
+
+def _lives_on_amiibo_tab(entry: dict) -> bool:
+    return (entry["content_type"] in (ContentType.EMUIIBO.value, ContentType.AMIIBO.value)
+            or entry["library_status"] == scanner_mod.NOT_FOR_SWITCH)
 
 
 def _finish_family(game: dict) -> dict:
@@ -1033,7 +1085,8 @@ def _resolve_latest_retry(conn, row):
 # vocabulary and one colour per kind. "base" is the one the dialog leaves
 # untagged (there, everything hangs under a base-game header that names it);
 # Queue is a flat list with no such header, so a plain game needs saying too.
-_VARIANT_ROLE_LABEL = {"base": "Game", "update": "Update", "dlc": "DLC", "mod": "Mod", "sd": "SD files"}
+_VARIANT_ROLE_LABEL = {"base": "Game", "update": "Update", "dlc": "DLC", "mod": "Mod", "sd": "SD files",
+                       "amiibo": "Amiibo", "emuiibo": "emuiibo"}
 
 _TITLE_VARIANT_TO_ROLE = {"BASE": "base", "UPDATE": "update", "DLC": "dlc"}
 
@@ -1052,6 +1105,10 @@ def _job_variant_role(job_row) -> Optional[str]:
         return "mod"
     if manifest.content_type == ContentType.SD_FILES.value:
         return "sd"
+    if manifest.content_type == ContentType.AMIIBO.value:
+        return "amiibo"
+    if manifest.content_type == ContentType.EMUIIBO.value:
+        return "emuiibo"
     if manifest.content_type != ContentType.GAME_PACKAGE.value or not manifest.title_id:
         return None
     variant, _base_id = title_id_mod.classify_title_variant(manifest.title_id)
@@ -1087,7 +1144,8 @@ def _job_view(conn, row) -> dict:
     # Same helper the worker's history uses -- minus its " — Mod" suffix,
     # which the [Mod] badge below now says instead (History keeps it: no
     # badge there).
-    display_name = queue_worker.display_name_for_job(conn, row, mod_suffix=variant_role not in ("mod", "sd"))
+    display_name = queue_worker.display_name_for_job(
+        conn, row, mod_suffix=variant_role not in ("mod", "sd", "amiibo", "emuiibo"))
     stall_seconds = _stall_seconds(row)
     return {
         # Queue badge: what this job installs (see _job_variant_role).
@@ -1514,12 +1572,12 @@ def _dock_parts_label(parts: list) -> str:
         role = part["role"] or "other"
         counts[role] = counts.get(role, 0) + 1
     labels = []
-    for role in ("base", "update", "dlc", "mod", "sd", "other"):
+    for role in ("base", "update", "dlc", "mod", "sd", "emuiibo", "amiibo", "other"):
         n = counts.get(role)
         if not n:
             continue
         label = _VARIANT_ROLE_LABEL.get(role, "File")
-        labels.append(label if n == 1 else f"{n} {label}{'' if label in ('DLC', 'SD files') else 's'}")
+        labels.append(label if n == 1 else f"{n} {label}{'' if label in ('DLC', 'SD files', 'emuiibo') else 's'}")
     return " · ".join(labels)
 
 
@@ -1599,7 +1657,7 @@ def _apply_library_row(report, row) -> None:
     (library_items.title_id, see sd_files.assign_owners). The job inherits
     exactly that, so it waits behind its game's install and is recorded
     under that game."""
-    if report.content_type is ContentType.SD_FILES:
+    if report.content_type in (ContentType.SD_FILES, ContentType.AMIIBO):
         report.title_id = row["title_id"]
         report.title_id_confident = False
 
@@ -1609,7 +1667,7 @@ def _sd_sub_report(report):
     preview._attach_sd_part) as an SD_FILES report of its own, tagged with
     the game the archive installs. None when there is none."""
     if report.sd_source_dir is None or report.content_type not in (
-        ContentType.GAME_PACKAGE, ContentType.ATMOSPHERE_MOD,
+        ContentType.GAME_PACKAGE, ContentType.ATMOSPHERE_MOD, ContentType.AMIIBO,
     ):
         return None
     family = report.title_id if report.content_type is ContentType.ATMOSPHERE_MOD         else family_base_title_id(report.title_id)
@@ -1621,8 +1679,25 @@ def _sd_sub_report(report):
     )
 
 
+def _apply_amiibo_selection(report, wanted) -> None:
+    """Narrows an AMIIBO report to the amiibo the user picked (their
+    destinations, or whole folders of them -- emuiibo.select). None keeps
+    the whole collection. Raises ValueError when the pick names nothing in
+    this collection: installing nothing must be said, not done silently."""
+    if report.content_type is not ContentType.AMIIBO or wanted is None or report.amiibo_collection is None:
+        return
+    chosen = emuiibo.select(report.amiibo_collection, wanted)
+    if not chosen:
+        raise ValueError("none of the selected amiibo are in this collection")
+    report.copy_plan = preview.amiibo_copy_plan(report.amiibo_collection, chosen)
+    report.file_count = len(report.copy_plan)
+    # The collection's switch/ folder (if any) belongs to the whole
+    # collection, not to a few of its amiibo.
+    report.sd_source_dir = None
+
+
 def create_and_confirm_jobs(conn, library_item_ids: list[int], target_device_id: str, *, progress=None,
-                            confirm: bool = True) -> dict:
+                            confirm: bool = True, amiibo_selection: Optional[dict] = None) -> dict:
     """The ONLY path that creates jobs from the Web UI (point 9/19/25): the
     caller (the bulk-install confirmation dialog) already gathered
     explicit human confirmation before this is ever called -- so every job
@@ -1726,6 +1801,14 @@ def create_and_confirm_jobs(conn, library_item_ids: list[int], target_device_id:
             continue
 
         _apply_library_row(report, row)
+        try:
+            _apply_amiibo_selection(report, (amiibo_selection or {}).get(str(item_id)))
+        except ValueError as exc:
+            errors.append({"library_item_id": item_id, "error": str(exc)})
+            remove_extraction(report.work_dir)
+            if progress:
+                progress(item_id=item_id, phase="Failed", error=str(exc))
+            continue
 
         if report.content_type is ContentType.GAME_PACKAGE and len(report.package_entries) > 1:
             entries = sorted(report.package_entries, key=_package_entry_sort_key)
@@ -2218,7 +2301,8 @@ _ACTIVITY_FLAGS = {
     "DESTINATION_CONFLICT": "conflict",
 }
 
-_ROLE_LABELS = {"base": "Game", "update": "Update", "dlc": "DLC", "mod": "Mod", "sd": "SD files"}
+_ROLE_LABELS = {"base": "Game", "update": "Update", "dlc": "DLC", "mod": "Mod", "sd": "SD files",
+                "amiibo": "Amiibo", "emuiibo": "emuiibo"}
 
 
 def _local(created_at: str) -> Optional[datetime]:
@@ -2275,6 +2359,8 @@ def _history_role(conn, row) -> Optional[str]:
         return "mod"
     if " \u2014 SD files" in (row["display_name"] or ""):
         return "sd"
+    if " \u2014 Amiibo" in (row["display_name"] or ""):
+        return "amiibo"
     if not row["title_id"]:
         return None
     try:

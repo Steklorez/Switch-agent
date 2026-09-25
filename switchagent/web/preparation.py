@@ -44,6 +44,10 @@ def _library_item_role(row):
         return None
     if row["content_type"] == ContentType.SD_FILES.value:
         return "sd"
+    if row["content_type"] == ContentType.AMIIBO.value:
+        return "amiibo"
+    if row["content_type"] == ContentType.EMUIIBO.value:
+        return "emuiibo"
     if row["item_type"] == "MOD_FOLDER" or row["content_type"] == ContentType.ATMOSPHERE_MOD.value:
         return "mod"
     if not row["title_id"]:
@@ -100,8 +104,10 @@ def _variant_rank(row) -> int:
     if row is None:
         return 1
     from ..model import ContentType
-    if row['content_type'] in (ContentType.ATMOSPHERE_MOD.value, ContentType.SD_FILES.value):
-        # A game's switch/ folder goes after the game itself, like a mod.
+    if row['content_type'] in (ContentType.ATMOSPHERE_MOD.value, ContentType.SD_FILES.value,
+                               ContentType.AMIIBO.value):
+        # A game's switch/ folder and its amiibo go after the game itself,
+        # like a mod.
         return _VARIANT_RANK['MOD']
     from .. import title_id as title_id_mod
     try:
@@ -185,7 +191,7 @@ class PreparationQueue:
         # clear_for_device()) -- what that run then reports as its reason.
         self._stopped_reasons = {}
 
-    def submit(self, item_ids, target):
+    def submit(self, item_ids, target, *, amiibo_selection=None):
         task_id = uuid.uuid4().hex
         item_ids = list(dict.fromkeys(item_ids))
         from .. import queue_worker
@@ -222,7 +228,8 @@ class PreparationQueue:
                 if self.states[key]["phase"] in ("Ready", "Failed"):
                     del self.states[key]
             self.states[task_id] = {"id": task_id, "phase": "Waiting", "started": time.time(),
-                                    "items": items, "target": target, "chains": chains}
+                                    "items": items, "target": target, "chains": chains,
+                                    "amiibo_selection": dict(amiibo_selection or {})}
 
         def update(item_id=None, **fields):
             with self.lock:
@@ -382,8 +389,14 @@ class PreparationQueue:
             def prepare(member_id, own_conn):
                 """Everything slow about an item: extraction, staging and the
                 manifest hash. Never confirms -- see this method's docstring."""
+                with self.lock:
+                    selection = (self.states.get(task_id) or {}).get("amiibo_selection") or {}
+                # Only an item the user narrowed down to some of its amiibo
+                # carries a selection; everything else is prepared as before.
+                narrowed = {str(member_id): selection[str(member_id)]} if str(member_id) in selection else None
                 return create_and_confirm_jobs(
                     own_conn, [member_id], target, progress=progress_for(member_id), confirm=False,
+                    **({"amiibo_selection": narrowed} if narrowed else {}),
                 )
 
             def start_lookahead(next_index):

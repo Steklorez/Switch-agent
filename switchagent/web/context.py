@@ -107,6 +107,13 @@ class WebContext:
         self.preparations = PreparationQueue(db_path)
         from ..covers import CoverQueue
         self.covers = CoverQueue()
+        # emuiibo on each console -- read and changed on the worker thread
+        # only, in slices between jobs (see web/emuiibo_service.py).
+        from .emuiibo_service import EmuiiboService, ReleaseDownloader
+        self.emuiibo = EmuiiboService()
+        # emuiibo's current release from GitHub, on request -- its own
+        # thread, network only (see web/emuiibo_service.ReleaseDownloader).
+        self.emuiibo_downloads = ReleaseDownloader(db_path, self.preparations)
         self.registry = registry
         self._discover_devices = discover_devices
         self.worker_poll_interval_seconds = worker_poll_interval_seconds
@@ -329,6 +336,8 @@ class WebContext:
         # See services.abandon_all_jobs_for_device()'s own docstring for
         # why nothing survives except the permanent History record, and
         # PreparationQueue.clear_for_device() for the in-memory half.
+        self.emuiibo.on_devices(live_ids, live_ids - previously_live)
+
         changed_ids = previously_live.symmetric_difference(live_ids)
         if changed_ids:
             from .services import abandon_all_jobs_for_device
@@ -590,10 +599,18 @@ class WebContext:
                         with self._abort_lock:
                             self._worker_pass_generation = None
                     self.note_install_job_outcome(conn, outcome)
+                    self.emuiibo.note_job(conn, outcome.job_id if outcome else None)
+                    # No job to run: time for emuiibo's slice (a read or a
+                    # removal carries on from where it stopped). While one
+                    # is under way the loop does not sleep, so it finishes
+                    # at MTP speed -- and a job confirmed meanwhile still
+                    # starts within one slice.
+                    more_emuiibo_work = outcome is None and self.emuiibo.step(conn, self.registry)
                 except Exception:  # noqa: BLE001 -- one bad iteration must not kill the worker thread
                     log.exception("worker loop iteration failed")
                     outcome = None
-                if outcome is None:
+                    more_emuiibo_work = False
+                if outcome is None and not more_emuiibo_work:
                     self._stop_event.wait(self.worker_poll_interval_seconds)
         finally:
             conn.close()
@@ -846,7 +863,68 @@ def build_real_context(db_path: Path) -> WebContext:
     return WebContext(db_path=db_path, registry=queue_worker.DeviceRegistry(), discover_devices=_discover_real_devices)
 
 
-def build_mock_context(db_path: Path, *, device_ids: Optional[list[str]] = None) -> WebContext:
+def mock_overlay_bytes(version: str) -> bytes:
+    """The smallest .nro emuiibo.overlay_version() reads a version from:
+    header, asset section, and a NACP holding `version` at 0x3060."""
+    import struct
+
+    nro_size = 0x80
+    data = bytearray(nro_size)
+    data[0x10:0x14] = b"NRO0"
+    struct.pack_into("<I", data, 0x18, nro_size)
+    nacp = bytearray(0x4000)
+    nacp[0:7] = b"emuiibo"
+    nacp[0x3060:0x3060 + len(version)] = version.encode("ascii")
+    asset = bytearray(b"ASET") + struct.pack("<IQQQQ", 0, 0, 0, 0x38, len(nacp))
+    asset += bytes(0x38 - len(asset))
+    return bytes(data + asset + nacp)
+
+
+def _seed_mock_emuiibo(sd) -> None:
+    """`web --mock`'s parent Switch as a real one with emuiibo 0.6.3 looks
+    (see emuiibo.py): the sysmodule, its overlay, Tesla, a few amiibo --
+    one with game save data, one a favorite -- so the Amiibo page shows
+    something true to life without hardware. The child Switch stays bare."""
+    import json as json_mod
+
+    from .. import emuiibo
+
+    def put(path: str, data: bytes = b"") -> None:
+        sd.ensure_directory(path.rpartition("/")[0])
+        sd.write_file(path, data)
+
+    put(f"{emuiibo.SYSMODULE_DIR}/exefs.nsp", b"\0" * 64)
+    put(f"{emuiibo.SYSMODULE_DIR}/flags/boot2.flag")
+    put(emuiibo.OVERLAY_FILE, mock_overlay_bytes("0.6.3"))
+    put(f"{emuiibo.OVLLOADER_DIR}/exefs.nsp", b"\0" * 64)
+    put(f"{emuiibo.OVLLOADER_DIR}/flags/boot2.flag")
+    put(emuiibo.TESLA_MENU_FILE, b"\0" * 64)
+    put(emuiibo.STATUS_ON_FLAG)
+    figures = {
+        "Animal Crossing/Isabelle": ("Isabelle", [2, 1, 0, 1, 5], True),
+        "Animal Crossing/Tom Nook": ("Tom Nook", [2, 0, 0, 1, 5], False),
+        "Super Smash Bros/Mario": ("Mario", [0, 0, 0, 2, 0], False),
+    }
+    for path, (name, (gcid, variant, ftype, model, series), save) in figures.items():
+        folder = f"{emuiibo.AMIIBO_DIR}/{path}"
+        doc = {
+            "name": name, "write_counter": 0, "version": 0, "mii_charinfo_file": "mii-charinfo.bin",
+            "first_write_date": {"y": 2026, "m": 9, "d": 1}, "last_write_date": {"y": 2026, "m": 9, "d": 1},
+            "id": {"game_character_id": gcid, "character_variant": variant, "figure_type": ftype,
+                   "model_number": model, "series": series},
+            "uuid": [1, 2, 3, 4, 5, 6, len(name), 0, 0, 0], "use_random_uuid": False,
+        }
+        put(f"{folder}/{emuiibo.AMIIBO_JSON}", json_mod.dumps(doc, indent=2).encode())
+        put(f"{folder}/{emuiibo.AMIIBO_FLAG}")
+        put(f"{folder}/areas.json", b'{"areas": [], "current_area_access_id": 0}')
+        if save:
+            put(f"{folder}/areas/0x38600500.bin", b"\0" * 216)
+    put(emuiibo.FAVORITES_FILE, b"sdmc:/emuiibo/amiibo/Super Smash Bros/Mario\n")
+
+
+def build_mock_context(
+    db_path: Path, *, device_ids: Optional[list[str]] = None, seed_emuiibo: bool = False,
+) -> WebContext:
     """Development/test mode -- no real hardware, no pywin32. Pre-registers
     a small fixed set of MockMtpBackend instances (default: two, named the
     same way tests/test_queue_worker.py already does, for a consistent
@@ -869,6 +947,8 @@ def build_mock_context(db_path: Path, *, device_ids: Optional[list[str]] = None)
         backend = MockMtpBackend(device_id=device_id, device_name=names.get(device_id, device_id))
         backend.add_storage("SD_CARD", free_bytes=sd_card_free_bytes, total_bytes=sd_card_total_bytes)
         backend.add_storage("SD_INSTALL")
+        if seed_emuiibo and device_id == "mock-switch-parent":
+            _seed_mock_emuiibo(backend.storage_tree("SD_CARD"))
         registry.register(device_id, backend)
 
     def _noop_discover(_registry: queue_worker.DeviceRegistry) -> None:

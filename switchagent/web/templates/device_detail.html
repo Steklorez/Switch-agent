@@ -15,8 +15,10 @@
    * The activity section is titled "SwitchAgent activity" and is never
      called "Installed games". SwitchAgent can only ever prove what it
      attempted and transferred, never what the console ended up with.
-   * There is no remote-delete action here, by design -- SwitchAgent
-     never deletes anything from the console itself, on any page.
+   * There is no remote-delete action here, by design. The one thing
+     SwitchAgent ever removes from a console is a virtual amiibo folder
+     under emuiibo/amiibo/, explicitly, from the Amiibo page -- see
+     web/emuiibo_service.py for every rule it keeps.
      Forgetting a device (dropping SwitchAgent's OWN record of a Switch
      it has seen -- never the console's content) is a different action
      and lives on the /devices list page, where the stale rows are
@@ -96,6 +98,19 @@
   </table>
   {% endif %}
 </section>
+
+{% if view.emuiibo %}
+<section class="detail-section" id="device-emuiibo">
+  <h3>emuiibo</h3>
+  <p class="settings-hint">
+    {% if view.emuiibo.installed %}emuiibo {{ view.emuiibo.overlay_version or "" }} is on this Switch
+    with {{ view.emuiibo.amiibo }} virtual amiibo.{% else %}emuiibo is not on this Switch.{% endif %}
+    {% if view.emuiibo.missing %}Missing: {{ view.emuiibo.missing|join(", ") }}.{% endif %}
+    {% if amiibo_tab %}<a href="/amiibo?device={{ view.device_fingerprint }}">Amiibo →</a>
+    {% else %}<a href="/addons?device={{ view.device_fingerprint }}#addon-emuiibo">Install it from Add-ons →</a>{% endif %}
+  </p>
+</section>
+{% endif %}
 
 <section class="detail-section" id="device-diagnostics">
   <h3>Diagnostics</h3>

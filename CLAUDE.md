@@ -160,3 +160,68 @@ the real Zuma / Mega Man layouts, so change a test on purpose or not at all:
   not move the rest of the job to the Shell (25x slower). Retry continues
   from what the previous attempt delivered, and a file already on the card
   with exactly the same bytes (read back, hashed) is done, not a conflict.
+
+## A virtual amiibo is its folder: emuiibo
+
+emuiibo (`atmosphere/contents/0100000000000352` + `switch/.overlays/emuiibo.ovl`)
+answers games' amiibo requests from `emuiibo/amiibo/`, where a virtual amiibo
+is a folder holding `amiibo.json` and `amiibo.flag`. The knowledge lives in
+`switchagent/emuiibo.py`, the full picture in `docs/EMUIIBO.md`;
+`tests/test_emuiibo.py` encodes each rule below against the real 766-amiibo
+pack's layout.
+
+- **Recognised by structure, never by name.** A release is its sysmodule's
+  `exefs.nsp`; its version is the overlay's own NACP. An `.nsp` inside
+  `atmosphere/contents/<id>/` is never a package to install.
+- **Copied by what it is, nowhere else.** An AMIIBO manifest can only name
+  `emuiibo/amiibo/...`; an EMUIIBO one only emuiibo's own three places.
+  Checked when the manifest is built.
+- **Decided per amiibo, never per file.** emuiibo rewrites an amiibo as soon
+  as it is used, so bytes cannot say "already there": the same figure and
+  UUID at the same place is the same amiibo, and it is left as it is, save
+  data and all. A different one in that folder is left alone unless the
+  conflict policy says override -- then its folder goes first, whole.
+- **A collection that came with a game is part of it**: an "N amiibo" tag on
+  the game's card, installed after the game when the game is selected. Owner
+  by `[TITLE_ID]` in its name, else the one game of its release folder -- or,
+  with several there, the one whose package lies directly in that folder.
+  Otherwise nobody, never a guess. emuiibo releases, unowned collections and
+  PC tools are not games: they live on the Amiibo tab, not in the grid.
+- **No Amiibo tab before emuiibo.** It exists once some console's last read
+  has emuiibo, or SwitchAgent delivered it there since
+  (`amiibo_views.amiibo_tab_visible`); until then `/amiibo` redirects to
+  Add-ons, where emuiibo is installed. Installing amiibo onto a console
+  without it offers emuiibo's download and install in the same confirmation
+  -- ticked when the console is known to lack it, unticked when it was never
+  read. A failed download queues nothing; installing without emuiibo is the
+  user's untick, never a silent fallback.
+- **The one thing ever removed from a console** is an amiibo folder under
+  `emuiibo/amiibo/`, explicitly, from the Amiibo page: checked path by path,
+  one object at a time, each deletion proven by a fresh listing, save data
+  only with an explicit yes. Nothing else anywhere deletes anything.
+- **Every MTP call from the worker thread, in slices.** Reading a console is
+  a generator the worker advances between jobs; an install never waits
+  behind a read of 800 folders.
+- emuiibo's current release can be fetched from GitHub on an explicit click
+  (`emuiibo_download.py`): only `emuiibo.zip` of XorTroll/emuiibo, only from
+  GitHub's hosts, size and published SHA-256 checked, emuiibo by structure,
+  into a Library folder -- then the ordinary queue. Nothing fetched is run.
+- Tesla (nx-ovlloader + Tesla Menu) is required and never installed -- the
+  page says it is missing and where it comes from.
+
+## Add-ons: a curated catalog, not an installer
+
+The Add-ons tab lists open-source Switch utilities from
+`switchagent/web/addons/catalog.yaml`, in file order -- what each is, how it
+works, how it gets onto a console, how to use it. Entries are added by hand;
+the file's header lists every field, and `tests/test_addons.py` refuses an
+entry the tab could not show truthfully (a `requires` naming nothing, a
+`status` check or `install` SwitchAgent does not have, a missing preview).
+
+- A status line appears only where SwitchAgent really checks the console
+  (`status:`), as of that console's last read -- never a guess.
+- An Install button appears only where SwitchAgent installs it itself
+  (`install:`, today only emuiibo, through the ordinary queue). Everything
+  else is instructions and a link to the project's own releases.
+- A preview is a small honest picture in `web/static/`; the emuiibo one is an
+  illustration drawn from the overlay's own labels, said so in its caption.

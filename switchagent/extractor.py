@@ -30,7 +30,7 @@ from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import Optional
 
-from . import config, sd_files, title_id
+from . import config, emuiibo, sd_files, title_id
 from .model import ArchiveEntry, ConflictEntry, ConflictState, ContentType
 
 
@@ -152,6 +152,106 @@ def list_archive_entries(path: Path) -> list[ArchiveEntry]:
     return lister(path)
 
 
+# Reading one member means decompressing up to it in a solid 7z; past this
+# size an archive is not worth that just for a few bytes of metadata.
+READ_MEMBER_MAX_ARCHIVE_BYTES = 256 * 1024 * 1024
+
+
+def read_archive_member(path: Path, name: str, *, max_bytes: int) -> Optional[bytes]:
+    """The bytes of ONE file inside an archive (a 7z member passes through a
+    throwaway temp folder, never work/) -- or None when that is not possible cheaply (RAR, a member larger
+    than max_bytes, an archive too big to be worth decompressing into).
+    Read-only, for small metadata such as an overlay's version; installing
+    still always goes through safe_extract()."""
+    parts = PurePosixPath(name).parts
+    if not parts or any(p in ("..", "/") or ":" in p for p in parts):
+        return None
+    try:
+        if path.stat().st_size > READ_MEMBER_MAX_ARCHIVE_BYTES:
+            return None
+        ext = path.suffix.lower()
+        if ext == ".zip":
+            with zipfile.ZipFile(path) as zf:
+                info = zf.getinfo(name)
+                if info.file_size > max_bytes:
+                    return None
+                return zf.read(info)
+        if ext == ".7z":
+            import tempfile
+
+            import py7zr
+
+            with py7zr.SevenZipFile(path, mode="r") as z:
+                sizes = {i.filename.replace("\\", "/"): i.uncompressed or 0 for i in z.list()}
+                if sizes.get(name, max_bytes + 1) > max_bytes:
+                    return None
+            with tempfile.TemporaryDirectory() as tmp:
+                with py7zr.SevenZipFile(path, mode="r") as z:
+                    z.extract(path=tmp, targets=[name])
+                target = Path(tmp).joinpath(*PurePosixPath(name).parts)
+                return target.read_bytes() if target.is_file() else None
+    except Exception:  # noqa: BLE001 -- metadata only: any failure is just "not available"
+        return None
+    return None
+
+
+def read_archive_members(path: Path, names: list[str], *, max_total_bytes: int) -> dict[str, bytes]:
+    """read_archive_member() for many small files at once (a 7z is
+    decompressed once, not once per file). Whatever cannot be read is simply
+    absent from the result; never raises."""
+    wanted = [n for n in dict.fromkeys(names)
+              if PurePosixPath(n).parts and not any(p in ("..", "/") or ":" in p for p in PurePosixPath(n).parts)]
+    out: dict[str, bytes] = {}
+    try:
+        if not wanted or path.stat().st_size > READ_MEMBER_MAX_ARCHIVE_BYTES:
+            return out
+        ext = path.suffix.lower()
+        if ext == ".zip":
+            with zipfile.ZipFile(path) as zf:
+                infos = {i.filename.replace("\\", "/"): i for i in zf.infolist()}
+                if sum(infos[n].file_size for n in wanted if n in infos) > max_total_bytes:
+                    return out
+                for name in wanted:
+                    if name in infos:
+                        out[name] = zf.read(infos[name])
+        elif ext == ".7z":
+            import tempfile
+
+            import py7zr
+
+            with py7zr.SevenZipFile(path, mode="r") as z:
+                sizes = {i.filename.replace("\\", "/"): i.uncompressed or 0 for i in z.list()}
+            present = [n for n in wanted if n in sizes]
+            if not present or sum(sizes[n] for n in present) > max_total_bytes:
+                return out
+            try:
+                # In memory: 766 amiibo.json in 0.3s, where writing each to a
+                # temp file first took 4.7s.
+                from py7zr.io import BytesIOFactory
+            except ImportError:
+                BytesIOFactory = None
+            if BytesIOFactory is not None:
+                factory = BytesIOFactory(max_total_bytes)
+                with py7zr.SevenZipFile(path, mode="r") as z:
+                    z.extract(targets=present, factory=factory)
+                for name in present:
+                    product = factory.products.get(name)
+                    if product is not None:
+                        product.seek(0)
+                        out[name] = product.read()
+                return out
+            with tempfile.TemporaryDirectory() as tmp:
+                with py7zr.SevenZipFile(path, mode="r") as z:
+                    z.extract(path=tmp, targets=present)
+                for name in present:
+                    target = Path(tmp).joinpath(*PurePosixPath(name).parts)
+                    if target.is_file():
+                        out[name] = target.read_bytes()
+    except Exception:  # noqa: BLE001 -- metadata only: any failure is just "not available"
+        return out
+    return out
+
+
 def hash_entries(entries: list[ArchiveEntry]) -> str:
     """Cheap, format-agnostic content fingerprint: hashes each entry's
     name+size+CRC32 as already declared by the archive's own directory
@@ -203,9 +303,27 @@ class ClassifiedArchive:
     # that goes onto the SD card next to what it installs.
     sd_root: Optional[tuple[str, ...]] = None
     sd_summary: Optional[sd_files.SdSummary] = None
+    # EMUIIBO: what of the archive is emuiibo, and where each file goes.
+    emuiibo_release: Optional[emuiibo.ReleasePlan] = None
+    # AMIIBO: every virtual amiibo in the archive, with its destination.
+    amiibo: Optional[emuiibo.Collection] = None
 
 
-def classify_entries(entries: list[ArchiveEntry]) -> ClassifiedArchive:
+def is_atmosphere_program_file(entry_name: str) -> bool:
+    """A file inside atmosphere/contents/<id>/ -- a sysmodule's or a
+    game's exefs.nsp included. That .nsp is loaded by Atmosphère from the SD
+    card; it is not a package DBI could ever install."""
+    return title_id.from_atmosphere_path(entry_name).title_id is not None
+
+
+def file_list(entries: list[ArchiveEntry]) -> list[tuple[str, int]]:
+    return [(e.name, e.size) for e in entries if not e.is_dir]
+
+
+def classify_entries(entries: list[ArchiveEntry], *, archive_name: Optional[str] = None) -> ClassifiedArchive:
+    """`archive_name` (the archive's file name) lets a collection packed as
+    one folder named like the archive be told apart from a group inside it
+    (see emuiibo.find_collection)."""
     package_entry_name = None
     package_format = None
     package_title_id_guess = title_id.TitleIdGuess(None, None, False)
@@ -213,11 +331,23 @@ def classify_entries(entries: list[ArchiveEntry]) -> ClassifiedArchive:
     atmosphere_title_id_guess = title_id.TitleIdGuess(None, None, False)
     atmosphere_root = None
 
+    # emuiibo's own release is recognised before anything else: it is a
+    # sysmodule under atmosphere/contents/ plus an overlay in switch/, which
+    # the rules below would otherwise split into "a mod" and "SD files" of a
+    # program id that is no game at all.
+    release = emuiibo.plan_release(file_list(entries))
+    if release is not None and release.files:
+        return ClassifiedArchive(
+            content_type=ContentType.EMUIIBO, package_format=None, package_entry_name=None,
+            package_title_id_guess=package_title_id_guess, atmosphere_title_id_guess=atmosphere_title_id_guess,
+            atmosphere_root=None, emuiibo_release=release,
+        )
+
     for entry in entries:
         if entry.is_dir:
             continue
         ext = PurePosixPath(entry.name).suffix.lower()
-        if ext in config.PACKAGE_EXTENSIONS:
+        if ext in config.PACKAGE_EXTENSIONS and not is_atmosphere_program_file(entry.name):
             guess = title_id.from_filename(PurePosixPath(entry.name).name)
             package_entries.append(PackageArchiveEntry(
                 name=entry.name, format=ext.lstrip(".").upper(),
@@ -241,16 +371,24 @@ def classify_entries(entries: list[ArchiveEntry]) -> ClassifiedArchive:
     if sd_summary is None:
         sd_root = None
 
+    amiibo = None
     if has_package and has_atmosphere:
         content_type = ContentType.MIXED
     elif has_package:
         content_type = ContentType.GAME_PACKAGE
     elif has_atmosphere:
         content_type = ContentType.ATMOSPHERE_MOD
-    elif sd_root is not None:
-        content_type = ContentType.SD_FILES
     else:
-        content_type = ContentType.UNKNOWN
+        wrapper = PurePosixPath(archive_name).stem if archive_name else None
+        amiibo = emuiibo.find_collection(file_list(entries), wrapper_name=wrapper)
+        if amiibo is not None:
+            # A switch/ folder next to the amiibo still goes along (see
+            # web/services._sd_sub_report), exactly as it would with a mod.
+            content_type = ContentType.AMIIBO
+        elif sd_root is not None:
+            content_type = ContentType.SD_FILES
+        else:
+            content_type = ContentType.UNKNOWN
 
     return ClassifiedArchive(
         content_type=content_type,
@@ -262,6 +400,7 @@ def classify_entries(entries: list[ArchiveEntry]) -> ClassifiedArchive:
         package_entries=package_entries,
         sd_root=sd_root,
         sd_summary=sd_summary,
+        amiibo=amiibo if content_type is ContentType.AMIIBO else None,
     )
 
 
