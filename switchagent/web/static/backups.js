@@ -16,6 +16,10 @@
   let polling = false;
   let coverSignature = "";
   let readyCovers = new Set();
+  let coverState = null;
+  let saveListSignature = "";
+  let localListSignature = "";
+  let profileNamesSignature = "";
   let visibleSaveRows = [];
   let visibleSaveGroups = new Map();
   let visibleLocalRows = [];
@@ -101,6 +105,26 @@
     const id = row?.cover_id || row?.identity?.title_id || row?.title_id;
     return /^[0-9a-f]{16}$/i.test(String(id || "")) ? String(id).toUpperCase() : null;
   }
+  function renderArtStatus() {
+    const status = $("backup-art-status");
+    const view = activeView();
+    const rows = view === "backup-tab-local" ? snapshots() :
+      view === "backup-tab-games" ? inventory("games") : inventory("saves");
+    const ids = [...new Set(rows.map(titleId).filter(Boolean))];
+    let message = "";
+    if (ids.length && coverState) {
+      const ready = ids.filter(id => readyCovers.has(id)).length;
+      if (!coverState.enabled) message = "Game artwork is off in Settings.";
+      else if (ready < ids.length && coverState.running)
+        message = `Loading game artwork · ${ready} of ${ids.length}`;
+      else if (ready < ids.length && !coverState.total)
+        message = "Looking for game artwork…";
+      else if (ready < ids.length)
+        message = `Artwork available for ${ready} of ${ids.length} games; initials are shown for the rest.`;
+    }
+    if (status.textContent !== message) status.textContent = message;
+    status.hidden = !message;
+  }
   function cover(row) {
     const id = titleId(row);
     const shell = el("span", "backup-cover-shell");
@@ -157,8 +181,12 @@
     const prior = filter.value;
     const names = [...new Set(rows.filter(r => String(r.path || "").split("/").length === 3)
       .map(r => String(r.path).split("/")[2]))].sort((a, b) => a.localeCompare(b));
-    filter.replaceChildren(new Option("All profiles", ""), ...names.map(name => new Option(name, name)));
-    filter.value = names.includes(prior) ? prior : "";
+    const namesSignature = JSON.stringify(names);
+    if (namesSignature !== profileNamesSignature) {
+      filter.replaceChildren(new Option("All profiles", ""), ...names.map(name => new Option(name, name)));
+      filter.value = names.includes(prior) ? prior : "";
+      profileNamesSignature = namesSignature;
+    }
     $("backup-profile-options").hidden = names.length < 2;
     const search = $("backup-save-search").value.trim().toLocaleLowerCase();
     const uncopiedOnly = $("backup-uncopied-only").checked;
@@ -176,6 +204,12 @@
       (unavailableCount ? ` · ${unavailableCount} unavailable` : "");
     $("backup-save-counts").textContent = countLabel;
     $("backup-save-counts").hidden = rows.length === 0;
+    const signature = JSON.stringify({device: chosenDevice(), profile: filter.value, search, uncopiedOnly,
+      rows: rows.map(item => [item.path, item.name, item.selectable, item.reason, item.size,
+        item.file_count, titleId(item), copies.get(item.path)?.id, copies.get(item.path)?.created_at]),
+      covers: [...new Set(shown.map(titleId).filter(id => id && readyCovers.has(id)))]});
+    if (signature === saveListSignature) return;
+    saveListSignature = signature;
     const list = $("backup-save-list");
     visibleSaveGroups = new Map();
     if (!shown.length) {
@@ -278,6 +312,13 @@
       (search ? ` · ${visibleLocalRows.length} shown` : "");
     $("backup-local-summary").hidden = rows.length === 0;
     $("backup-local-toolbar").hidden = rows.length === 0;
+    const signature = JSON.stringify({search,
+      rows: rows.map(item => [item.id, item.source_path, item.created_at, item.origin,
+        item.files?.length, item.files?.reduce((sum, file) => sum + Number(file.size || 0), 0),
+        titleId(item), sourceDeviceLabel(item)]),
+      covers: [...new Set(visibleLocalRows.map(titleId).filter(id => id && readyCovers.has(id)))]});
+    if (signature === localListSignature) return;
+    localListSignature = signature;
     visibleLocalGroups = new Map();
     if (!rows.length) { empty(list, "No local copies yet. Select saves to copy or import a ZIP."); return; }
     if (!visibleLocalRows.length) { empty(list, "No saved copies match this search."); return; }
@@ -608,7 +649,7 @@
     $("backup-discard-plan").disabled = cancellingPlans.has(reservation.plan_id);
     banner.hidden = false;
   }
-  function render() { saveRows(); localRows(); gameRows(); updateSelection(); activityRows(); renderPreparedPlan(); renderDeviceStatus(); renderOverview(); }
+  function render() { saveRows(); localRows(); gameRows(); updateSelection(); activityRows(); renderPreparedPlan(); renderDeviceStatus(); renderOverview(); renderArtStatus(); }
   function download(url) {
     const anchor = el("a");
     anchor.href = url;
@@ -653,6 +694,7 @@
       }
       try {
         const covers = await api("/api/covers/status");
+        coverState = covers;
         readyCovers = new Set(covers.enabled ? covers.ready || [] : []);
       } catch (_) { /* Backup actions remain available without artwork. */ }
       const reservedIds = new Set(Object.values(state.reservations || {}).map(item => item.plan_id));
@@ -718,6 +760,7 @@
     }
     renderDeviceStatus();
     renderOverview();
+    renderArtStatus();
   }
   tabs.forEach((tab, index) => {
     tab.addEventListener("click", () => activateTab(tab));

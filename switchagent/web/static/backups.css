@@ -23,6 +23,7 @@
 .backup-overview-copy strong { display: block; margin-bottom: 3px; }
 .backup-overview progress { display: block; width: 100%; height: 8px; margin-top: 10px; }
 .backup-overview progress[hidden] { display: none; }
+.backup-art-status { margin: -8px 0 16px; color: var(--text-dim); font-size: .82rem; }
 @keyframes backup-pulse { 50% { opacity: .35; } }
 .backup-prepared-plan { display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 10px; margin-bottom: 16px; padding: 12px; border: 1px solid var(--warn); border-radius: 10px; background: var(--surface); }
 .backup-prepared-actions { display: flex; gap: 8px; flex-wrap: wrap; }
