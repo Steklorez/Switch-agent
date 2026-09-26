@@ -7,6 +7,11 @@ Entries are one sentence per change, three to five lines per release, and
 only what a user would notice — no internals, no reasoning, no history.
 Those belong in the commit message. See [CLAUDE.md](CLAUDE.md#how-to-write-an-entry).
 
+## v1.0.22
+
+- The Library only shows something as installed while the Switch it went to is connected.
+- Homebrew and other files copied to the SD card show "On Switch" when they are actually on the card, and stop showing as installed once they are gone from it.
+
 ## v1.0.21
 
 - A new Amiibo tab, once emuiibo is on a console: install virtual amiibo collections, see and remove what is on the Switch.

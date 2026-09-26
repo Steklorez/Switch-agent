@@ -343,6 +343,7 @@ def create_app(ctx: WebContext) -> FastAPI:
             conn, kind=kind, search=search, format_filter=format, sort=sort,
             group_filter=filter, not_installed=not_installed,
             installed_on_device_base_ids=ctx.get_known_installed_title_ids(),
+            connected_device_ids=ctx.get_connected_device_ids(), sd_presence=ctx.get_sd_presence(),
         )
         devices = services.list_devices(conn, ctx)
         # Corner hint (Settings' #dbi-installed-games-hint explains the
@@ -583,6 +584,7 @@ def create_app(ctx: WebContext) -> FastAPI:
         return services.list_library(
             conn, search=search, status_filter=status, format_filter=format, sort=sort,
             installed_on_device_base_ids=ctx.get_known_installed_title_ids(),
+            connected_device_ids=ctx.get_connected_device_ids(), sd_presence=ctx.get_sd_presence(),
         )
 
     @app.get("/api/library/{item_id}")

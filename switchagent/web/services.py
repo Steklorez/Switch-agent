@@ -118,6 +118,7 @@ def _latest_job_by_library_item(conn) -> dict[int, "object"]:
 
 def _library_entry_view(
     conn, row, latest_job, *, library_items=None, installed_on_device_base_ids=None,
+    connected_device_ids=None, sd_presence=None,
 ) -> dict:
     display_status = row["status"]
     job_view = None
@@ -180,11 +181,37 @@ def _library_entry_view(
     # to judge by" rather than a guess either way. Every OTHER status
     # (FAILED, QUEUED, INSTALLED, ...) is a historical/current-job fact
     # that doesn't depend on any live connection, and keeps showing.
+    # SD_FILES (a switch/ folder, a lone .nro): whether its files are on a
+    # connected card right now is checked directly (context.check_sd_files)
+    # -- the "On Switch" of something DBI's Installed Games never lists.
+    sd_checked = (
+        row["content_type"] == ContentType.SD_FILES.value
+        and sd_presence is not None and row["id"] in sd_presence
+    )
+    if sd_checked and sd_presence[row["id"]]:
+        confirmed_on_device = True
     hide_unverified_badge = (
         display_status == "INSTALLED_UNVERIFIED"
         and installed_on_device_base_ids is not None
         and not confirmed_on_device
     )
+    # By explicit request (2026-09-26, after a card stayed green with the
+    # console unplugged): "installed" is only said while the console it was
+    # installed to is connected -- with it gone the card says nothing at
+    # all, not even that it once was. And for SD files, a live check that
+    # finds them gone from the card wins over our own record of copying
+    # them, exactly as the rule above lets a live DBI read win.
+    if display_status in ("INSTALLED", "INSTALLED_UNVERIFIED") and not confirmed_on_device:
+        if (connected_device_ids is not None and latest_job is not None
+                and latest_job["target_device_id"] not in connected_device_ids):
+            hide_unverified_badge = True
+            # The "just installed" glow goes with it: nothing to glow about
+            # on a console that is not there. (Only then -- right after a
+            # game install DBI's own list is routinely stale, and the glow
+            # is exactly what says "it went through" meanwhile.)
+            recent_until = None
+        if sd_checked:
+            hide_unverified_badge = True
     return {
         "id": row["id"],
         "name": name,
@@ -445,6 +472,7 @@ def list_library(
     conn, *, search: Optional[str] = None, status_filter: str = "all",
     format_filter: Optional[str] = None, sort: str = "date_added", reverse: bool = True,
     installed_on_device_base_ids: Optional[set[str]] = None,
+    connected_device_ids: Optional[set[str]] = None, sd_presence: Optional[dict[int, bool]] = None,
 ) -> list[dict]:
     """Reads already-indexed library_items -- never rescans (point 16: a
     full rescan is a separate, explicit POST /api/scan). Filtering/sorting
@@ -463,6 +491,7 @@ def list_library(
         _library_entry_view(
             conn, row, latest_jobs.get(row["id"]), library_items=all_items,
             installed_on_device_base_ids=installed_on_device_base_ids,
+            connected_device_ids=connected_device_ids, sd_presence=sd_presence,
         )
         for row in in_scope
     ]
@@ -565,6 +594,7 @@ def list_library_view(
     format_filter: Optional[str] = None, sort: str = "date_added", reverse: bool = True,
     group_filter: str = "all", not_installed: bool = False,
     installed_on_device_base_ids: Optional[set[str]] = None,
+    connected_device_ids: Optional[set[str]] = None, sd_presence: Optional[dict[int, bool]] = None,
 ) -> dict:
     """The Library page's primary read: groups GAME_PACKAGE entries by
     (derived) base TITLE_ID -- base game + nested updates/DLC/matching
@@ -615,6 +645,7 @@ def list_library_view(
         _library_entry_view(
             conn, row, latest_jobs.get(row["id"]), library_items=all_items,
             installed_on_device_base_ids=installed_on_device_base_ids,
+            connected_device_ids=connected_device_ids, sd_presence=sd_presence,
         )
         for row in in_scope
     ]

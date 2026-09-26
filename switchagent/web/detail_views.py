@@ -124,6 +124,7 @@ def build_game_detail_view(conn, ctx: WebContext, raw_base_title_id: str) -> Opt
     # regardless of what the Library page showed for the exact same family.
     view = services.list_library_view(
         conn, kind="games", installed_on_device_base_ids=ctx.get_known_installed_title_ids(),
+        connected_device_ids=ctx.get_connected_device_ids(), sd_presence=ctx.get_sd_presence(),
     )
     family = next((g for g in view["games"] if g["base_title_id"] == base_title_id), None)
     if family is None:
