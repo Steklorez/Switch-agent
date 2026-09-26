@@ -7,6 +7,11 @@ Entries are one sentence per change, three to five lines per release, and
 only what a user would notice — no internals, no reasoning, no history.
 Those belong in the commit message. See [CLAUDE.md](CLAUDE.md#how-to-write-an-entry).
 
+## v1.0.20
+
+- A homebrew app on its own installs: a lone .nro, or a zip with one inside, goes to `switch/<name>/` on the SD card, named after the app itself.
+- When the Switch stops responding mid-install, the install waits instead of hanging, and continues where it stopped once the Switch is reconnected or MTP is restarted in DBI.
+
 ## v1.0.19
 
 - A panel along the bottom of every page shows what is being installed, one line per game with its progress.
