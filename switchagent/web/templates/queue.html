@@ -89,7 +89,7 @@
           </div>
           {% endif %}
           {% if j.status == "WAITING_FOR_DEVICE" %}
-          <div class="job-meta">Waiting for {{ j.target_device_label }} to reconnect — resumes automatically</div>
+          <div class="job-meta">{% if j.auto_resume and j.error %}{{ j.error }}{% else %}Waiting for {{ j.target_device_label }} to reconnect — resumes automatically{% endif %}</div>
           {% elif j.error %}<div class="job-error" title="{{ j.error }}">{{ j.error }}</div>{% endif %}
           {% if j.possibly_stalled %}
           <div class="job-stall-warning">

@@ -301,7 +301,7 @@
     `;
     setRowName(li.querySelector(".job-name"), j.display_name, j.variant_role);
     li.querySelector(".job-meta").textContent = waitingForDevice
-      ? `Waiting for ${j.target_device_label} to reconnect — resumes automatically`
+      ? ((j.auto_resume && j.error) || `Waiting for ${j.target_device_label} to reconnect — resumes automatically`)
       : `${j.target_device_label} · ${j.target_storage} · attempt ${j.attempt_count} · created ${j.created_at}`;
     li.querySelector(".status-pill").textContent = statusLabel(j);
     if (progressTextHtml) {

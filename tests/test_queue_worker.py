@@ -165,7 +165,7 @@ def test_device_b_continues_serving_its_own_job_normally(isolated_db):
     assert db.get_job(conn, job_b)["status"] == "DONE"
 
 
-def test_device_a_disconnect_mid_transfer_marks_interrupted_not_failed_over(isolated_db):
+def test_device_a_disconnect_mid_transfer_waits_for_device_a_not_failed_over(isolated_db):
     conn, inbox_dir = isolated_db
     parent, child, registry = _two_backends()
     parent.arm_failure("disconnect")  # present at connect() time, drops during the actual send
@@ -177,7 +177,7 @@ def test_device_a_disconnect_mid_transfer_marks_interrupted_not_failed_over(isol
     outcome = queue_worker.run_worker_once(conn, registry)
 
     assert outcome.job_id == job_a
-    assert outcome.status == "INTERRUPTED"
+    assert outcome.status == "WAITING_FOR_DEVICE"
     assert db.get_job(conn, job_a)["target_device_id"] == "mock-switch-parent"
     assert child.storage_tree("SD_INSTALL").list_files() == []
 
@@ -420,7 +420,7 @@ def test_done_job_records_install_history(isolated_db):
 def test_interrupted_job_records_install_history(isolated_db):
     conn, inbox_dir = isolated_db
     parent, _child, registry = _two_backends()
-    parent.arm_failure("disconnect")
+    parent.arm_failure("crash")
     name = "GameA [0100000000010000][v0].nsp"
     item_id = _make_item(conn, inbox_dir, name, b"content A", "0100000000010000")
     _make_confirmed_job(conn, inbox_dir, name, item_id, "mock-switch-parent")
@@ -1028,7 +1028,7 @@ def test_restart_recovers_a_partially_delivered_job_and_resume_still_works(isola
     db.confirm_job(conn, job_id)
 
     dest_b = f"atmosphere/contents/{title_id}/romfs/b_second.bin"
-    parent.arm_failure("disconnect", dest_path=dest_b)
+    parent.arm_failure("crash", dest_path=dest_b)
     outcome1 = queue_worker.run_worker_once(conn, registry)
     assert outcome1.status == "INTERRUPTED"
 

@@ -388,7 +388,7 @@ def test_interrupted_job_keeps_staging_until_retry_succeeds_then_cleans_up(isola
     conn, _inbox = isolated_db
     from switchagent import config
     parent, registry = _backend()
-    parent.arm_failure("disconnect", storage="SD_INSTALL", dest_path=BASE_NAME)
+    parent.arm_failure("crash", storage="SD_INSTALL", dest_path=BASE_NAME)
     item_id = _make_archive_library_item(conn, config.LIBRARY_DIR, "single.zip", {BASE_NAME: b"payload"})
     result = _confirm(conn, item_id)
     job_id = result["created"][0]["job_id"]

@@ -56,7 +56,7 @@ def test_interrupted_multi_file_retry_resumes_without_already_exists_error(isola
     db.confirm_job(conn, job_id)
 
     dest_c = f"atmosphere/contents/{title_id}/romfs/c_third.bin"
-    backend.arm_failure("disconnect", dest_path=dest_c)
+    backend.arm_failure("crash", dest_path=dest_c)
 
     outcome1 = queue_worker.run_worker_once(conn, registry)
     assert outcome1.status == "INTERRUPTED"
