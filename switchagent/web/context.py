@@ -211,6 +211,15 @@ class WebContext:
         # connect's fresh CSV read is what's authoritative from then on.
         self._locally_confirmed_installs: dict[str, set[str]] = {}  # device_id -> base_title_ids
 
+        # device_id -> {library item id: is it on that SD card right now} for
+        # SD_FILES items (a switch/ folder, a lone .nro): the one kind whose
+        # presence can be checked directly, file by file, since DBI's
+        # Installed Games list only knows installed titles. Read when a
+        # device connects and with every storage refresh (check_sd_files);
+        # connected-only, pruned exactly like _installed_games_cache. Guarded
+        # by _installed_games_cache_lock.
+        self._sd_presence: dict[str, dict[int, bool]] = {}
+
         # Worker heartbeat (UI-001/UI-006): updated once per _worker_loop
         # iteration, whether or not that iteration found any work -- this
         # is "the worker thread is alive and ticking", a different signal
@@ -266,6 +275,7 @@ class WebContext:
         )
         storage_snapshot: dict[str, list] = {}
         installed_games_snapshot: dict[str, set[str]] = {}
+        sd_presence_snapshot: dict[str, dict[int, bool]] = {}
         for device_id in self.registry.known_device_ids():
             backend = self.registry.get(device_id)
             try:
@@ -308,6 +318,7 @@ class WebContext:
                     log.exception("failed to refresh installed-games snapshot for a device")
                 finally:
                     self._note_device_activity(device_id, None)
+                sd_presence_snapshot[device_id] = check_sd_files(conn, backend)
         with self._device_cache_lock:
             self._device_cache = live
         with self._device_activity_lock:
@@ -332,6 +343,8 @@ class WebContext:
             self._locally_confirmed_installs = {
                 key: value for key, value in self._locally_confirmed_installs.items() if key in live_ids
             }
+            self._sd_presence = {key: value for key, value in self._sd_presence.items() if key in live_ids}
+            self._sd_presence.update(sd_presence_snapshot)
 
         # By explicit request: a connection-state change in EITHER
         # direction -- a device dropping OR a fresh connect (this
@@ -422,6 +435,24 @@ class WebContext:
             ids |= {tid for ids in self._locally_confirmed_installs.values() for tid in ids}
             return ids
 
+    def get_connected_device_ids(self) -> set[str]:
+        """The devices connected right now, from the worker thread's last
+        observation -- a plain cache read, like get_known_devices()."""
+        with self._device_cache_lock:
+            return {device.device_id for device in self._device_cache}
+
+    def get_sd_presence(self) -> dict[int, bool]:
+        """{library item id: on the SD card} across every connected device,
+        for SD_FILES items that were checked (see check_sd_files). An item
+        absent from the dict was not checked -- no information, never
+        "not there"; present on any connected card counts as present."""
+        merged: dict[int, bool] = {}
+        with self._installed_games_cache_lock:
+            for per_device in self._sd_presence.values():
+                for item_id, present in per_device.items():
+                    merged[item_id] = merged.get(item_id, False) or present
+        return merged
+
     def note_install_job_outcome(self, conn, outcome: Optional["queue_worker.JobRunOutcome"]) -> None:
         """Called once per _worker_loop pass, right after run_worker_once()
         (see below) -- the only place that both knows a job just reached a
@@ -435,7 +466,13 @@ class WebContext:
         if outcome is None or outcome.status not in ("DONE", "DONE_UNVERIFIED"):
             return
         job = db.get_job(conn, outcome.job_id)
-        if job is None or job["target_storage"] != STORAGE_SD_INSTALL or job["library_item_id"] is None:
+        if job is None or job["library_item_id"] is None:
+            return
+        if job["target_storage"] != STORAGE_SD_INSTALL:
+            # Its files were just written to that card, each one checked:
+            # present until the next check_sd_files says otherwise.
+            with self._installed_games_cache_lock:
+                self._sd_presence.setdefault(job["target_device_id"], {})[job["library_item_id"]] = True
             return
         item = db.get_library_item_by_id(conn, job["library_item_id"])
         if item is None:
@@ -960,3 +997,30 @@ def build_mock_context(
         return None
 
     return WebContext(db_path=db_path, registry=registry, discover_devices=_noop_discover)
+
+
+def check_sd_files(conn, backend) -> dict[int, bool]:
+    """{library item id: are its files on this device's SD card} for every
+    SD_FILES item in the library -- what its .nro (or, with none, its
+    switch/<app> folders) is checked by, since that is what the Homebrew
+    Menu goes by. Stops at the first failure and returns what it has: a
+    console that does not answer one lookup will not answer the next, and
+    an item it never got to is simply unknown, never "not there"."""
+    from .. import sd_files
+    from ..model import ContentType
+    from ..transfer import STORAGE_SD_CARD
+
+    result: dict[int, bool] = {}
+    for row in db.list_library_items(conn):
+        if row["content_type"] != ContentType.SD_FILES.value or row["status"] == db.LIBRARY_ITEM_RETIRED:
+            continue
+        summary = sd_files.sd_summary_of(row)
+        paths = (summary.nro or summary.apps) if summary else ()
+        if not paths:
+            continue
+        try:
+            result[row["id"]] = all(backend.exists(STORAGE_SD_CARD, path) for path in paths)
+        except Exception:  # noqa: BLE001 -- a presence check must never break refresh_devices
+            log.warning("SD presence check stopped (%d item(s) checked)", len(result), exc_info=True)
+            break
+    return result
