@@ -121,7 +121,7 @@ def test_ui_retry_exact_update_after_restart_reuses_payload_and_cleans_history_s
     result = confirm(client, [item]).json()
     base, update, dlc = [entry["job_id"] for entry in result["created"]]
     backend = web_ctx.registry.get("mock-switch-parent")
-    backend.arm_failure("disconnect", storage="SD_INSTALL", dest_path=UPDATE_NAME)
+    backend.arm_failure("crash", storage="SD_INSTALL", dest_path=UPDATE_NAME)
     with db.open_db(web_ctx.db_path) as conn:
         assert queue_worker.run_worker_once(conn, web_ctx.registry).job_id == base
         assert queue_worker.run_worker_once(conn, web_ctx.registry).status == "INTERRUPTED"

@@ -270,7 +270,7 @@ def test_a_listing_never_read_is_not_started_with_one_file(tmp_path, monkeypatch
 import hashlib
 
 from switchagent.mtp.base import TransferStatus
-from switchagent.mtp.errors import FileAlreadyExistsError
+from switchagent.mtp.errors import DeviceDisconnectedError, FileAlreadyExistsError
 
 
 class _Card:
@@ -305,7 +305,7 @@ class _CardSession:
             self.fail_writes -= 1
             if self.leave_partial:
                 self.card.files[filename] = b"half"
-            raise wpd.ComError(0x80070079, "IStream::Write")
+            raise wpd.ComError(getattr(self, "error_hr", 0x80070079), "IStream::Write")
         data = source_path.read_bytes()
         self.card.files[filename] = data
         self.writes.append(filename)
@@ -372,11 +372,27 @@ def test_our_own_half_written_file_is_the_one_thing_replaced(tmp_path, monkeypat
     assert card.files["a.ctex"] == b"asset bytes"
 
 
-def test_two_stalls_in_a_row_still_fall_back_to_the_shell(tmp_path, monkeypatch):
+def test_two_stalls_in_a_row_mean_the_console_is_not_answering(tmp_path, monkeypatch):
+    """Not a transport to route around: the Shell fallback has no timeout
+    and would hold the job until the cable was replugged (real case,
+    2026-09-25). The worker waits for the console instead."""
     card = _Card()
     backend, shell = _backend_over(
         card, [_CardSession(card, fail_writes=1), _CardSession(card, fail_writes=1)], monkeypatch,
     )
+    source, _digest = _source(tmp_path)
+    with pytest.raises(DeviceDisconnectedError, match="stopped responding"):
+        backend.send_file("SD_CARD", "switch/x/a.ctex", source)
+    assert shell == []
+    assert backend._wpd_unavailable is False
+
+
+def test_two_other_failures_in_a_row_still_fall_back_to_the_shell(tmp_path, monkeypatch):
+    card = _Card()
+    first, second = _CardSession(card, fail_writes=1), _CardSession(card, fail_writes=1)
+    for session in (first, second):
+        session.error_hr = 0x80004005
+    backend, shell = _backend_over(card, [first, second], monkeypatch)
     source, _digest = _source(tmp_path)
     backend.send_file("SD_CARD", "switch/x/a.ctex", source)
     assert [name for name, _ in shell] == ["a.ctex"]

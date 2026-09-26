@@ -458,6 +458,19 @@ def load_replaceable(job_id: int) -> set[str]:
     return set(_read_progress(job_id).get("replace", []))
 
 
+def mark_replaceable(job_id: int, dest_relative_path: str) -> None:
+    """The file this job was writing when its connection dropped: it may
+    be half written, and it is the only one its own resumed attempt may
+    replace (same rule as inherit_progress's `in_flight`)."""
+    data = _read_progress(job_id)
+    replace = set(data.get("replace", []))
+    if dest_relative_path in set(data.get("delivered", [])):
+        return
+    replace.add(dest_relative_path)
+    data["replace"] = sorted(replace)
+    _write_progress(job_id, data)
+
+
 def mark_delivered(job_id: int, dest_relative_path: str) -> None:
     data = _read_progress(job_id)
     delivered = set(data.get("delivered", []))

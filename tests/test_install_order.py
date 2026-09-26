@@ -392,7 +392,7 @@ def test_mod_retry_after_its_own_interruption_is_not_mistaken_for_a_failed_base(
     conn, library_dir = isolated_db
     from switchagent import config, scanner, preview as preview_mod
     parent, _child, registry = _two_backends()
-    parent.arm_failure("disconnect", dest_path="atmosphere/contents/0100000000010000/romfs/asset.bin")
+    parent.arm_failure("crash", dest_path="atmosphere/contents/0100000000010000/romfs/asset.bin")
 
     mod_dir = config.LIBRARY_DIR / "SomeMod" / "atmosphere" / "contents" / "0100000000010000" / "romfs"
     mod_dir.mkdir(parents=True)

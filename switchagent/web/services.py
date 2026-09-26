@@ -1114,6 +1114,7 @@ def _job_view(conn, row) -> dict:
         "bytes_done": row["bytes_done"],
         "attempt_count": row["attempt_count"],
         "error": row["error"],
+        "auto_resume": bool(row["auto_resume"]),
         "created_at": row["created_at"],
         "started_at": row["started_at"],
         "finished_at": row["finished_at"],
