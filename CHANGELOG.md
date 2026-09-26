@@ -7,6 +7,13 @@ Entries are one sentence per change, three to five lines per release, and
 only what a user would notice — no internals, no reasoning, no history.
 Those belong in the commit message. See [CLAUDE.md](CLAUDE.md#how-to-write-an-entry).
 
+## v1.0.21
+
+- A new Amiibo tab, once emuiibo is on a console: install virtual amiibo collections, see and remove what is on the Switch.
+- A game's amiibo show on its card and install with it, with an offer to install emuiibo where the Switch lacks it.
+- Beta, in Settings: an Add-ons tab that installs and updates homebrew such as Ultrahand, FPSLocker, Status Monitor and JKSV from their GitHub releases.
+- Tools that come with a game, like Animal Crossing's Events Unlock, appear in its card.
+
 ## v1.0.20
 
 - A homebrew app on its own installs: a lone .nro, or a zip with one inside, goes to `switch/<name>/` on the SD card, named after the app itself.
