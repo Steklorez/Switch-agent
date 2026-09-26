@@ -56,12 +56,19 @@ def installed_by_us(conn, device_id: str, addon: Addon) -> Optional[str]:
     """The version SwitchAgent itself last installed of this add-on on this
     console -- what a console read cannot say for a program too big to read
     back (JKSV, Moonlight) or one with no version inside (SaltyNX)."""
+    return installed_record(conn, device_id, addon)[0]
+
+
+def installed_record(conn, device_id: str, addon: Addon) -> tuple[Optional[str], Optional[str]]:
+    """(version, when) of SwitchAgent's own last install of this add-on on
+    this console -- (None, None) when it never installed it there."""
     import json
 
     from ..model import ContentType
 
     rows = conn.execute(
-        "SELECT li.content_type, li.details_json FROM jobs j JOIN library_items li ON li.id = j.library_item_id "
+        "SELECT li.content_type, li.details_json, j.finished_at FROM jobs j "
+        "JOIN library_items li ON li.id = j.library_item_id "
         "WHERE j.target_device_id = ? AND j.status IN ('DONE', 'DONE_UNVERIFIED') AND li.content_type IN (?, ?) "
         "ORDER BY j.finished_at DESC",
         (device_id, ContentType.ADDON.value, ContentType.EMUIIBO.value),
@@ -72,11 +79,11 @@ def installed_by_us(conn, device_id: str, addon: Addon) -> Optional[str]:
         except ValueError:
             continue
         if addon.install == "emuiibo" and row["content_type"] == ContentType.EMUIIBO.value:
-            return (details.get("emuiibo") or {}).get("version")
+            return (details.get("emuiibo") or {}).get("version"), row["finished_at"]
         found = details.get("addon") or {}
         if row["content_type"] == ContentType.ADDON.value and found.get("id") == addon.id:
-            return found.get("version")
-    return None
+            return found.get("version"), row["finished_at"]
+    return None, None
 
 
 def update_offer(conn, device_id: Optional[str], addon: Addon, status: Optional[dict],
@@ -149,6 +156,11 @@ def page(conn, ctx, fingerprint: Optional[str] = None) -> dict:
             status = {**status, "label": status["label"] + (
                 f" · {update['to']} is available" if update["installed"] else
                 f" · version not known, {update['to']} is the latest")}
+        elif latest and status and state == "installed" and status.get("version")                 and not addons_mod.is_newer(latest, status["version"]):
+            # Confirmed by GitHub, not just "no news": said so.
+            status = {**status, "label": status["label"] + " · latest"}
+        record = (installed_record(conn, chosen["device_id"], addon)
+                  if chosen and state in ("installed", "outdated", "partial", "other") else (None, None))
         if update:
             button = f"Update to {update['to']}" if update["installed"] else "Reinstall latest"
         else:
@@ -167,6 +179,13 @@ def page(conn, ctx, fingerprint: Optional[str] = None) -> dict:
                                 and (state != "installed" or update)),
             "button": button,
             "managed": managed,
+            "stars": releases["stars"].get(addon.id),
+            # For sorting (addons.js): 3 update waiting, 2 installed, 1
+            # partly there / someone else's in its place, 0 not there.
+            "rank": (3 if update and update["installed"] else
+                     2 if state in ("installed", "outdated") else
+                     1 if state in ("partial", "other") else 0),
+            "installed_at": record[1],
             "with": ([r.name for r in plan_install(conn, chosen["device_id"], addon.id) if r.id != addon.id]
                      if addon.installable and chosen else []),
         })

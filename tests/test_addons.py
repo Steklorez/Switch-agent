@@ -389,15 +389,20 @@ class FakeGitHub:
     """GitHub's release API and asset downloads for several repositories,
     each served after a redirect to release-assets.githubusercontent.com."""
 
-    def __init__(self, releases: dict[str, tuple[str, str, bytes]], *, bad_digest=()):
+    def __init__(self, releases: dict[str, tuple[str, str, bytes]], *, bad_digest=(), stars=None):
         self.releases = releases
         self.bad_digest = set(bad_digest)
+        self.stars = stars or {}
         self.requests = []
 
     def __call__(self, request, timeout=None):
+        import urllib.error
+
         url = request.full_url
         self.requests.append(url)
         for repo, (tag, asset, data) in self.releases.items():
+            if url == f"{github_release.API_ROOT}/{repo}":
+                return _Response(json.dumps({"stargazers_count": self.stars.get(repo, 100)}).encode(), url)
             if url == github_release.latest_release_api(repo):
                 digest = "0" * 64 if repo in self.bad_digest else hashlib.sha256(data).hexdigest()
                 return _Response(json.dumps({
@@ -411,7 +416,7 @@ class FakeGitHub:
                 }).encode(), url)
             if url.startswith(f"https://github.com/{repo}/releases/download/"):
                 return _Response(data, "https://release-assets.githubusercontent.com/x")
-        raise AssertionError(f"unexpected request {url}")
+        raise urllib.error.HTTPError(url, 404, "Not Found", {}, None)
 
 
 def _fake_github(**kw):
@@ -535,15 +540,26 @@ def _fingerprint(client, name):
     return next(d["device_fingerprint"] for d in client.get("/api/devices").json() if name in d["display_name"])
 
 
-def test_the_tab_shows_every_entry_with_its_instructions(client):
+def test_the_list_is_short_and_each_add_on_has_a_page_of_its_own(client):
     html = client.get("/addons").text
     assert 'href="/addons" class="active"' in html
     for addon in addons.load_catalog():
-        assert f'id="addon-{addon.id}"' in html
-    assert "Using it" in html and "When something is wrong" in html
-    assert "<kbd>R3</kbd>" in html
-    assert "<code>atmosphere/contents/0100000000000352</code>" in html
-    assert "addon-emuiibo-overlay.svg" in html
+        assert f'id="addon-{addon.id}"' in html and f'href="/addons/{addon.id}?device=' in html
+        assert addon.icon and f"/static/{addon.icon}" in html
+    # The instructions are on the add-on's own page, not the list.
+    assert "Using it" not in html and "<kbd>" not in html
+    page = client.get("/addons/emuiibo").text
+    assert "Using it" in page and "When something is wrong" in page
+    assert "<kbd>R3</kbd>" in page
+    assert "<code>atmosphere/contents/0100000000000352</code>" in page
+    assert "addon-emuiibo-overlay.svg" in page
+    assert 'href="/addons/ultrahand' in page                      # what it needs links to its page
+    assert client.get("/addons/nope").status_code == 404
+
+
+def test_every_add_on_has_an_icon_of_its_own():
+    for addon in addons.load_catalog():
+        assert addon.icon and (addons.STATIC_DIR / addon.icon).is_file(), addon.id
 
 
 def test_a_switch_with_old_emuiibo_is_offered_the_update(client):
@@ -636,8 +652,15 @@ def test_the_latest_releases_are_asked_of_github_and_remembered(tmp_path):
     assert releases["emuiibo"]["version"] == "1.1.3"
     assert releases["jksv"]["version"] == "12/02/2025"
     assert "fizeau" not in releases           # GitHub (here) does not answer for it: not guessed
-    # Only the release API -- nothing is downloaded by a check.
-    assert all("/releases/latest" in u for u in github.requests)
+    # Only the API (releases, and each repo's stars) -- nothing is downloaded by a check.
+    assert all(u.startswith(github_release.API_ROOT) for u in github.requests)
+    assert not any("/releases/download/" in u for u in github.requests)
+    assert snapshot["stars"]["ultrahand"] == 100
+    # Stars already known are asked again only after a week; releases every check.
+    github.requests.clear()
+    checker.check_now()
+    known = {f"{github_release.API_ROOT}/{repo}" for repo in github.releases}
+    assert github.requests and not known & set(github.requests)
     assert snapshot["checked_at"] and not snapshot["checking"]
     # After a restart the page has them before the next check.
     again = ReleaseChecker(cache, opener=FakeGitHub({}))
@@ -648,14 +671,14 @@ def test_the_checker_runs_at_start_and_then_waits_a_day(tmp_path):
     from switchagent.web.addons_service import ReleaseChecker
 
     github = _fake_github_with_emuiibo()
-    checker = ReleaseChecker(tmp_path / "c.json", opener=github, interval_seconds=3600)
+    checker = ReleaseChecker(tmp_path / "c.json", opener=github, interval_seconds=3600, enabled=lambda: True)
     checker.start()
     deadline = time.monotonic() + 10
     while checker.snapshot()["checked_at"] is None and time.monotonic() < deadline:
         time.sleep(0.02)
     checker.stop()
     assert checker.latest("fpslocker")["version"] == "3.3.2"
-    assert len([u for u in github.requests if "FPSLocker" in u]) == 1
+    assert len([u for u in github.requests if "FPSLocker/releases/latest" in u]) == 1
 
 
 def _set_console(client, name, files, programs, *, kefir=False):
@@ -814,3 +837,27 @@ def test_an_entry_the_last_read_did_not_look_for_is_not_called_missing(bare_clie
     assert entries["fpslocker"]["status"]["state"] == "unknown"
     assert entries["fpslocker"]["status"]["label"].startswith("not checked yet")
     assert entries["fizeau"]["status"]["state"] == "missing"
+
+
+def _run_loop_once(checker):
+    checker.start()
+    time.sleep(0.3)
+    checker.stop()
+
+
+def test_with_the_beta_features_off_nothing_goes_to_github(tmp_path):
+    from switchagent.web.addons_service import ReleaseChecker
+
+    github = _fake_github_with_emuiibo()
+    _run_loop_once(ReleaseChecker(tmp_path / "c.json", opener=github, interval_seconds=3600))  # preferences: off
+    assert github.requests == []
+
+
+def test_a_start_soon_after_the_last_check_does_not_ask_again(tmp_path):
+    from switchagent.web.addons_service import ReleaseChecker
+
+    cache = tmp_path / "c.json"
+    ReleaseChecker(cache, opener=_fake_github_with_emuiibo(), enabled=lambda: True).check_now()
+    github = _fake_github_with_emuiibo()
+    _run_loop_once(ReleaseChecker(cache, opener=github, interval_seconds=3600, enabled=lambda: True))
+    assert github.requests == []

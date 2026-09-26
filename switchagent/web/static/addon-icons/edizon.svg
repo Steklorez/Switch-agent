@@ -1,0 +1,10 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" role="img" aria-label="EdiZon Overlay">
+  <!-- SwitchAgent's own icon for EdiZon Overlay: the project ships none of its own. -->
+  <defs><linearGradient id="g" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#ffa726"/><stop offset="1" stop-color="#e65100"/></linearGradient></defs>
+  <rect width="256" height="256" rx="56" fill="url(#g)"/>
+  <g fill="none" stroke="#fff" stroke-width="14" stroke-linecap="round" stroke-linejoin="round">
+    <rect x="52" y="112" width="112" height="56" rx="28"/>
+    <circle cx="136" cy="140" r="16" fill="#fff"/>
+    <path d="M190 58 v40 M170 78 h40 M190 150 v20 M180 160 h20"/>
+  </g>
+</svg>

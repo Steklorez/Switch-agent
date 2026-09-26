@@ -237,8 +237,6 @@
         el("span", { class: "amiibo-component-mark", "aria-hidden": "true", text: comp.present ? "✓" : "✕" }),
         el("span", { class: "amiibo-component-name", text: comp.name + version }),
         el("span", { class: "amiibo-component-purpose", text: comp.purpose }),
-        comp.present ? null : el("a", { class: "amiibo-component-source", href: comp.source,
-          target: "_blank", rel: "noopener", text: comp.in_release ? "emuiibo releases →" : "releases →" }),
       ));
     }
     section.append(list);
@@ -281,7 +279,7 @@
     section.append(el("p", { class: "settings-hint amiibo-howto" },
       "emuiibo starts with the Switch: restart it after installing or updating emuiibo. New amiibo show up the " +
       "next time the overlay is opened. In a game, hold L + D-pad Down and press the right stick, then choose emuiibo. ",
-      el("a", { href: "/addons#addon-emuiibo", text: "How to use emuiibo →" })));
+      view.addons_tab ? el("a", { href: "/addons/emuiibo", text: "How to use emuiibo →" }) : null));
     return section;
   }
 
@@ -385,34 +383,14 @@
 
   function renderLibrary() {
     const section = el("section", { class: "detail-section amiibo-panel", id: "amiibo-library" });
-    section.append(el("div", { class: "amiibo-panel-head" }, el("h3", { text: "In your Library" })));
-    if (!view.collections.length && !view.releases.length) {
-      section.append(el("p", { class: "settings-hint", text: "No virtual amiibo and no emuiibo release in your Library " +
-        "folders yet. A folder (or archive) of amiibo — each one a folder holding amiibo.json and amiibo.flag, " +
-        "as emuiigen makes them — is found by the next scan." }));
-    }
-    const busyDownload = downloading(view.activity && view.activity.download);
-    section.append(el("div", { class: "amiibo-release amiibo-release-get" },
-      el("span", { class: "settings-hint", text: "emuiibo itself: SwitchAgent can fetch its current release from " +
-        "github.com/XorTroll/emuiibo into your Library." }),
-      el("button", { type: "button", class: "btn btn-secondary btn-small", disabled: busyDownload,
-        text: busyDownload ? "Downloading…" : "Download the current emuiibo",
-        onclick: (ev) => downloadEmuiibo(ev.currentTarget, false) })));
-    for (const r of view.releases) {
-      section.append(el("div", { class: "amiibo-release" },
-        el("span", { class: "amiibo-release-name", text: r.name }),
-        el("span", { class: "settings-hint", text: "emuiibo " + (r.version || "(version unknown)") +
-          (r.outdated ? " — outdated, " + view.latest_version + " is current" : "") }),
-        el("button", { type: "button", class: "btn btn-secondary btn-small",
-          disabled: !(view.device && view.device.connected) || !r.can_install, text: "Install",
-          onclick: (ev) => installItems(ev.currentTarget, [r.id], null) }),
-      ));
-    }
-    for (const tool of view.pc_tools || []) {
-      section.append(el("div", { class: "amiibo-release" },
-        el("span", { class: "amiibo-release-name", text: tool.name }),
-        el("span", { class: "settings-hint", text: "A PC app for making virtual amiibo — it runs on a PC; " +
-          "nothing of it goes to the Switch." })));
+    // Only amiibo to put on the Switch. emuiibo itself is the panel above
+    // (one button when it needs installing or updating); its release files
+    // and PC tools in the Library are SwitchAgent's business, not shown.
+    section.append(el("div", { class: "amiibo-panel-head" }, el("h3", { text: "Amiibo in your Library" })));
+    if (!view.collections.length) {
+      section.append(el("p", { class: "settings-hint", text: "No virtual amiibo in your Library folders yet. " +
+        "A folder (or archive) of amiibo — each one a folder holding amiibo.json and amiibo.flag — is found by " +
+        "the next scan." }));
     }
     for (const col of view.collections) section.append(renderCollection(col));
     return section;

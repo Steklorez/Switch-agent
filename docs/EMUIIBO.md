@@ -25,8 +25,8 @@ Studied 2026-09-25:
 |---|---|---|---|
 | emuiibo sysmodule | `atmosphere/contents/0100000000000352/exefs.nsp` + `flags/boot2.flag` (+ `toolbox.json`) | emuiibo release | answers games' amiibo requests with the active virtual amiibo |
 | emuiibo overlay | `switch/.overlays/emuiibo.ovl` (1.x also `emuiibo/overlay/lang/*.json`) | the **same** release | the only way to pick the active amiibo; refuses any other emuiibo version than its own |
-| nx-ovlloader | `atmosphere/contents/420000000007E51A/exefs.nsp` + `flags/boot2.flag` | WerWolv/nx-ovlloader | loads overlays |
-| Tesla Menu | `switch/.overlays/ovlmenu.ovl` | WerWolv/Tesla-Menu (Ultrahand ships the same file name) | opens overlays: L + D-pad Down + R3 |
+| nx-ovlloader | `atmosphere/contents/420000000007E51A/exefs.nsp` + `flags/boot2.flag` | ppkantorski/nx-ovlloader, inside Ultrahand's release | loads overlays |
+| overlay menu | `switch/.overlays/ovlmenu.ovl` | Ultrahand Overlay (Tesla Menu, unmaintained since 2023, used the same file) | opens overlays: L + D-pad Down + R3 |
 
 Atmosphère is assumed -- DBI's MTP responder is running on it. emuiibo
 reads everything at boot: after copying anything, the console has to be
@@ -52,8 +52,9 @@ offers "Download and install" instead (`switchagent/emuiibo_download.py`,
   for the chosen console. A release of that version already in the
   Library is installed as it is, not downloaded again.
 
-Nothing fetched is ever run on this PC. It does **not** install Tesla: the
-Amiibo page says it is missing and links its releases page.
+Nothing fetched is ever run on this PC. When the console lacks an overlay
+menu, Ultrahand (which carries nx-ovlloader) is installed first, in the same
+click; a Tesla Menu already there does the same job and is left alone.
 
 An emuiibo release is installed by what emuiibo is made of -- the three
 places above -- and nothing else from the archive. Its own program files
@@ -108,13 +109,14 @@ sub-folder). Still several: nobody. An owned collection is a part of its
 game's card -- an "N amiibo" tag next to updates/DLC/mods, a row among its
 parts, a section on its game page -- and selecting the game installs it
 after the game. One without a game is not shown among the games at all: it
-is on the Amiibo tab, with emuiibo's releases and PC tools, and Library says
-in one line how many are there (before there is an Amiibo tab, that line
-points to emuiibo on Add-ons).
+is on the Amiibo tab, and Library says in one line how many there are
+(before there is an Amiibo tab, that line points to where emuiibo is
+installed from). emuiibo's own release files are not shown anywhere: the
+Amiibo page offers one button when emuiibo needs installing or updating.
 
 emuiibo's PC tools -- emutool (C#, up to 1.0) and emuiigen (Java, 1.1+),
-which make virtual amiibo from AmiiboAPI's list -- are recognised and shown
-as **not for Switch**, not as something to review.
+which make virtual amiibo from AmiiboAPI's list -- are recognised as **not
+for Switch**: off the grid, never something to review, not shown.
 
 ## Installing amiibo
 
@@ -227,7 +229,6 @@ verification exists for:
 
 ## Not done, deliberately
 
-- Tesla and nx-ovlloader are not installed, only pointed at.
 - Enabling/disabling an amiibo by its flag is not offered; installing and
   removing are.
 - A raw dump sent to a console is converted by emuiibo into a folder named

@@ -767,7 +767,11 @@ def list_library_view(
     family_key_fn = _FAMILY_SORT_KEYS.get(sort, _FAMILY_SORT_KEYS["date_added"])
     games.sort(key=family_key_fn, reverse=reverse)
 
-    return {"kind": "games", "games": games, "on_amiibo_tab": len(elsewhere), "on_addons_tab": len(addon_items)}
+    # Only what a person looks for there: amiibo that came with no game.
+    # emuiibo's own releases and its PC tools are files SwitchAgent uses,
+    # not something to show anyone.
+    amiibo_left = sum(1 for e in elsewhere if e["content_type"] == ContentType.AMIIBO.value)
+    return {"kind": "games", "games": games, "on_amiibo_tab": amiibo_left, "on_addons_tab": len(addon_items)}
 
 
 def _lives_on_amiibo_tab(entry: dict) -> bool:

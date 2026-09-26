@@ -325,6 +325,12 @@ def emuiibo_offer(conn, ctx, device_id: str) -> dict:
     }
 
 
+def _addons_tab() -> bool:
+    from .. import preferences
+
+    return preferences.beta_enabled()
+
+
 def page(conn, ctx, fingerprint: Optional[str] = None) -> dict:
     from . import services
     from ..mtp.windows import device_fingerprint
@@ -361,7 +367,8 @@ def page(conn, ctx, fingerprint: Optional[str] = None) -> dict:
         "advice": _advice(console, releases, bool(chosen and chosen["connected"])),
         "releases": releases,
         "collections": collections,
-        "pc_tools": library_pc_tools(conn),
+        # The emuiibo overlay's full instructions are on Add-ons, when it is on.
+        "addons_tab": _addons_tab(),
         "latest_version": emuiibo.LATEST_KNOWN_VERSION,
         "releases_url": emuiibo.RELEASES_URL,
     }

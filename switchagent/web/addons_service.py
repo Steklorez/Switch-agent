@@ -246,6 +246,20 @@ def _public(state: dict) -> dict:
 # ---------------------------------------------------------------------------
 
 CHECK_INTERVAL_SECONDS = 24 * 60 * 60
+# A start soon after the last check does not ask again: restarting the app a
+# few times must not spend GitHub's 60 requests an hour for an
+# unauthenticated client (the app's own update check shares them).
+START_RECHECK_AFTER_SECONDS = 60 * 60
+# Stars change slowly, and each is one more request against GitHub's 60 an
+# hour for an unauthenticated client: asked once a week.
+STARS_INTERVAL_SECONDS = 7 * 24 * 60 * 60
+
+
+def _rate_limited(exc: Exception) -> bool:
+    """GitHub refusing more requests for now: the rest of this round would
+    be refused too -- stop asking, keep what is known, try the next time."""
+    text = str(exc)
+    return "answered 403" in text or "answered 429" in text
 
 
 class ReleaseChecker:
@@ -261,16 +275,20 @@ class ReleaseChecker:
     the page has them right after a restart, before the next check."""
 
     def __init__(self, cache_path: Optional[Path] = None, *, opener=None,
-                 interval_seconds: float = CHECK_INTERVAL_SECONDS):
+                 interval_seconds: float = CHECK_INTERVAL_SECONDS, enabled=None):
         self.cache_path = Path(cache_path) if cache_path else None
         self._opener = opener
         self.interval_seconds = interval_seconds
         self._lock = threading.Lock()
         self._releases: dict[str, dict] = {}
+        self._stars: dict[str, dict] = {}          # addon id -> {"stars", "at"}
         self._checked_at: Optional[float] = None
         self._checking = False
         self._stop = threading.Event()
         self._thread: Optional[threading.Thread] = None
+        # Whether to ask GitHub at all: the Add-ons tab is a beta feature,
+        # and with it off nothing here goes to the network.
+        self._enabled = enabled
         self._load()
 
     # -- any thread --------------------------------------------------------
@@ -278,12 +296,17 @@ class ReleaseChecker:
     def snapshot(self) -> dict:
         with self._lock:
             return {"releases": {k: dict(v) for k, v in self._releases.items()},
+                    "stars": {k: v["stars"] for k, v in self._stars.items()},
                     "checked_at": self._checked_at, "checking": self._checking}
 
     def latest(self, addon_id: str) -> Optional[dict]:
         with self._lock:
             found = self._releases.get(addon_id)
             return dict(found) if found else None
+
+    @property
+    def running(self) -> bool:
+        return self._thread is not None and self._thread.is_alive()
 
     def start(self) -> None:
         if self._thread is not None:
@@ -300,9 +323,31 @@ class ReleaseChecker:
 
     # -- its own thread ----------------------------------------------------
 
+    def enabled(self) -> bool:
+        if self._enabled is not None:
+            return bool(self._enabled())
+        from .. import preferences
+
+        return preferences.beta_enabled()
+
+    def check_soon(self) -> None:
+        """Check now, on a thread of its own (the beta features were just
+        turned on) -- unless a check is running or has just been made."""
+        with self._lock:
+            recent = self._checked_at is not None and time.time() - self._checked_at < START_RECHECK_AFTER_SECONDS
+            if self._checking or recent:
+                return
+        threading.Thread(target=self.check_now, name="switchagent-addon-releases-now", daemon=True).start()
+
     def _loop(self) -> None:
+        first = True
         while not self._stop.is_set():
-            self.check_now()
+            with self._lock:
+                recent = (self._checked_at is not None
+                          and time.time() - self._checked_at < START_RECHECK_AFTER_SECONDS)
+            if self.enabled() and not (first and recent):
+                self.check_now()
+            first = False
             if self._stop.wait(self.interval_seconds):
                 return
 
@@ -332,9 +377,13 @@ class ReleaseChecker:
                     found[addon.id] = {"version": release.version, "page_url": release.page_url}
             except github_release.DownloadError as exc:
                 log.info("latest %s release not known: %s", addon.name, exc)
+                if _rate_limited(exc):
+                    break
             except Exception:  # noqa: BLE001 -- a check must never take the app down
                 log.exception("checking %s's latest release failed unexpectedly", addon.name)
+        stars = self._check_stars(catalog, kwargs)
         with self._lock:
+            self._stars.update(stars)
             self._releases.update(found)
             if found:
                 self._checked_at = time.time()
@@ -342,6 +391,29 @@ class ReleaseChecker:
         self._save()
         log.info("add-on releases checked: %s", ", ".join(f"{k} {v['version']}" for k, v in found.items()) or "none")
         return self.snapshot()
+
+    def _check_stars(self, catalog, kwargs) -> dict[str, dict]:
+        from .. import emuiibo_download
+
+        now = time.time()
+        found: dict[str, dict] = {}
+        for addon in catalog:
+            if self._stop.is_set():
+                break
+            with self._lock:
+                known = self._stars.get(addon.id)
+            if known and now - known.get("at", 0) < STARS_INTERVAL_SECONDS:
+                continue
+            repo = emuiibo_download.REPO if addon.install == "emuiibo" else addon.spec.repo
+            try:
+                found[addon.id] = {"stars": github_release.repo_stars(repo, **kwargs), "at": now}
+            except github_release.DownloadError as exc:
+                log.info("%s's stars not known: %s", addon.name, exc)
+                if _rate_limited(exc):
+                    break
+            except Exception:  # noqa: BLE001 -- a check must never take the app down
+                log.exception("checking %s's stars failed unexpectedly", addon.name)
+        return found
 
     def _load(self) -> None:
         import json
@@ -353,6 +425,8 @@ class ReleaseChecker:
             self._releases = {str(k): {"version": str(v["version"]), "page_url": v.get("page_url")}
                               for k, v in (doc.get("releases") or {}).items() if v.get("version")}
             self._checked_at = doc.get("checked_at")
+            self._stars = {str(k): {"stars": int(v["stars"]), "at": float(v.get("at") or 0)}
+                           for k, v in (doc.get("stars") or {}).items()}
         except (OSError, ValueError, KeyError, TypeError, AttributeError):
             log.warning("add-on releases cache unreadable, ignored: %s", self.cache_path)
 
@@ -363,7 +437,7 @@ class ReleaseChecker:
             return
         try:
             with self._lock:
-                doc = {"releases": self._releases, "checked_at": self._checked_at}
+                doc = {"releases": self._releases, "stars": self._stars, "checked_at": self._checked_at}
             self.cache_path.parent.mkdir(parents=True, exist_ok=True)
             tmp = self.cache_path.with_suffix(".tmp")
             tmp.write_text(json.dumps(doc, ensure_ascii=False, indent=1), encoding="utf-8")

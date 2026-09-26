@@ -1,0 +1,11 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" role="img" aria-label="emuiibo">
+  <!-- SwitchAgent's own icon for emuiibo: the project ships none of its own. -->
+  <defs><linearGradient id="g" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#ff6b8b"/><stop offset="1" stop-color="#c2185b"/></linearGradient></defs>
+  <rect width="256" height="256" rx="56" fill="url(#g)"/>
+  <g fill="none" stroke="#fff" stroke-width="14" stroke-linecap="round" stroke-linejoin="round">
+    <ellipse cx="128" cy="190" rx="62" ry="18"/>
+    <circle cx="128" cy="92" r="26"/>
+    <path d="M98 172 q30 -46 60 0"/>
+    <path d="M186 64 q18 18 0 36 M204 48 q34 34 0 68"/>
+  </g>
+</svg>

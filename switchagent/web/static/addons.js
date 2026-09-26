@@ -20,6 +20,47 @@
     dialog.addEventListener("click", (ev) => { if (ev.target === dialog) dialog.close(); });
   }
 
+  // -- sorting -----------------------------------------------------------
+  // Suggested is the catalog's own order. The choice is a convenience of
+  // this browser only (localStorage, which may be unavailable).
+  const sortSelect = document.getElementById("addons-sort");
+  const list = document.querySelector(".addons-list");
+  const index = null;  // the list is the index now
+  const SORTS = {
+    suggested: () => 0,
+    updates: (a, b) => num(b, "rank") - num(a, "rank"),
+    installed: (a, b) => (b.dataset.installedAt || "").localeCompare(a.dataset.installedAt || "")
+      || num(b, "rank") - num(a, "rank"),
+    popular: (a, b) => num(b, "stars") - num(a, "stars"),
+    name: (a, b) => a.dataset.name.localeCompare(b.dataset.name),
+  };
+
+  function num(el, key) {
+    return Number(el.dataset[key]) || 0;
+  }
+
+  function sortBy(key) {
+    const compare = SORTS[key] || SORTS.suggested;
+    const articles = Array.from(list.querySelectorAll("article.addon-card"));
+    articles.sort((a, b) => compare(a, b) || num(a, "order") - num(b, "order"));
+    articles.forEach((a) => list.append(a));
+    if (index) {
+      const links = new Map(Array.from(index.querySelectorAll("a")).map((l) => [l.getAttribute("href"), l]));
+      articles.forEach((a) => { const l = links.get("#" + a.id); if (l) index.append(l); });
+    }
+  }
+
+  if (sortSelect && list) {
+    let saved = null;
+    try { saved = window.localStorage.getItem("addons-sort"); } catch (_) { /* private mode */ }
+    if (saved && SORTS[saved]) sortSelect.value = saved;
+    sortBy(sortSelect.value);
+    sortSelect.addEventListener("change", () => {
+      sortBy(sortSelect.value);
+      try { window.localStorage.setItem("addons-sort", sortSelect.value); } catch (_) { /* not kept */ }
+    });
+  }
+
   const box = document.getElementById("addons-download");
   const addons = window.SwitchAgentAddons;
 

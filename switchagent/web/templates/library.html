@@ -232,16 +232,16 @@
 
 {% if kind == "games" %}
   {% if view.on_amiibo_tab %}
-  {#- emuiibo, amiibo collections and their PC tools are not games: they are
-      on the Amiibo tab -- or, before there is one, waiting for emuiibo.
-      One quiet line says so, so they do not seem to vanish. -#}
+  {#- Amiibo that came with no game are not games: they are on the Amiibo
+      tab -- or, before there is one, waiting for emuiibo. One quiet line
+      says so, so they do not seem to vanish. -#}
   {% if amiibo_tab %}
   <a class="library-elsewhere" href="/amiibo">
-    emuiibo and virtual amiibo from your Library ({{ view.on_amiibo_tab }}) are on the Amiibo tab →
+    Virtual amiibo from your Library ({{ view.on_amiibo_tab }}) are on the Amiibo tab →
   </a>
   {% else %}
   <a class="library-elsewhere" href="{{ emuiibo_home }}">
-    Virtual amiibo from your Library ({{ view.on_amiibo_tab }}) are used through emuiibo — install it →
+    Virtual amiibo from your Library ({{ view.on_amiibo_tab }}) need emuiibo on the Switch — install it →
   </a>
   {% endif %}
   {% endif %}

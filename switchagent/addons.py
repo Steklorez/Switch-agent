@@ -141,6 +141,7 @@ class Addon:
     install: Optional[str] = None           # a built-in installer ("emuiibo")
     spec: Optional[InstallSpec] = None      # ...or SwitchAgent's generic one
     related: Optional[tuple[str, str]] = None
+    icon: Optional[str] = None              # "addon-icons/<id>.<ext>" in web/static/
 
     @property
     def installable(self) -> bool:
@@ -315,7 +316,7 @@ def parse_catalog(doc) -> list[Addon]:
             usage=_lines(entry, "usage", where),
             controls=tuple(controls), tips=tuple(tips), requires=tuple(requires),
             preview=preview, preview_caption=_text(entry, "preview_caption", where, required=False),
-            status=status, install=builtin, spec=spec, related=related,
+            status=status, install=builtin, spec=spec, related=related, icon=_icon_of(addon_id),
         ))
     ids = [a.id for a in out]
     duplicates = sorted({i for i in ids if ids.count(i) > 1})
@@ -327,6 +328,20 @@ def parse_catalog(doc) -> list[Addon]:
             raise CatalogError(f"`{addon.id}` requires {', '.join(unknown)}, which the catalog does not have")
     _check_no_cycles(out)
     return out
+
+
+ICON_DIR = STATIC_DIR / "addon-icons"
+ICON_SUFFIXES = (".jpg", ".png", ".svg")
+
+
+def _icon_of(addon_id: str) -> Optional[str]:
+    """web/static/addon-icons/<id>.jpg|png|svg: the project's own icon, taken
+    from its release's .nro, or SwitchAgent's own drawing where the project
+    ships none (an overlay's is libtesla's placeholder, the same for all)."""
+    for suffix in ICON_SUFFIXES:
+        if (ICON_DIR / f"{addon_id}{suffix}").is_file():
+            return f"addon-icons/{addon_id}{suffix}"
+    return None
 
 
 def _check_no_cycles(addons: list[Addon]) -> None:

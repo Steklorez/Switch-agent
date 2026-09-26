@@ -189,8 +189,11 @@ pack's layout.
   the game's card, installed after the game when the game is selected. Owner
   by `[TITLE_ID]` in its name, else the one game of its release folder -- or,
   with several there, the one whose package lies directly in that folder.
-  Otherwise nobody, never a guess. emuiibo releases, unowned collections and
-  PC tools are not games: they live on the Amiibo tab, not in the grid.
+  Otherwise nobody, never a guess. Unowned collections are not games: they
+  are on the Amiibo tab, counted in one line under the grid. emuiibo's own
+  release files and its PC tools are off the grid and shown nowhere -- the
+  Amiibo page offers one button to install or update emuiibo, never a list
+  of release files to pick from.
 - **No Amiibo tab before emuiibo.** It exists once some console's last read
   has emuiibo, or SwitchAgent delivered it there since
   (`amiibo_views.amiibo_tab_visible`); until then `/amiibo` redirects to
@@ -263,7 +266,10 @@ or an install that could write where it must not. The rules live in
   from here -- two updaters would take turns overwriting it.
 - **Updates: GitHub is asked at start and once a day** (`ReleaseChecker`,
   one plain GET per entry, nothing about the user in it; answers cached in
-  `addon_releases.json`). An installed add-on older than its latest release
+  `addon_releases.json`) -- only with the beta features on (off, nothing
+  goes to the network), not again at a start within an hour of the last
+  check, and stars only once a week: GitHub allows an unauthenticated
+  client 60 requests an hour, shared with the app's own update check. An installed add-on older than its latest release
   gets "Update to X" -- its version from the console, or, where the console
   cannot say (no NACP, too big to read back), from what SwitchAgent itself
   last installed there; neither known: "Reinstall latest". What kefir

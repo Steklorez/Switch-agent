@@ -1,0 +1,34 @@
+{#- What the Add-ons list and an add-on's own page show the same way:
+    its icon, its status on the chosen Switch, and its Install button
+    (addons.js drives every .addon-install). -#}
+
+{% macro addon_icon(a, size="") -%}
+{% if a.icon %}<img class="addon-icon {{ size }}" src="{{ static_url(a.icon) }}" alt="" loading="lazy">
+{% else %}<span class="addon-icon addon-icon-letter {{ size }}" aria-hidden="true">{{ a.name[:1] }}</span>{% endif %}
+{%- endmacro %}
+
+{% macro addon_status(e, view, with_device=true) -%}
+{% if e.status and view.device %}
+<div class="addon-status addon-status-{{ e.status.state }}">
+  <span class="addon-status-dot" aria-hidden="true"></span>{% if with_device %}{{ view.device.name }}: {% endif %}{{ e.status.label }}
+</div>
+{% endif %}
+{%- endmacro %}
+
+{% macro addon_install(e, view) -%}
+{% set a = e.addon %}
+{% if a.installable %}
+<button type="button" class="btn btn-primary btn-small addon-install" data-addon="{{ a.id }}"
+        data-install="{{ a.install or a.id }}"
+        data-device="{{ view.device.fingerprint if view.device else '' }}"
+        {{ "disabled" if not e.can_install }}
+        title="{{ 'kefir keeps it up to date on this Switch' if e.managed else ('Connect the Switch first' if not (view.device and view.device.connected) else 'Downloads it from GitHub, checks it, adds it to your Library and queues it for this Switch') }}">
+  {{- e.button -}}
+</button>
+{% if e.with and e.can_install %}<span class="addon-with">with {{ e.with|join(", ") }}</span>{% endif %}
+{% endif %}
+{%- endmacro %}
+
+{% macro addon_stars(e) -%}
+{% if e.stars is not none %}<span class="addon-stars" title="Stars on GitHub">★ {{ "%.1fk"|format(e.stars / 1000) if e.stars >= 1000 else e.stars }}</span>{% endif %}
+{%- endmacro %}

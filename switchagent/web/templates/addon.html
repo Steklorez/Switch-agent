@@ -1,0 +1,106 @@
+{% extends "base.html" %}
+{% from "_addon_parts.html" import addon_icon, addon_status, addon_install, addon_stars %}
+{% block title %}{{ e.addon.name }} — Add-ons — SwitchAgent{% endblock %}
+{% block styles %}<link rel="stylesheet" href="{{ static_url('addons.css') }}">{% endblock %}
+
+{#- One add-on, in full (the list shows only what decides a click): what it
+    is, how it works, how it gets onto the console -- by SwitchAgent or by
+    hand -- how to use it, and what to do when it goes wrong. -#}
+
+{% macro steps(items, ordered=true) -%}
+{% if ordered %}<ol class="addon-steps">{% else %}<ul class="addon-points">{% endif %}
+  {% for item in items %}<li>{{ item|rich }}</li>{% endfor %}
+{% if ordered %}</ol>{% else %}</ul>{% endif %}
+{%- endmacro %}
+
+{% block content %}
+{% set a = e.addon %}
+{% set device_query = "?device=" ~ view.device.fingerprint if view.device else "" %}
+<a class="addon-back" href="/addons{{ device_query }}">← Add-ons</a>
+
+<article class="addon addon-page" id="addon-{{ a.id }}">
+  <header class="addon-head">
+    {{ addon_icon(a, "addon-icon-large") }}
+    <div class="addon-title-block">
+      <h2 class="addon-name">{{ a.name }}</h2>
+      <p class="addon-tagline">{{ a.tagline }}</p>
+      <div class="addon-meta">
+        <span class="addon-chip">{{ a.category }}</span>
+        <span>by {{ a.author }}</span>
+        <span>{{ a.license }}</span>
+        {{ addon_stars(e) }}
+        <a href="{{ a.source }}" target="_blank" rel="noopener">Source ↗</a>
+      </div>
+      {{ addon_status(e, view) }}
+      {% if e.requires %}
+      <div class="addon-requires">Needs
+        {% for r in e.requires %}<a href="/addons/{{ r.id }}{{ device_query }}">{{ r.name }}</a>{{ "," if not loop.last }} {% endfor %}
+      </div>
+      {% endif %}
+    </div>
+    <div class="addon-actions">
+      {{ addon_install(e, view) }}
+      <a class="btn btn-secondary btn-small" href="{{ a.releases }}" target="_blank" rel="noopener">Releases ↗</a>
+      {#- The Amiibo tab exists only once emuiibo is on a console. -#}
+      {% if a.related and (amiibo_tab or not a.related[1].startswith("/amiibo")) %}<a class="btn btn-secondary btn-small" href="{{ a.related[1] }}">{{ a.related[0] }}</a>{% endif %}
+    </div>
+  </header>
+
+  <div id="addons-download" class="addons-download" role="status" aria-live="polite" hidden></div>
+
+  {% if a.preview %}
+  <button type="button" class="addon-preview" data-full="{{ static_url(a.preview) }}"
+          data-caption="{{ a.preview_caption or a.name }}" aria-label="Show {{ a.name }} larger">
+    <img src="{{ static_url(a.preview) }}" alt="{{ a.preview_caption or a.name }}" loading="lazy">
+  </button>
+  {% endif %}
+
+  <div class="addon-about">
+    {% for paragraph in a.about %}<p>{{ paragraph|rich }}</p>{% endfor %}
+  </div>
+
+  <section class="addon-section">
+    <h3>Using it</h3>
+    {{ steps(a.usage) }}
+    {% if a.controls %}
+    <table class="addon-controls">
+      <thead><tr><th>Buttons</th><th>What they do</th></tr></thead>
+      <tbody>
+        {% for keys, action in a.controls %}<tr><td><kbd>{{ keys }}</kbd></td><td>{{ action|rich }}</td></tr>{% endfor %}
+      </tbody>
+    </table>
+    {% endif %}
+  </section>
+
+  <details class="addon-section">
+    <summary>How it works</summary>
+    {{ steps(a.how_it_works, ordered=false) }}
+  </details>
+
+  <details class="addon-section">
+    <summary>Installing</summary>
+    {{ steps(a.install_steps) }}
+  </details>
+
+  {% if a.tips %}
+  <details class="addon-section">
+    <summary>When something is wrong</summary>
+    <dl class="addon-tips">
+      {% for tip in a.tips %}
+      {% if tip.problem %}<dt>{{ tip.problem|rich }}</dt><dd>{{ tip.answer|rich }}</dd>
+      {% else %}<dd class="addon-tip-plain">{{ tip.answer|rich }}</dd>{% endif %}
+      {% endfor %}
+    </dl>
+  </details>
+  {% endif %}
+</article>
+
+<dialog id="addon-preview-dialog" class="modal addon-preview-modal">
+  <img alt="">
+  <p class="settings-hint"></p>
+  <div class="modal-actions"><button type="button" class="btn btn-secondary">Close</button></div>
+</dialog>
+{% endblock %}
+{% block scripts %}
+<script src="{{ static_url('addons.js') }}"></script>
+{% endblock %}

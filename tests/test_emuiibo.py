@@ -839,15 +839,18 @@ def test_a_selection_made_on_the_page_reaches_the_job_through_the_preparation_qu
 
 
 def test_emuiibo_and_amiibo_are_not_cards_among_the_games(client):
-    """They are not games: the Library's grid leaves them out and says, in
-    one line, where they are -- the Amiibo tab, which lists them all."""
+    """They are not games: the Library's grid leaves them out. The amiibo
+    that came with no game are on the Amiibo tab, and one line says so;
+    emuiibo's own release files are SwitchAgent's to use, not shown."""
     html = client.get("/").text
     assert f"{PACK}" not in html and "emuiibo-v0.6.3" not in html
     assert 'class="library-elsewhere" href="/amiibo"' in html
-    assert "emuiibo and virtual amiibo from your Library (2) are on the Amiibo tab" in html
+    assert "Virtual amiibo from your Library (1) are on the Amiibo tab" in html
     view = client.get("/api/amiibo").json()
     assert [c["name"] for c in view["collections"]] == [f"{PACK}.7z"]
+    # Still known -- the page's one "Install emuiibo" button uses them.
     assert [r["name"] for r in view["releases"]] == ["emuiibo-v0.6.3.zip"]
+    assert "pc_tools" not in view
 
 
 def test_emuiibos_pc_tool_is_listed_with_emuiibo_not_as_a_game(isolated_db):
@@ -857,7 +860,8 @@ def test_emuiibos_pc_tool_is_listed_with_emuiibo_not_as_a_game(isolated_db):
     scanner.scan_library_once(conn)
     view = services.list_library_view(conn, kind="games")
     assert [g["name"] for g in view["games"]] == ["Game [0100000000010000]"]
-    assert view["on_amiibo_tab"] == 1
+    # Recognised, off the grid, and not something anybody is shown.
+    assert view["on_amiibo_tab"] == 0
     assert [t["name"] for t in amiibo_views.library_pc_tools(conn)] == ["emutool-v0.6.3.zip"]
 
 
@@ -1234,6 +1238,7 @@ def test_without_emuiibo_anywhere_there_is_no_amiibo_tab(tmp_path, monkeypatch):
 
     client = _ac_client(tmp_path, monkeypatch, read_consoles=True)
     build_zip(config.LIBRARY_DIR / "emuiibo.zip", release_entries("1.1.3"))
+    build_7z(config.LIBRARY_DIR / "Some amiibo.7z", pack_entries())  # came with no game
     with db.open_db(client.ctx.db_path) as conn:
         scanner.scan_library_once(conn)
     nav_tab = '<a href="/amiibo" class='
@@ -1248,9 +1253,9 @@ def test_without_emuiibo_anywhere_there_is_no_amiibo_tab(tmp_path, monkeypatch):
     preferences.set_beta(True)
     html = client.get("/").text
     assert nav_tab not in html
-    assert 'class="library-elsewhere" href="/addons#addon-emuiibo"' in html
+    assert 'class="library-elsewhere" href="/addons/emuiibo"' in html
     moved = client.get("/amiibo", follow_redirects=False)
-    assert (moved.status_code, moved.headers["location"]) == (303, "/addons#addon-emuiibo")
+    assert (moved.status_code, moved.headers["location"]) == (303, "/addons/emuiibo")
     addons_html = client.get("/addons").text
     assert nav_tab not in addons_html and 'data-install="emuiibo"' in addons_html
     assert "needs emuiibo →" in client.get(f"/games/{AC_BASE}").text

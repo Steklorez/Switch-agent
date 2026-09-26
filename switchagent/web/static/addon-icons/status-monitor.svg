@@ -1,0 +1,9 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" role="img" aria-label="Status Monitor">
+  <!-- SwitchAgent's own icon for Status Monitor: the project ships none of its own. -->
+  <defs><linearGradient id="g" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#26a69a"/><stop offset="1" stop-color="#00695c"/></linearGradient></defs>
+  <rect width="256" height="256" rx="56" fill="url(#g)"/>
+  <g fill="none" stroke="#fff" stroke-width="14" stroke-linecap="round" stroke-linejoin="round">
+    <rect x="52" y="60" width="152" height="136" rx="16"/>
+    <path d="M72 164 l30 -34 l24 20 l30 -46 l28 30"/>
+  </g>
+</svg>

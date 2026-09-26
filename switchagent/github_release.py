@@ -138,6 +138,22 @@ def latest_release(
                    page_url=str(doc.get("html_url") or f"https://github.com/{repo}/releases/latest"))
 
 
+def repo_stars(repo: str, *, opener: Opener = urllib.request.urlopen) -> int:
+    """How many people starred `repo` on GitHub -- how the Add-ons tab
+    sorts by popularity. The same plain GET, nothing about the user in it."""
+    if not _REPO_RE.match(repo):
+        raise DownloadError(f"not a GitHub repository name: {repo!r}")
+    with _open(f"{API_ROOT}/{repo}", opener) as response:
+        try:
+            doc = json.loads(response.read(1024 * 1024).decode("utf-8"))
+        except (ValueError, UnicodeDecodeError) as exc:
+            raise DownloadError(f"GitHub's answer about {repo} could not be read") from exc
+    stars = doc.get("stargazers_count")
+    if not isinstance(stars, int) or stars < 0:
+        raise DownloadError(f"GitHub gave no star count for {repo}")
+    return stars
+
+
 def download(
     release: Release, dest_dir: Path, file_name: str, *, max_bytes: int,
     check: Callable[[bytes], None], opener: Opener = urllib.request.urlopen,

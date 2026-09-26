@@ -56,7 +56,7 @@ def _nav_context(request: Request) -> dict:
     beta = preferences.beta_enabled()
     # Where emuiibo is installed from: Add-ons when the beta features are
     # on, else the Amiibo page itself (emuiibo is not a beta feature).
-    nav = {"beta": beta, "emuiibo_home": "/addons#addon-emuiibo" if beta else "/amiibo"}
+    nav = {"beta": beta, "emuiibo_home": "/addons/emuiibo" if beta else "/amiibo"}
     ctx = getattr(request.app.state, "ctx", None)
     if ctx is None:
         return {**nav, "amiibo_tab": False}
@@ -423,7 +423,7 @@ def create_app(ctx: WebContext) -> FastAPI:
         # With the beta features on, emuiibo is installed from Add-ons;
         # without them this page is where it is installed from.
         if not amiibo_views.amiibo_tab_visible(conn) and preferences.beta_enabled():
-            return RedirectResponse("/addons#addon-emuiibo", status_code=303)
+            return RedirectResponse("/addons/emuiibo", status_code=303)
         # Everything on the page is rendered by amiibo.js from
         # GET /api/amiibo -- one source for the first paint and every
         # refresh after a read or a removal.
@@ -441,6 +441,22 @@ def create_app(ctx: WebContext) -> FastAPI:
             return RedirectResponse("/settings#beta", status_code=303)
         return _TEMPLATES.TemplateResponse(request, "addons.html", {
             "active_page": "addons", "view": addons_views.page(conn, ctx, device),
+        })
+
+    @app.get("/addons/{addon_id}", response_class=HTMLResponse)
+    def page_addon(request: Request, addon_id: str, device: Optional[str] = None, conn=Depends(get_conn),
+                   ctx: WebContext = Depends(get_ctx)):
+        """One add-on in full -- what the list leaves out."""
+        from .. import preferences
+
+        if not preferences.beta_enabled():
+            return RedirectResponse("/settings#beta", status_code=303)
+        view = addons_views.page(conn, ctx, device)
+        entry = next((e for e in view["entries"] if e["addon"].id == addon_id), None)
+        if entry is None:
+            raise HTTPException(status_code=404, detail=f"no add-on {addon_id!r} in the catalog")
+        return _TEMPLATES.TemplateResponse(request, "addon.html", {
+            "active_page": "addons", "view": view, "e": entry,
         })
 
     @app.get("/api/amiibo")
@@ -735,10 +751,15 @@ def create_app(ctx: WebContext) -> FastAPI:
     # -- JSON API: library folder (W3-002) -------------------------------
 
     @app.post("/api/preferences/beta")
-    def api_set_beta(body: BetaRequest):
+    def api_set_beta(body: BetaRequest, ctx: WebContext = Depends(get_ctx)):
         from .. import preferences
 
-        return {"beta": preferences.set_beta(body.enabled)}
+        enabled = preferences.set_beta(body.enabled)
+        # Only a running app asks GitHub (desktop.py / cli.py start it;
+        # tests never do): the first check comes right after turning it on.
+        if enabled and ctx.addon_releases.running:
+            ctx.addon_releases.check_soon()
+        return {"beta": enabled}
 
     @app.get("/api/preferences")
     def api_preferences(ctx: WebContext = Depends(get_ctx)):

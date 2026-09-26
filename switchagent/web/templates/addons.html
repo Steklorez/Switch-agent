@@ -1,40 +1,49 @@
 {% extends "base.html" %}
+{% from "_addon_parts.html" import addon_icon, addon_status, addon_install, addon_stars %}
 {% block title %}Add-ons — SwitchAgent{% endblock %}
 {% block styles %}<link rel="stylesheet" href="{{ static_url('addons.css') }}">{% endblock %}
 
 {#-
   Add-ons: a hand-curated catalog of open-source Switch utilities
-  (web/addons/catalog.yaml, read by web/addons_views.py). For each one:
-  what it is, how it works, how it gets onto a console -- by SwitchAgent
-  itself where it can (emuiibo), by hand otherwise -- and how to use it.
-  Where SwitchAgent can check a console for it, the chosen Switch's status
-  is shown as of its last read; nothing here reads the console live.
-  Install takes the add-on and whatever it requires that this Switch
-  lacks, from GitHub, into the ordinary queue (web/addons_service.py).
+  (web/addons/catalog.yaml, read by switchagent/addons.py). The list is
+  short on purpose -- each card is an icon, a line of what it is, its
+  state on the chosen Switch, and Install/Update. Everything else (how it
+  works, installing by hand, using it, what to do when it goes wrong) is
+  on the add-on's own page, one click away (addon.html).
+  The chosen Switch's status is as of its last read; nothing here reads
+  the console live. Install takes the add-on and whatever it requires
+  that this Switch lacks, from GitHub, into the ordinary queue.
 -#}
-
-{% macro steps(items, ordered=true) -%}
-{% if ordered %}<ol class="addon-steps">{% else %}<ul class="addon-points">{% endif %}
-  {% for item in items %}<li>{{ item|rich }}</li>{% endfor %}
-{% if ordered %}</ol>{% else %}</ul>{% endif %}
-{%- endmacro %}
 
 {% block content %}
 <div class="page-header">
   <div>
     <h2 class="addons-title">Add-ons</h2>
-    <p class="page-sub">Open-source utilities for a Switch — what each one does, how it gets onto the console, and how to use it.</p>
+    <p class="page-sub">Open-source utilities for a Switch. Click one for what it does and how to use it.</p>
   </div>
-  {% if view.devices %}
-  <form class="addons-device-bar" method="get" action="/addons">
-    <label class="settings-hint" for="addons-device">Switch</label>
-    <select id="addons-device" name="device" class="filter-select" onchange="this.form.submit()">
-      {% for d in view.devices %}
-      <option value="{{ d.fingerprint }}" {{ "selected" if view.device and d.fingerprint == view.device.fingerprint }}>{{ d.name }}{{ "" if d.connected else " (not connected)" }}</option>
-      {% endfor %}
-    </select>
-  </form>
-  {% endif %}
+  <div class="addons-bars">
+    {% if view.devices %}
+    <form class="addons-device-bar" method="get" action="/addons">
+      <label class="settings-hint" for="addons-device">Switch</label>
+      <select id="addons-device" name="device" class="filter-select" onchange="this.form.submit()">
+        {% for d in view.devices %}
+        <option value="{{ d.fingerprint }}" {{ "selected" if view.device and d.fingerprint == view.device.fingerprint }}>{{ d.name }}{{ "" if d.connected else " (not connected)" }}</option>
+        {% endfor %}
+      </select>
+    </form>
+    {% endif %}
+    {#- Sorted in the page (addons.js), remembered in this browser. -#}
+    <div class="addons-sort-bar">
+      <label class="settings-hint" for="addons-sort">Sort</label>
+      <select id="addons-sort" class="filter-select">
+        <option value="suggested">Suggested</option>
+        <option value="updates">Updates first</option>
+        <option value="installed">Recently installed</option>
+        <option value="popular">Most popular</option>
+        <option value="name">Name</option>
+      </select>
+    </div>
+  </div>
 </div>
 
 {% if view.kefir %}
@@ -47,116 +56,35 @@
   {% if view.releases_checking %}Checking GitHub for new releases…
   {% elif view.releases_checked_at %}New releases checked on GitHub {{ view.releases_checked_at|mtime }} — again once a day.
   {% else %}New releases are checked on GitHub when SwitchAgent starts, and once a day.{% endif %}
+  {% if view.device %}Status on {{ view.device.name }}{{ " (not connected)" if not view.device.connected }}.{% endif %}
 </p>
 
 <div id="addons-download" class="addons-download" role="status" aria-live="polite" hidden></div>
 
-<nav class="addons-index" aria-label="Add-ons on this page">
-  {% for e in view.entries %}<a href="#addon-{{ e.addon.id }}">{{ e.addon.name }}</a>{% endfor %}
-</nav>
-
-<div class="addons-list">
+{% set device_query = "?device=" ~ view.device.fingerprint if view.device else "" %}
+<div class="addons-list addons-grid">
 {% for e in view.entries %}
 {% set a = e.addon %}
-<article class="addon" id="addon-{{ a.id }}">
-  <header class="addon-head">
-    {% if a.preview %}
-    <button type="button" class="addon-preview" data-full="{{ static_url(a.preview) }}"
-            data-caption="{{ a.preview_caption or a.name }}" aria-label="Show {{ a.name }} larger">
-      <img src="{{ static_url(a.preview) }}" alt="{{ a.preview_caption or a.name }}" loading="lazy">
-    </button>
-    {% else %}
-    <div class="addon-mark" aria-hidden="true">{{ a.name[:1] }}</div>
-    {% endif %}
-    <div class="addon-title-block">
-      <h3 class="addon-name">{{ a.name }}</h3>
-      <p class="addon-tagline">{{ a.tagline }}</p>
-      <div class="addon-meta">
-        <span class="addon-chip">{{ a.category }}</span>
-        <span>by {{ a.author }}</span>
-        <span>{{ a.license }}</span>
-        <a href="{{ a.source }}" target="_blank" rel="noopener">Source ↗</a>
-      </div>
-      {% if e.status and view.device %}
-      <div class="addon-status addon-status-{{ e.status.state }}">
-        <span class="addon-status-dot" aria-hidden="true"></span>{{ view.device.name }}: {{ e.status.label }}
-      </div>
-      {% endif %}
-      {% if e.requires %}
-      <div class="addon-requires">Needs
-        {% for r in e.requires %}<a href="#addon-{{ r.id }}">{{ r.name }}</a>{{ "," if not loop.last }} {% endfor %}
-      </div>
-      {% endif %}
-    </div>
-    <div class="addon-actions">
-      {% if a.installable %}
-      <button type="button" class="btn btn-primary btn-small addon-install" data-addon="{{ a.id }}"
-              data-install="{{ a.install or a.id }}"
-              data-device="{{ view.device.fingerprint if view.device else '' }}"
-              {{ "disabled" if not e.can_install }}
-              title="{{ 'kefir keeps it up to date on this Switch' if e.managed else ('Connect the Switch first' if not (view.device and view.device.connected) else 'Downloads it from GitHub, checks it, adds it to your Library and queues it for this Switch') }}">
-        {{- e.button -}}
-      </button>
-      {% endif %}
-      <a class="btn btn-secondary btn-small" href="{{ a.releases }}" target="_blank" rel="noopener">Releases ↗</a>
-      {% if e.with and e.can_install %}<span class="addon-with">with {{ e.with|join(", ") }}</span>{% endif %}
-      {#- The Amiibo tab exists only once emuiibo is on a console. -#}
-      {% if a.related and (amiibo_tab or not a.related[1].startswith("/amiibo")) %}<a class="btn btn-secondary btn-small" href="{{ a.related[1] }}">{{ a.related[0] }}</a>{% endif %}
-    </div>
-  </header>
-
-  <div class="addon-about">
-    {% for paragraph in a.about %}<p>{{ paragraph|rich }}</p>{% endfor %}
+<article class="addon-card" id="addon-{{ a.id }}" data-order="{{ loop.index0 }}" data-rank="{{ e.rank }}"
+         data-stars="{{ e.stars if e.stars is not none else -1 }}" data-installed-at="{{ e.installed_at or '' }}"
+         data-name="{{ a.name|lower }}">
+  <a class="addon-card-link" href="/addons/{{ a.id }}{{ device_query }}" aria-label="{{ a.name }} — details"></a>
+  {{ addon_icon(a) }}
+  <div class="addon-card-body">
+    <h3 class="addon-name">{{ a.name }}</h3>
+    <p class="addon-tagline">{{ a.tagline }}</p>
+    {{ addon_status(e, view, with_device=false) }}
+    <div class="addon-meta"><span class="addon-chip">{{ a.category }}</span>{{ addon_stars(e) }}</div>
   </div>
-
-  <details class="addon-section">
-    <summary>How it works</summary>
-    {{ steps(a.how_it_works, ordered=false) }}
-  </details>
-
-  <details class="addon-section">
-    <summary>Installing</summary>
-    {{ steps(a.install_steps) }}
-  </details>
-
-  <details class="addon-section" {{ "open" if loop.first }}>
-    <summary>Using it</summary>
-    {{ steps(a.usage) }}
-    {% if a.controls %}
-    <table class="addon-controls">
-      <thead><tr><th>Buttons</th><th>What they do</th></tr></thead>
-      <tbody>
-        {% for keys, action in a.controls %}<tr><td><kbd>{{ keys }}</kbd></td><td>{{ action|rich }}</td></tr>{% endfor %}
-      </tbody>
-    </table>
-    {% endif %}
-  </details>
-
-  {% if a.tips %}
-  <details class="addon-section">
-    <summary>When something is wrong</summary>
-    <dl class="addon-tips">
-      {% for tip in a.tips %}
-      {% if tip.problem %}<dt>{{ tip.problem|rich }}</dt><dd>{{ tip.answer|rich }}</dd>
-      {% else %}<dd class="addon-tip-plain">{{ tip.answer|rich }}</dd>{% endif %}
-      {% endfor %}
-    </dl>
-  </details>
-  {% endif %}
+  <div class="addon-card-actions">{{ addon_install(e, view) }}</div>
 </article>
 {% endfor %}
 </div>
 
 <p class="history-footnote">
-  Every add-on here is someone else's open-source project — the links go to its own page.
-  SwitchAgent checks a Switch for the ones it knows how to check, as of the last time it read that Switch.
+  Every add-on here is someone else's open-source project — its page links to the project itself.
+  Icons are the projects' own, taken from their releases; where a project ships none, SwitchAgent draws one.
 </p>
-
-<dialog id="addon-preview-dialog" class="modal addon-preview-modal">
-  <img alt="">
-  <p class="settings-hint"></p>
-  <div class="modal-actions"><button type="button" class="btn btn-secondary">Close</button></div>
-</dialog>
 {% endblock %}
 {% block scripts %}
 <script src="{{ static_url('addons.js') }}"></script>

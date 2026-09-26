@@ -54,6 +54,8 @@
 .addon-status-other .addon-status-dot { background: var(--warn); }
 .addon-with { font-size: 0.75rem; color: var(--text-dim); text-align: center; }
 .addons-kefir { margin: 0 0 10px; }
+.addons-sort-bar { display: flex; align-items: center; gap: 8px; }
+.addon-stars { color: var(--warn); }
 .addon-requires { margin-top: 6px; font-size: 0.82rem; color: var(--text-dim); }
 .addon-actions { display: flex; flex-direction: column; gap: 6px; align-items: stretch; min-width: 150px; }
 .addon-actions .btn { text-align: center; }
@@ -96,4 +98,38 @@
   .addon-head { grid-template-columns: auto 1fr; }
   .addon-actions { grid-column: 1 / -1; flex-direction: row; flex-wrap: wrap; }
   .addon-preview { width: 96px; }
+}
+
+/* -- the list: icon, what it is, its state, Install ------------------------ */
+.addons-bars { display: flex; gap: 14px; flex-wrap: wrap; align-items: center; }
+.addons-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(320px, 1fr)); gap: 12px; }
+.addon-card {
+  position: relative; display: grid; grid-template-columns: 56px 1fr; gap: 12px; align-items: start;
+  padding: 14px; border: 1px solid var(--border); border-radius: 12px; background: var(--surface);
+  transition: border-color .15s ease, transform .15s ease;
+}
+.addon-card:hover { border-color: var(--accent); transform: translateY(-1px); }
+/* The whole card opens the add-on's page; its buttons stay buttons. */
+.addon-card-link { position: absolute; inset: 0; z-index: 1; border-radius: inherit; }
+.addon-card-actions { grid-column: 1 / -1; position: relative; z-index: 2; display: flex; align-items: center;
+  gap: 10px; flex-wrap: wrap; }
+.addon-card .addon-name { margin: 0; font-size: 1rem; }
+.addon-card .addon-tagline { margin: 2px 0 6px; font-size: .85rem; color: var(--text-dim); }
+.addon-card .addon-status { margin: 0 0 6px; }
+.addon-card .addon-meta { gap: 8px; }
+.addon-icon { width: 56px; height: 56px; border-radius: 12px; object-fit: cover; background: var(--surface-2); flex: none; }
+.addon-icon-large { width: 96px; height: 96px; border-radius: 20px; }
+.addon-icon-letter { display: flex; align-items: center; justify-content: center; font-weight: 700; font-size: 1.4rem;
+  color: var(--text-dim); }
+/* -- one add-on's page ------------------------------------------------------ */
+.addon-back { display: inline-block; margin-bottom: 12px; }
+.addon-page .addon-head { display: grid; grid-template-columns: 96px 1fr auto; gap: 16px; align-items: start; }
+.addon-page .addon-name { margin: 0; }
+.addon-page .addon-section { margin-top: 14px; }
+.addon-page section.addon-section h3 { margin: 18px 0 6px; font-size: 1rem; }
+.addon-page .addon-preview { margin-top: 14px; max-width: 420px; }
+@media (max-width: 700px) {
+  .addon-page .addon-head { grid-template-columns: 64px 1fr; }
+  .addon-page .addon-icon-large { width: 64px; height: 64px; border-radius: 14px; }
+  .addon-page .addon-actions { grid-column: 1 / -1; flex-direction: row; flex-wrap: wrap; }
 }
