@@ -192,6 +192,27 @@ SIZE_VERIFIABLE_STORAGES = frozenset({"SD_CARD", "NAND_USER", "NAND_SYSTEM", "SA
 READ_BACK_MAX_BYTES = 64 * 1024 * 1024
 
 
+# What a console that has stopped answering looks like from here: a WPD call
+# that waited out the driver's own timeout (~60s) with no reply. Real case
+# (2026-09-25): creating switch/podracer timed out twice in a row on
+# EnumObjects, and the Shell fallback that followed -- which has no timeout
+# at all -- then held the job at 0% until the cable was replugged. Twice in
+# a row is not a transport to route around; it is a console that is not
+# there any more, whichever way we ask.
+CONSOLE_SILENT_ERROR = "The Switch stopped responding"
+
+
+def _console_silent(exc: BaseException) -> bool:
+    seen = 0
+    current: Optional[BaseException] = exc
+    while current is not None and seen < 5:
+        if isinstance(current, wpd.ComError) and current.hr == wpd.ERROR_SEM_TIMEOUT_HRESULT:
+            return True
+        current = getattr(current, "cause", None) or current.__cause__ or current.__context__
+        seen += 1
+    return False
+
+
 class _WpdWriteFailed(Exception):
     """WPD failed while writing an object this very call had just created, so
     a half-written object of our OWN may now sit at the destination -- the
@@ -732,10 +753,13 @@ class RealMtpBackend(MtpBackend):
             except StorageNotFoundError:
                 raise
             except Exception as exc:  # noqa: BLE001 -- same fallback rule as send_file
+                self._close_wpd()
+                if _console_silent(exc):
+                    log.warning("WPD exists() timed out -- the console is not answering")
+                    raise DeviceDisconnectedError(CONSOLE_SILENT_ERROR) from exc
                 log.warning("WPD exists() failed (%s: %s) -- falling back to the Shell",
                             type(exc).__name__, exc)
                 self._wpd_unavailable = True
-                self._close_wpd()
         storage_item = self._get_storage_item(storage)
         parent_path, name = split_dest_path(path)
         if not name:
@@ -770,6 +794,9 @@ class RealMtpBackend(MtpBackend):
                     log.warning("WPD ensure_directory failed (%s: %s) -- reopening the WPD session once",
                                 type(exc).__name__, exc)
                     continue
+                if _console_silent(exc):
+                    log.warning("WPD ensure_directory timed out twice -- the console is not answering")
+                    raise DeviceDisconnectedError(CONSOLE_SILENT_ERROR) from exc
                 log.warning("WPD ensure_directory failed again (%s: %s) -- falling back to the Shell",
                             type(exc).__name__, exc)
                 self._wpd_unavailable = True
@@ -854,6 +881,9 @@ class RealMtpBackend(MtpBackend):
                     )
                     session = self._wpd_session()
                     continue
+                if attempt == 2 and _console_silent(exc):
+                    log.warning("op=%s WPD timed out twice -- the console is not answering", operation_id)
+                    raise DeviceDisconnectedError(CONSOLE_SILENT_ERROR) from exc
                 log.warning(
                     "op=%s WPD transport failed (%s: %s) -- falling back to the Shell copy engine "
                     "for the rest of this connection", operation_id, type(exc).__name__, exc,

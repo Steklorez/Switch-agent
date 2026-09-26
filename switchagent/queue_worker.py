@@ -50,7 +50,9 @@ from . import title_id as title_id_mod
 from . import work_cleanup
 from .model import ContentType
 from .mtp.base import MtpBackend, TransferStatus
-from .mtp.errors import DeviceNotFoundError, FileAlreadyExistsError, MtpError, TransferAborted
+from .mtp.errors import (
+    DeviceDisconnectedError, DeviceNotFoundError, FileAlreadyExistsError, MtpError, TransferAborted,
+)
 from .preview import PreviewReport
 from .transfer import STORAGE_SD_CARD, STORAGE_SD_INSTALL
 
@@ -312,11 +314,66 @@ def _decide_device_absence_status(job_row: sqlite3.Row) -> str:
     keeps the older, more cautious status -- this never widens what
     DEVICE_UNAVAILABLE used to mean, only carves out the genuinely-never-
     started case."""
+    if job_row["auto_resume"]:
+        # Its connection dropped mid-job (see _wait_for_reconnect): waiting
+        # for the console to come back is exactly what it is doing.
+        return "WAITING_FOR_DEVICE"
     if job_row["attempt_count"] > 0:
         return "DEVICE_UNAVAILABLE"
     if manifest_mod.load_progress(job_row["id"]):
         return "DEVICE_UNAVAILABLE"
     return "WAITING_FOR_DEVICE"
+
+
+# How long a job whose console stopped answering waits before trying again
+# on its own while that console stays connected. Seeing the console go away
+# and come back -- a replugged cable, MTP restarted in DBI -- skips the wait.
+RECONNECT_RETRY_SECONDS = 300.0
+
+
+def _wait_for_reconnect(
+    conn: sqlite3.Connection, job_id: int, bytes_done: int, reason: str, *,
+    in_flight: Optional[str] = None, storage: Optional[str] = None,
+) -> JobRunOutcome:
+    """The connection to the console dropped mid-job. Not a failure of the
+    job: every file it delivered is in progress.json and is not sent again,
+    so it waits as WAITING_FOR_DEVICE and continues by itself (by the
+    user's explicit choice, 2026-09-26, after a console that had stopped
+    answering held a job at 0% until the cable was replugged). Errors,
+    conflicts and changed sources still stop a job for good -- only a lost
+    connection resumes. No History row: nothing has ended."""
+    from datetime import datetime, timedelta, timezone
+
+    if in_flight and storage != STORAGE_SD_INSTALL:
+        # May be half written on the card now; resuming replaces it. (An
+        # install node keeps nothing half-sent to replace.)
+        manifest_mod.mark_replaceable(job_id, in_flight)
+    error = (
+        f"{reason}. Reconnect the Switch, or restart MTP in DBI -- the install continues from here "
+        f"by itself (without that, it tries again in {int(RECONNECT_RETRY_SECONDS // 60)} min)"
+    )
+    resume_after = (datetime.now(timezone.utc) + timedelta(seconds=RECONNECT_RETRY_SECONDS)).isoformat(timespec="seconds")
+    db.update_job_status(conn, job_id, "WAITING_FOR_DEVICE", bytes_done=bytes_done, error=error)
+    db.set_job_auto_resume(conn, job_id, resume_after)
+    db.log_job_event(conn, job_id, f"connection lost ({reason}) -> WAITING_FOR_DEVICE, resumes on reconnect")
+    return JobRunOutcome(job_id=job_id, status="WAITING_FOR_DEVICE", error=error, record_history=False)
+
+
+def _resume_not_due(job_row: sqlite3.Row) -> bool:
+    """A job waiting after a lost connection whose console never went away:
+    too early to knock again (see RECONNECT_RETRY_SECONDS)."""
+    if not job_row["auto_resume"] or not job_row["resume_after"]:
+        return False
+    from datetime import datetime, timezone
+
+    return datetime.now(timezone.utc) < datetime.fromisoformat(job_row["resume_after"])
+
+
+def _note_device_gone(conn: sqlite3.Connection, job_row: sqlite3.Row) -> None:
+    """The console of a job waiting after a lost connection has been seen
+    gone: when it is back it is a fresh connection, so no need to wait."""
+    if job_row["auto_resume"] and job_row["resume_after"]:
+        db.set_job_auto_resume(conn, job_row["id"], None)
 
 
 def run_worker_once(
@@ -370,6 +427,9 @@ def run_worker_once(
             # below had the same gap, fixed here alongside it since both
             # now share this exact code path.
             error = f"device '{device_fingerprint(device_id)}' is not registered with this worker"
+            _note_device_gone(conn, job)
+            if job["auto_resume"]:
+                continue  # keeps its own "reconnect the Switch" message
             if status != job["status"]:  # avoid rewriting/re-logging every pass while still absent
                 db.update_job_status(conn, job["id"], status, error=error)
                 db.log_job_event(conn, job["id"], f"{error} -> {status}")
@@ -380,9 +440,15 @@ def run_worker_once(
         except DeviceNotFoundError as exc:
             status = _decide_device_absence_status(job)
             error = f"device '{device_fingerprint(device_id)}' not currently reachable: {exc}"
+            _note_device_gone(conn, job)
+            if job["auto_resume"]:
+                continue  # keeps its own "reconnect the Switch" message
             if status != job["status"]:
                 db.update_job_status(conn, job["id"], status, error=error)
                 db.log_job_event(conn, job["id"], f"{error} -> {status}")
+            continue
+
+        if _resume_not_due(job):
             continue
 
         try:
@@ -515,7 +581,7 @@ def resolve_library_item_display_name(
             source = find_family_base_name_source(conn, row["title_id"], library_items=library_items)
             if source is not None:
                 return Path(source["absolute_path"]).name
-        return sd_files.display_name(row["absolute_path"])
+        return sd_files.row_display_name(row)
     if row["item_type"] != "MOD_FOLDER" or not row["title_id"]:
         return raw_name
     source = find_family_base_name_source(conn, row["title_id"], library_items=library_items)
@@ -1041,6 +1107,10 @@ def _run_job_transfer(
             conn.commit()
             db.log_job_event(conn, job_id, error)
             return JobRunOutcome(job_id=job_id, status="DESTINATION_CONFLICT", error=error)
+        except DeviceDisconnectedError as exc:
+            return _wait_for_reconnect(
+                conn, job_id, bytes_done, str(exc), in_flight=file.dest_relative_path, storage=storage,
+            )
         except MtpError as exc:
             db.update_job_status(
                 conn, job_id, "FAILED", bytes_done=bytes_done, error=str(exc), finished_at=db.now_iso(),
@@ -1078,13 +1148,10 @@ def _run_job_transfer(
             continue
 
         if result.status is TransferStatus.DEVICE_DISCONNECTED:
-            error = result.error or "device disconnected mid-transfer"
-            db.update_job_status(conn, job_id, "INTERRUPTED", bytes_done=bytes_done, error=error)
-            db.log_job_event(
-                conn, job_id,
-                f"device '{job_row['target_device_id']}' disconnected mid-transfer -> INTERRUPTED",
+            return _wait_for_reconnect(
+                conn, job_id, bytes_done, result.error or "The Switch disconnected mid-transfer",
+                in_flight=file.dest_relative_path, storage=storage,
             )
-            return JobRunOutcome(job_id=job_id, status="INTERRUPTED", error=error)
 
         error = result.error or f"transfer of '{file.dest_relative_path}' did not complete ({result.status.value})"
         db.update_job_status(conn, job_id, "FAILED", bytes_done=bytes_done, error=error, finished_at=db.now_iso())

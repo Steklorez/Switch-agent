@@ -307,6 +307,10 @@ class ClassifiedArchive:
     emuiibo_release: Optional[emuiibo.ReleasePlan] = None
     # AMIIBO: every virtual amiibo in the archive, with its destination.
     amiibo: Optional[emuiibo.Collection] = None
+    # An archive holding just an .nro (or a few), with no switch/ folder to
+    # say where: each is placed like a lone .nro in the library
+    # (sd_files.loose_nro_relative). Entry names, in listing order.
+    loose_nro: list[str] = field(default_factory=list)
 
 
 def is_atmosphere_program_file(entry_name: str) -> bool:
@@ -390,6 +394,26 @@ def classify_entries(entries: list[ArchiveEntry], *, archive_name: Optional[str]
         else:
             content_type = ContentType.UNKNOWN
 
+    loose_nro: list[str] = []
+    if content_type is ContentType.UNKNOWN:
+        nro_entries = [
+            e for e in entries
+            if not e.is_dir and PurePosixPath(e.name).suffix.lower() == sd_files.NRO_EXTENSION
+        ]
+        placed = [(sd_files.loose_nro_relative(PurePosixPath(e.name).name), e.size) for e in nro_entries]
+        # Not loose: an .nro inside a switch/ folder that archive_sd_root
+        # declined (two different layouts, say) -- re-placing it would pick
+        # one for the user. Nor two .nro of the same name, which would land
+        # on one path. Either way which one is meant is not guessed.
+        in_switch = any(
+            part.lower() == sd_files.SD_ROOT_DIR
+            for e in nro_entries for part in PurePosixPath(e.name).parts[:-1]
+        )
+        if nro_entries and not in_switch and len({rel.lower() for rel, _ in placed}) == len(placed):
+            loose_nro = [e.name for e in nro_entries]
+            sd_summary = sd_files.summarize(placed)
+            content_type = ContentType.SD_FILES
+
     return ClassifiedArchive(
         content_type=content_type,
         package_format=package_format,
@@ -401,6 +425,7 @@ def classify_entries(entries: list[ArchiveEntry], *, archive_name: Optional[str]
         sd_root=sd_root,
         sd_summary=sd_summary,
         amiibo=amiibo if content_type is ContentType.AMIIBO else None,
+        loose_nro=loose_nro,
     )
 
 

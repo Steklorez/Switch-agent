@@ -129,19 +129,19 @@ def _transfer_sd_files(
     """A switch/ folder, file by file, to the same paths under switch/ on
     the SD card -- the CLI counterpart of manifest._build_sd_files, with the
     same one-file-at-a-time, stop-at-the-first-failure rule as mods."""
-    if report.sd_source_dir is None or not report.sd_source_dir.is_dir():
+    if report.sd_source_dir is None or not report.sd_source_dir.exists():
         return TransferOutcome(
             ok=False, error=(
                 "switch/ folder not staged locally yet "
                 "(archive source not extracted? call preview_path(path, extract=True))"
             ),
         )
-    files = sorted((p for p in report.sd_source_dir.rglob("*") if p.is_file()), key=lambda p: p.as_posix())
+    files = sd_files.source_files(report.sd_source_dir)
     per_file: list[TransferResult] = []
     sent = 0
     total_bytes = 0
-    for f in files:
-        dest_path = sd_files.destination_for(f.relative_to(report.sd_source_dir).as_posix())
+    for f, rel in files:
+        dest_path = sd_files.destination_for(rel)
         parent = "/".join(dest_path.split("/")[:-1])
         try:
             backend.ensure_directory(STORAGE_SD_CARD, parent)

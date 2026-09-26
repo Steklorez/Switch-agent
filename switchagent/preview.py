@@ -13,7 +13,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional
 
-from . import config, emuiibo, extractor, scanner, sd_files, title_id
+from . import config, emuiibo, extractor, nro, scanner, sd_files, title_id
 from .model import ConflictEntry, ConflictState, ContentType
 
 
@@ -272,11 +272,31 @@ def _preview_archive(path: Path, *, extract: bool) -> PreviewReport:
 def _attach_sd_part(report: PreviewReport, cls, dest_root: Path) -> None:
     """Points the report at the extracted switch/ folder, if the archive had
     one. Resolved against the real extraction, never the listing alone."""
+    if cls.loose_nro:
+        _stage_loose_nro(report, cls.loose_nro, dest_root)
+        return
     if cls.sd_root is None:
         return
     extracted = dest_root.joinpath(*cls.sd_root)
     if extracted.is_dir():
         report.sd_source_dir = extracted
+
+
+def _stage_loose_nro(report: PreviewReport, names: list[str], dest_root: Path) -> None:
+    """Lays an archive's loose .nro files out as the switch/ folder they
+    become (<name>/<name>.nro each), inside the same extraction, so the
+    rest of the pipeline sees an ordinary switch/ folder."""
+    import uuid
+
+    staged = dest_root / f".sd-{uuid.uuid4().hex}"
+    for name in names:
+        extracted = extractor.safe_relative_path(name, dest_root)
+        if not extracted.is_file():
+            return
+        target = staged / sd_files.loose_nro_relative(extracted.name)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        extracted.replace(target)
+    report.sd_source_dir = staged
 
 
 def _preview_sd_folder(path: Path, summary: sd_files.SdSummary) -> PreviewReport:
@@ -383,6 +403,9 @@ def preview_path(path: Path, *, extract: bool = False) -> PreviewReport:
         return _preview_package_file(path)
     if ext in config.ARCHIVE_EXTENSIONS:
         return _preview_archive(path, extract=extract)
+    if ext == sd_files.NRO_EXTENSION and nro.read_nro_info(path) is not None:
+        size = path.stat().st_size
+        return _preview_sd_folder(path, sd_files.summarize([(sd_files.loose_nro_relative(path.name), size)]))
 
     return PreviewReport(
         content_type=ContentType.UNKNOWN, source=str(path),

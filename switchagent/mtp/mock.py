@@ -31,7 +31,11 @@ from .errors import (
     TransferFailedError,
 )
 
-_FAULT_MODES = ("error", "disconnect", "corrupt", "partial", "unverified")
+# "crash": send_file raises something no MtpBackend is expected to -- the
+# stand-in for a bug or a COM object gone bad, which the worker records as
+# INTERRUPTED (queue_worker._process_job). A dropped connection ("disconnect")
+# no longer ends that way: it waits and resumes on its own.
+_FAULT_MODES = ("error", "disconnect", "corrupt", "partial", "unverified", "crash")
 
 
 @dataclass
@@ -334,6 +338,10 @@ class MockMtpBackend(MtpBackend):
         total = len(source_bytes)
 
         fault = self._pop_matching_fault(storage, dest_path)
+
+        if fault is not None and fault.mode == "crash":
+            self._log_op("SEND_FILE_CRASHED", {"storage": storage, "path": dest_path})
+            raise RuntimeError("simulated unexpected failure mid-transfer")
 
         if fault is not None and fault.mode == "disconnect":
             self._connected = False

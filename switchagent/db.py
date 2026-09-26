@@ -564,6 +564,15 @@ def _init_db_serial(conn: sqlite3.Connection) -> None:
         # written; a retry is allowed to replace exactly that file, because
         # it is this transfer's own -- see manifest.inherit_progress.
         "current_file": "TEXT",
+        # Set when the connection to the console dropped mid-job -- the console
+        # stopped answering, or went away -- rather than the job failing: it
+        # waits as WAITING_FOR_DEVICE and continues on its own, from its own
+        # progress.json (see queue_worker._wait_for_reconnect). resume_after is
+        # the earliest time it tries again while the console stays connected;
+        # NULL once the console has been seen gone, which means "as soon as it
+        # is back".
+        "auto_resume": "INTEGER NOT NULL DEFAULT 0",
+        "resume_after": "TEXT",
     }.items():
         if column not in existing:
             conn.execute(f"ALTER TABLE jobs ADD COLUMN {column} {declaration}")
@@ -849,6 +858,11 @@ def list_jobs(conn: sqlite3.Connection, *, status: Optional[str] = None) -> list
     return conn.execute(
         "SELECT * FROM jobs WHERE status = ? ORDER BY created_at ASC", (status,)
     ).fetchall()
+
+
+def set_job_auto_resume(conn: sqlite3.Connection, job_id: int, resume_after: Optional[str]) -> None:
+    conn.execute("UPDATE jobs SET auto_resume = 1, resume_after = ? WHERE id = ?", (resume_after, job_id))
+    conn.commit()
 
 
 def list_confirmed_jobs(conn: sqlite3.Connection) -> list[sqlite3.Row]:

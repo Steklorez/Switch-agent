@@ -17,7 +17,7 @@ import time
 from pathlib import Path
 from typing import Callable, Optional
 
-from . import config, db, emuiibo, extractor, sd_files, title_id
+from . import config, db, emuiibo, extractor, nro, sd_files, title_id
 from .model import ContentType
 
 TITLE_ID_DIR_RE = re.compile(rf"^{config.TITLE_ID_RE}$")
@@ -30,9 +30,10 @@ TITLE_ID_DIR_RE = re.compile(rf"^{config.TITLE_ID_RE}$")
 # "switch" for good -- on exactly the libraries the change was made for.
 #   1  (no marker) -- before SD_FILES
 #   2  switch/ folders, forwarder launch paths
-#   3  emuiibo releases and virtual amiibo; an .nsp inside atmosphere/contents/
+#   3  archives holding a loose .nro
+#   4  emuiibo releases and virtual amiibo; an .nsp inside atmosphere/contents/
 #      (a sysmodule's exefs.nsp) is no longer taken for an installable package
-CLASSIFICATION_REVISION = 3
+CLASSIFICATION_REVISION = 4
 
 # A library item that is a program for this PC, not something for a Switch
 # (emuiibo's emutool / emuiigen): shown for what it is, never installable,
@@ -53,6 +54,13 @@ def emuiibo_details(plan: emuiibo.ReleasePlan, version: Optional[str]) -> dict:
 
 def amiibo_details(collection: emuiibo.Collection) -> dict:
     return {"amiibo": collection.summary()}
+
+
+# What the library indexes as single files. .nro is deliberately not in
+# config.ALL_TRACKED_EXTENSIONS: that set also means "installed some other
+# way" to sd_files.folder_summary, which would then stop treating every
+# switch/ folder holding an .nro as SD card files.
+_LIBRARY_FILE_EXTENSIONS = config.ALL_TRACKED_EXTENSIONS | {sd_files.NRO_EXTENSION}
 
 
 def classified_revision(row) -> int:
@@ -109,7 +117,33 @@ def classify_file(abs_path: Path) -> dict:
     if ext in config.ARCHIVE_EXTENSIONS:
         return _classify_archive_file(abs_path, ext)
 
+    if ext == sd_files.NRO_EXTENSION:
+        return _classify_nro_file(abs_path)
+
     raise ValueError(f"unsupported extension for classify_file: {ext}")
+
+
+def _classify_nro_file(abs_path: Path) -> dict:
+    """A lone .nro: an SD_FILES item of one file (see sd_files.py). Not
+    trusted on its extension -- without an NRO0 header it is not an app."""
+    info = nro.read_nro_info(abs_path)
+    common = dict(
+        item_type="FILE", file_type="NRO", package_format=None, content_hash=sha256_file(abs_path),
+        title_id=None, title_id_source=None, title_id_confident=False, error=None,
+    )
+    if info is None:
+        return dict(
+            **common, content_type=ContentType.UNKNOWN.value,
+            status="NEEDS_REVIEW", suggested_action=None, suggested_target=None,
+            note="not a Switch homebrew application (no NRO0 header)", details_json=None,
+        )
+    name = " ".join(part for part in (info.name, info.version) if part) or None
+    summary = sd_files.summarize([(sd_files.loose_nro_relative(abs_path.name), abs_path.stat().st_size)])
+    return dict(
+        **common, content_type=ContentType.SD_FILES.value,
+        status="ANALYZED", suggested_action="COPY_MERGE", suggested_target="SD_CARD",
+        note=None, details_json=_details_json(sd=summary, app_name=name),
+    )
 
 
 def _classify_package_file(abs_path: Path, ext: str, *, hash_content: bool = True) -> dict:
@@ -239,7 +273,9 @@ def _classify_archive_file(abs_path: Path, ext: str) -> dict:
             **common,
             title_id=guess.title_id, title_id_source=guess.source, title_id_confident=False,
             status="ANALYZED", suggested_action="COPY_MERGE", suggested_target="SD_CARD",
-            note="archive contains a switch/ folder for the SD card, will be safely extracted before sending",
+            note=("archive contains a homebrew app (.nro) for switch/ on the SD card, will be safely extracted before sending"
+                  if cls.loose_nro else
+                  "archive contains a switch/ folder for the SD card, will be safely extracted before sending"),
             details_json=sd_details,
         )
 
@@ -848,7 +884,7 @@ def scan_library_once(
             if lowered_name.endswith(".bin"):
                 bin_files.append(candidate)
                 continue
-            if (candidate.suffix.lower() in config.ALL_TRACKED_EXTENSIONS
+            if (candidate.suffix.lower() in _LIBRARY_FILE_EXTENSIONS
                     and candidate.is_file()
                     and not path_is_inside_any(candidate, mod_folders)
                     and not path_is_inside_any(candidate, release_programs)):
@@ -873,7 +909,12 @@ def scan_library_once(
     sd_folders = sd_files.find_sd_folders(
         switch_dirs, exclude=[*mod_folders, *amiibo_folders, *release_switch_dirs],
     )
-    candidate_files = [c for c in candidate_files if not path_is_inside_any(c, amiibo_folders)]
+    # An .nro inside one of those is part of it, not an app of its own.
+    candidate_files = [
+        c for c in candidate_files
+        if not path_is_inside_any(c, amiibo_folders)
+        and (c.suffix.lower() != sd_files.NRO_EXTENSION or not path_is_inside_any(c, sd_folders))
+    ]
     to_index = len(amiibo_folders) + len(sd_folders) + len(candidate_files)
     indexed = 0
     _progress("indexing", 0, to_index)
