@@ -203,6 +203,10 @@ class ClassifiedArchive:
     # that goes onto the SD card next to what it installs.
     sd_root: Optional[tuple[str, ...]] = None
     sd_summary: Optional[sd_files.SdSummary] = None
+    # An archive holding just an .nro (or a few), with no switch/ folder to
+    # say where: each is placed like a lone .nro in the library
+    # (sd_files.loose_nro_relative). Entry names, in listing order.
+    loose_nro: list[str] = field(default_factory=list)
 
 
 def classify_entries(entries: list[ArchiveEntry]) -> ClassifiedArchive:
@@ -252,6 +256,26 @@ def classify_entries(entries: list[ArchiveEntry]) -> ClassifiedArchive:
     else:
         content_type = ContentType.UNKNOWN
 
+    loose_nro: list[str] = []
+    if content_type is ContentType.UNKNOWN:
+        nro_entries = [
+            e for e in entries
+            if not e.is_dir and PurePosixPath(e.name).suffix.lower() == sd_files.NRO_EXTENSION
+        ]
+        placed = [(sd_files.loose_nro_relative(PurePosixPath(e.name).name), e.size) for e in nro_entries]
+        # Not loose: an .nro inside a switch/ folder that archive_sd_root
+        # declined (two different layouts, say) -- re-placing it would pick
+        # one for the user. Nor two .nro of the same name, which would land
+        # on one path. Either way which one is meant is not guessed.
+        in_switch = any(
+            part.lower() == sd_files.SD_ROOT_DIR
+            for e in nro_entries for part in PurePosixPath(e.name).parts[:-1]
+        )
+        if nro_entries and not in_switch and len({rel.lower() for rel, _ in placed}) == len(placed):
+            loose_nro = [e.name for e in nro_entries]
+            sd_summary = sd_files.summarize(placed)
+            content_type = ContentType.SD_FILES
+
     return ClassifiedArchive(
         content_type=content_type,
         package_format=package_format,
@@ -262,6 +286,7 @@ def classify_entries(entries: list[ArchiveEntry]) -> ClassifiedArchive:
         package_entries=package_entries,
         sd_root=sd_root,
         sd_summary=sd_summary,
+        loose_nro=loose_nro,
     )
 
 

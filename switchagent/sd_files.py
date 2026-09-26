@@ -29,6 +29,12 @@ belongs to is decided here, in order:
      with two games in it says nothing about which one this belongs to,
      and then it stays its own card.
 
+A lone .nro found anywhere else in the library -- a homebrew app
+downloaded on its own -- is the same thing in its smallest form: a
+switch/ folder of one file, `switch/<name>/<name>.nro`, the layout the
+Homebrew Menu lists and most apps' own instructions use. Its card is
+named after the app itself, from the NACP inside the .nro (nro.py).
+
 Only `switch/` is recognised on purpose: it is the homebrew folder, the one
 these releases ship, and copying a release's other top-level files (a
 README next to it, say) onto the root of someone's SD card is not something
@@ -63,6 +69,8 @@ FORWARDER_MAX_BYTES = 16 * 1024 * 1024
 # loader's own fallback is sdmc:/hbmenu.nro and is not a target.
 _LAUNCH_RE = re.compile(rb"sdmc:/([\x21-\x7e][\x20-\x7e]*?\.nro)", re.IGNORECASE)
 _FALLBACK_LAUNCH = "hbmenu.nro"
+
+NRO_EXTENSION = ".nro"
 
 # Names that describe the SD-card layout rather than the game: an archive
 # called "switch.7z", or a folder called "SD", says nothing about what is
@@ -108,6 +116,23 @@ def summarize(relative_files: Iterable[tuple[str, int]]) -> Optional[SdSummary]:
     if not files:
         return None
     return SdSummary(apps=tuple(sorted(apps)), nro=tuple(sorted(nro)), files=files, size=size)
+
+
+def loose_nro_relative(filename: str) -> str:
+    """Where a lone .nro goes, relative to switch/: its own folder."""
+    return f"{PurePosixPath(filename).stem}/{filename}"
+
+
+def source_files(source: Path) -> list[tuple[Path, str]]:
+    """(local file, path relative to switch/) for everything an SD_FILES
+    source puts on the card: every file of a switch/ folder, or a lone
+    .nro placed by loose_nro_relative."""
+    if source.is_file():
+        return [(source, loose_nro_relative(source.name))]
+    return [
+        (f, f.relative_to(source).as_posix())
+        for f in sorted((p for p in source.rglob("*") if p.is_file()), key=lambda p: p.as_posix())
+    ]
 
 
 def destination_for(relative_path: str) -> str:
@@ -241,7 +266,9 @@ def app_of(sd_path: str) -> str:
 # library_items.details_json
 # ---------------------------------------------------------------------------
 
-def details(*, sd: Optional[SdSummary] = None, launches: Optional[str] = None) -> dict:
+def details(
+    *, sd: Optional[SdSummary] = None, launches: Optional[str] = None, app_name: Optional[str] = None,
+) -> dict:
     """The part of a row's details_json this module owns (the scanner adds
     its own keys around it -- see scanner._details_json)."""
     data = {}
@@ -249,6 +276,8 @@ def details(*, sd: Optional[SdSummary] = None, launches: Optional[str] = None) -
         data["sd_files"] = sd.to_dict()
     if launches:
         data["launches"] = launches
+    if app_name:
+        data["app_name"] = app_name
     return data
 
 
@@ -271,6 +300,15 @@ def sd_summary_of(row) -> Optional[SdSummary]:
     return SdSummary.from_dict(data) if isinstance(data, dict) else None
 
 
+def row_display_name(row) -> str:
+    """display_name() for a library row: a lone .nro's own app name when
+    its NACP had one."""
+    app_name = row_details(row).get("app_name")
+    if isinstance(app_name, str) and app_name:
+        return app_name
+    return display_name(row["absolute_path"])
+
+
 def launches_of(row) -> Optional[str]:
     value = row_details(row).get("launches")
     return value if isinstance(value, str) and value else None
@@ -290,7 +328,8 @@ def display_name(absolute_path: str) -> str:
     folder called "switch"), in which case the nearest folder above it that
     means something -- the release folder, as a rule."""
     path = Path(absolute_path)
-    own = path.stem if path.suffix.lower() in config.ARCHIVE_EXTENSIONS else path.name
+    stem_kinds = config.ARCHIVE_EXTENSIONS | {NRO_EXTENSION}
+    own = path.stem if path.suffix.lower() in stem_kinds else path.name
     if _meaningful(own):
         return own
     for parent in path.parents:

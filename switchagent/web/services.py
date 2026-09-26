@@ -63,7 +63,7 @@ def _resolve_entry_name(conn, row, *, library_items=None) -> str:
     maintained naming system. See find_family_base_name_source's own
     docstring (PERF-001) for why `library_items` matters at scale."""
     if row["content_type"] == ContentType.SD_FILES.value:
-        return sd_files.display_name(row["absolute_path"])
+        return sd_files.row_display_name(row)
     if row["item_type"] == "MOD_FOLDER" and row["title_id"]:
         source = queue_worker.find_family_base_name_source(conn, row["title_id"], library_items=library_items)
         if source is not None:

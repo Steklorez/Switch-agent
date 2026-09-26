@@ -512,7 +512,7 @@ def resolve_library_item_display_name(
             source = find_family_base_name_source(conn, row["title_id"], library_items=library_items)
             if source is not None:
                 return Path(source["absolute_path"]).name
-        return sd_files.display_name(row["absolute_path"])
+        return sd_files.row_display_name(row)
     if row["item_type"] != "MOD_FOLDER" or not row["title_id"]:
         return raw_name
     source = find_family_base_name_source(conn, row["title_id"], library_items=library_items)

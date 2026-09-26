@@ -304,11 +304,12 @@ def _build_sd_files(report: PreviewReport, payload_dir: Path) -> list[ManifestFi
         raise ManifestError(
             "switch/ folder not staged locally yet -- call preview_path(path, extract=True) first"
         )
-    if not report.sd_source_dir.is_dir():
+    if not report.sd_source_dir.exists():
         raise ManifestError(f"switch/ folder does not exist: {report.sd_source_dir}")
 
     bare_root: Optional[Path] = None
     if report.work_dir is None:
+        # A switch/ folder, or a lone .nro (sd_files.source_files).
         walk_root = report.sd_source_dir
         source_kind, bare_root = _classify_bare_source_root(walk_root)
     else:
@@ -321,8 +322,7 @@ def _build_sd_files(report: PreviewReport, payload_dir: Path) -> list[ManifestFi
         source_kind = "frozen"
 
     files = []
-    for f in sorted((p for p in walk_root.rglob("*") if p.is_file()), key=lambda p: p.as_posix()):
-        rel = f.relative_to(walk_root).as_posix()
+    for f, rel in sd_files.source_files(walk_root):
         source_rel = f.relative_to(payload_dir).as_posix() if source_kind == "frozen" else f.relative_to(bare_root).as_posix()
         file_stat = f.stat()
         files.append(ManifestFile(
