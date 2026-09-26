@@ -368,6 +368,7 @@ def assign_owners(rows) -> dict[int, tuple[Optional[str], Optional[str]]]:
     (retired rows excluded): an owner has to be something you could
     actually install alongside."""
     families_below: dict[str, set[str]] = {}
+    families_at_top: dict[str, set[str]] = {}
     launched_by: dict[str, set[str]] = {}
     for row in rows:
         if row["content_type"] != ContentType.GAME_PACKAGE.value:
@@ -375,6 +376,7 @@ def assign_owners(rows) -> dict[int, tuple[Optional[str], Optional[str]]]:
         family = _family(row["title_id"])
         if family is None:
             continue
+        families_at_top.setdefault(str(Path(row["absolute_path"]).parent), set()).add(family)
         for parent in Path(row["absolute_path"]).parents:
             families_below.setdefault(str(parent), set()).add(family)
         launches = launches_of(row)
@@ -397,13 +399,24 @@ def assign_owners(rows) -> dict[int, tuple[Optional[str], Optional[str]]]:
             owners[row["id"]] = (next(iter(by_forwarder)), "forwarder")
             continue
 
-        owner = None
+        owner, how = None, None
         for parent in Path(row["absolute_path"]).parents:
             found = families_below.get(str(parent))
             if found:
-                owner = next(iter(found)) if len(found) == 1 else None
+                if len(found) == 1:
+                    owner, how = next(iter(found)), "folder"
+                else:
+                    # A release holding more than one game (Animal
+                    # Crossing, with its Island Transfer Tool in a
+                    # sub-folder): the one whose package lies right in the
+                    # release folder is the release's game. Several there:
+                    # nobody. Such a part is the game's, but not needed by
+                    # it -- "release": ticked by hand, never with the game.
+                    top = families_at_top.get(str(parent)) or set()
+                    if len(top) == 1:
+                        owner, how = next(iter(top)), "release"
                 break
-        owners[row["id"]] = (owner, "folder" if owner else None)
+        owners[row["id"]] = (owner, how)
     return owners
 
 

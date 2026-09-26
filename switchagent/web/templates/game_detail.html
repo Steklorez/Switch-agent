@@ -30,14 +30,14 @@
            data-size="{{ e.size }}" data-destination="{{ destination_label(e) }}"
            data-cover-id="{{ view.base_title_id }}"
            data-existing-copy="{{ '1' if (e.confirmed_on_device or e.status in ('INSTALLED', 'INSTALLED_UNVERIFIED')) else '' }}"
-           data-family="{{ view.base_title_id }}" data-family-name="{{ view.name }}"{% if role %} data-role="{{ role }}"{% endif %}
+           data-family="{{ view.base_title_id }}" data-family-name="{{ view.name }}"{% if role %} data-role="{{ role }}"{% endif %}{% if e.sd_optional %} data-optional="1"{% endif %}
            {{ "disabled" if e.status not in ("AVAILABLE",) }}>
   </td>
   <td class="content-name">
     <div class="card-body" data-detail-url="/api/library/{{ e.id }}">{{ e.sd_label if role == "sd" else e.filename }}</div>
     {% if label == "Mod" and e.mod_name %}<div class="card-meta">mod folder: {{ e.mod_name }}</div>{% endif %}
     {% if role == "sd" %}<div class="card-meta sd-destination">→ {{ e.sd_destinations|join(", ") }} · {{ e.sd.files }} files</div>{% endif %}
-    {% if role == "amiibo" and e.amiibo %}<div class="card-meta amiibo-destination">{{ e.amiibo.count }} virtual amiibo for emuiibo → sdmc:/emuiibo/amiibo · {% if amiibo_tab %}<a href="/amiibo">Amiibo →</a>{% else %}<a href="/addons#addon-emuiibo">needs emuiibo →</a>{% endif %}</div>{% endif %}
+    {% if role == "amiibo" and e.amiibo %}<div class="card-meta amiibo-destination">{{ e.amiibo.count }} virtual amiibo for emuiibo → sdmc:/emuiibo/amiibo · {% if amiibo_tab %}<a href="/amiibo">Amiibo →</a>{% else %}<a href="{{ emuiibo_home }}">needs emuiibo →</a>{% endif %}</div>{% endif %}
     {% if e.launches %}<div class="card-meta">starts {{ e.launches }}</div>{% endif %}
   </td>
   <td>{{ label }}</td>

@@ -191,6 +191,9 @@
       if (!family) return;
       document.querySelectorAll(`.select-box[data-family="${CSS.escape(family)}"]`).forEach((box) => {
         if (box === baseBox || box.disabled || box.checked === baseBox.checked) return;
+        // Came with the game, not needed by it (Events Unlock beside
+        // Animal Crossing): ticked by hand only -- but unticked with it.
+        if (baseBox.checked && box.dataset.optional === "1") return;
         box.checked = baseBox.checked;
         box.dispatchEvent(new Event("change"));
       });
@@ -532,23 +535,12 @@
     // Checked when the Switch is known to lack it; left to the user when
     // nobody knows yet.
     emuiiboCheck.checked = known;
-    emuiiboTesla.hidden = !offer.tesla_missing.length;
-    emuiiboTesla.textContent = offer.tesla_missing.length
-      ? "Its menu also needs " + offer.tesla_missing.join(" and ") +
-        ", which SwitchAgent does not install — see Add-ons."
+    // Its overlay menu (Ultrahand) comes first when the Switch lacks one.
+    emuiiboTesla.hidden = !offer.also.length;
+    emuiiboTesla.textContent = offer.also.length
+      ? "Its overlay menu, " + offer.also.join(" and ") + ", is not on this Switch either — it is installed first."
       : "";
     emuiiboBox.hidden = false;
-  }
-
-  function describeDownload(d) {
-    const version = d.version ? "emuiibo " + d.version : "emuiibo";
-    const kb = (n) => Math.round((n || 0) / 1024) + " KB";
-    switch (d.state) {
-      case "checking": return "Asking GitHub for the current emuiibo…";
-      case "downloading": return "Downloading " + version + " from GitHub… " + kb(d.received) + (d.total ? " of " + kb(d.total) : "");
-      case "adding": return version + " downloaded and checked — adding it to your Library…";
-      default: return "";
-    }
   }
 
   // Resolves with the download's final state ("done" / "failed").
@@ -559,10 +551,10 @@
     let d = await res.json();
     if (!res.ok) return { state: "failed", error: d.detail || ("HTTP " + res.status) };
     while (d.state !== "done" && d.state !== "failed") {
-      confirmResult.textContent = describeDownload(d);
+      confirmResult.textContent = window.SwitchAgentAddons.describe(d);
       await new Promise((resolve) => setTimeout(resolve, 700));
       try {
-        const poll = await fetch("/api/amiibo/activity?device=" + encodeURIComponent(device));
+        const poll = await fetch("/api/addons/activity");
         if (poll.ok) d = (await poll.json()).download || d;
       } catch (_) { /* keep waiting */ }
     }

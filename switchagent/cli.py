@@ -360,6 +360,7 @@ def _cmd_web(args: argparse.Namespace) -> int:
     ctx = build_mock_context(config.DB_PATH, seed_emuiibo=True) if use_mock else build_real_context(config.DB_PATH)
     ctx.start_worker()
     ctx.start_library_watcher()
+    ctx.addon_releases.start()
     app = create_app(ctx)
     print(
         f"SwitchAgent Web UI: http://{args.host}:{args.port}  "
@@ -372,6 +373,7 @@ def _cmd_web(args: argparse.Namespace) -> int:
     finally:
         ctx.stop_library_watcher()
         ctx.stop_worker()
+        ctx.addon_releases.stop()
     return 0
 
 

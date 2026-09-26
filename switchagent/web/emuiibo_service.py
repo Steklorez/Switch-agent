@@ -33,7 +33,7 @@ import uuid
 from pathlib import Path
 from typing import Iterator, Optional
 
-from .. import db, emuiibo
+from .. import addons, db, emuiibo
 from ..mtp.errors import InvalidOperationError, MtpError
 from ..transfer import STORAGE_SD_CARD
 
@@ -156,7 +156,7 @@ class EmuiiboService:
         if job is None or job["library_item_id"] is None:
             return
         item = db.get_library_item_by_id(conn, job["library_item_id"])
-        if item is not None and item["content_type"] in ("EMUIIBO", "AMIIBO"):
+        if item is not None and item["content_type"] in ("EMUIIBO", "AMIIBO", "ADDON"):
             self.request_read(job["target_device_id"])
 
     def step(self, conn, registry) -> bool:
@@ -197,19 +197,34 @@ class EmuiiboService:
                 def on_progress(folders, _total, _progress=progress):
                     _progress["folders"] = folders
 
-                reader = emuiibo.read_device(backend, STORAGE_SD_CARD, known=previous, progress=on_progress)
+                stored_addons = db.get_device_addons(conn, device_id)
+                known_addons = addons.ConsoleAddons.from_dict(stored_addons[0]) if stored_addons else None
+                reader = _read_console(backend, previous, on_progress, known_addons)
                 self._readers[device_id] = reader
         state = None
+        finished = False
         try:
             while True:
-                state = next(reader)
-                with self._lock:
-                    if device_id in self._reading:
-                        self._reading[device_id]["amiibo"] = len(state.amiibo)
-                if state.complete or time.monotonic() >= deadline:
+                kind, found = next(reader)
+                if kind == "emuiibo":
+                    state = found
+                    with self._lock:
+                        if device_id in self._reading:
+                            self._reading[device_id]["amiibo"] = len(state.amiibo)
+                    if state.complete:
+                        # Saved the moment it is known: the Amiibo page does
+                        # not wait for the add-ons part of the read.
+                        self._save_emuiibo(conn, device_id, state)
+                elif found.complete:
+                    db.set_device_addons(conn, device_id, found.to_dict())
+                    log.info("add-ons read off device=%s: %d catalog file(s) present%s", _short(device_id),
+                             len(found.files), ", kefir" if found.kefir else "")
+                    finished = True
+                    break
+                if time.monotonic() >= deadline:
                     break
         except StopIteration:
-            pass
+            finished = True
         except (MtpError, InvalidOperationError) as exc:
             log.warning("reading emuiibo off device=%s failed: %s", _short(device_id), exc)
             with self._lock:
@@ -218,10 +233,7 @@ class EmuiiboService:
                 self._reading.pop(device_id, None)
                 self._wanted.discard(device_id)
             return
-        if state is not None and state.complete:
-            db.set_device_emuiibo(conn, device_id, state.to_dict(), [a.to_dict() for a in state.amiibo])
-            log.info("emuiibo read off device=%s: installed=%s overlay=%s amiibo=%d",
-                     _short(device_id), state.installed, state.overlay_version, len(state.amiibo))
+        if finished:
             with self._lock:
                 self._readers.pop(device_id, None)
                 self._reading.pop(device_id, None)
@@ -229,6 +241,12 @@ class EmuiiboService:
                 # A read that went through answers the question the last
                 # failure left open -- the page must not keep showing it.
                 self._errors.pop(device_id, None)
+
+    @staticmethod
+    def _save_emuiibo(conn, device_id: str, state) -> None:
+        db.set_device_emuiibo(conn, device_id, state.to_dict(), [a.to_dict() for a in state.amiibo])
+        log.info("emuiibo read off device=%s: installed=%s overlay=%s amiibo=%d",
+                 _short(device_id), state.installed, state.overlay_version, len(state.amiibo))
 
     def _run_removal(self, conn, registry, task: dict, deadline: float) -> None:
         backend = registry.get(task["device_id"])
@@ -320,6 +338,16 @@ def _forget_removed(conn, device_id: str, removed: list[str]) -> None:
     db.set_device_emuiibo(conn, device_id, state, kept, read_at=read_at)
 
 
+def _read_console(backend, previous, on_progress, known_addons) -> Iterator[tuple[str, object]]:
+    """One read of a console: emuiibo and its amiibo, then the Add-ons
+    catalog's utilities -- ("emuiibo", state) / ("addons", state) after
+    every MTP request."""
+    for state in emuiibo.read_device(backend, STORAGE_SD_CARD, known=previous, progress=on_progress):
+        yield "emuiibo", state
+    for found in addons.read_device(backend, STORAGE_SD_CARD, addons.installable_catalog(), known=known_addons):
+        yield "addons", found
+
+
 def _public(task: dict) -> dict:
     return {k: v for k, v in task.items() if not k.startswith("_") and k != "device_id"}
 
@@ -336,99 +364,6 @@ def _short(device_id: str) -> str:
 # emuiibo from GitHub: download, add to the Library, install
 # ---------------------------------------------------------------------------
 
-class DownloadRefused(Exception):
-    """A download the page asked for that cannot start -- the message says why."""
-
-
-class ReleaseDownloader:
-    """The Amiibo page's "Download from GitHub and install": fetches
-    emuiibo's current release (emuiibo_download.py -- every check it makes is
-    listed there) into the first Library folder, indexes it like any Library
-    file, and hands it to the ordinary preparation queue for one console.
-
-    Its own thread, network only -- never COM, never the device. A release
-    of that version already in the Library is installed as it is, not
-    downloaded again. One download at a time."""
-
-    def __init__(self, db_path, preparations, *, opener=None):
-        self.db_path = Path(db_path)
-        self.preparations = preparations
-        self._opener = opener
-        self._lock = threading.Lock()
-        self._state: Optional[dict] = None
-
-    def start(self, target_device_id: Optional[str]) -> dict:
-        from .. import config
-
-        with self._lock:
-            if self._state is not None and self._state["state"] not in ("done", "failed"):
-                raise DownloadRefused("emuiibo is already being downloaded")
-            if not config.library_dirs():
-                raise DownloadRefused("choose a Library folder in Settings first -- the download goes there")
-            self._state = {
-                "id": uuid.uuid4().hex[:12], "state": "checking", "version": None, "received": 0,
-                "total": None, "error": None, "item_id": None, "file": None, "reused": False, "verified": False,
-                "queued": False, "device_id": target_device_id, "started": time.time(), "finished": None,
-            }
-            state = dict(self._state)
-        threading.Thread(target=self._run, name="switchagent-emuiibo-download", daemon=True).start()
-        return _public(state)
-
-    def snapshot(self) -> Optional[dict]:
-        with self._lock:
-            return _public(dict(self._state)) if self._state is not None else None
-
-    def _update(self, **fields) -> None:
-        with self._lock:
-            if self._state is not None:
-                self._state.update(fields)
-
-    def _run(self) -> None:
-        from .. import config, emuiibo_download, scanner, sd_files
-        from ..model import ContentType
-
-        kwargs = {"opener": self._opener} if self._opener is not None else {}
-        try:
-            release = emuiibo_download.latest_release(**kwargs)
-            self._update(version=release.version, total=release.size)
-            item_id = None
-            with db.open_db(self.db_path) as conn:
-                for row in db.list_library_items(conn):
-                    details = sd_files.row_details(row).get("emuiibo") or {}
-                    if (row["content_type"] == ContentType.EMUIIBO.value and row["status"] == "AVAILABLE"
-                            and details.get("version") == release.version):
-                        item_id = row["id"]
-                        self._update(reused=True, file=row["absolute_path"])
-                        break
-                if item_id is None:
-                    self._update(state="downloading")
-                    target = config.library_dirs()[0] / emuiibo_download.DOWNLOADS_FOLDER
-                    path = emuiibo_download.download(
-                        release, target, progress=lambda got, total: self._update(received=got),
-                        **kwargs,
-                    )
-                    self._update(state="adding", received=release.size, file=str(path),
-                                 verified=release.sha256 is not None)
-                    row = scanner.index_library_file(conn, path)
-                    if (row is None or row["content_type"] != ContentType.EMUIIBO.value
-                            or row["status"] != "AVAILABLE"):
-                        raise emuiibo_download.DownloadError(
-                            "downloaded, but the Library does not take it for an emuiibo release")
-                    item_id = row["id"]
-            self._update(item_id=item_id)
-            with self._lock:
-                device_id = self._state["device_id"] if self._state else None
-            if device_id:
-                self.preparations.submit([item_id], device_id)
-                self._update(queued=True)
-            self._update(state="done", finished=time.time())
-            log.info("emuiibo %s from GitHub: %s, item %s%s", release.version,
-                     "already in the Library" if self.snapshot().get("reused") else "downloaded",
-                     item_id, ", queued for install" if device_id else "")
-        except emuiibo_download.DownloadError as exc:
-            log.warning("emuiibo download failed: %s", exc)
-            self._update(state="failed", error=str(exc), finished=time.time())
-        except Exception as exc:  # noqa: BLE001 -- the page must learn it failed, whatever it was
-            log.exception("emuiibo download failed unexpectedly")
-            self._update(state="failed", error=f"unexpected error: {type(exc).__name__}: {exc}",
-                         finished=time.time())
+# emuiibo's "download from GitHub and install" is one case of installing
+# from the Add-ons catalog (web/addons_service.py); the old names stay.
+from .addons_service import AddonInstaller as ReleaseDownloader, DownloadRefused  # noqa: E402,F401

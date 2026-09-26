@@ -2,6 +2,37 @@
 {% block title %}Settings — SwitchAgent{% endblock %}
 {% block content %}
 <h2>Settings</h2>
+{#- First on the page, so nobody misses that they exist. Experimental features, off by default: today the Add-ons tab.
+    Turning them on asks first (beta.js); emuiibo and amiibo are not among
+    them. -#}
+<section class="settings-section" id="beta">
+  <h3><span aria-hidden="true">🧪</span> Beta features</h3>
+  <label class="beta-toggle">
+    <span class="switch switch-beta">
+      <input type="checkbox" id="beta-toggle" {{ "checked" if beta }}>
+      <span class="switch-slider"></span>
+    </span>
+    <span><strong>Experimental features</strong> — the Add-ons tab: install homebrew utilities (Ultrahand, FPSLocker,
+      Status Monitor…) from their GitHub releases onto the Switch, and keep them updated.</span>
+  </label>
+  <p class="settings-hint">Off by default. emuiibo and virtual amiibo work either way.</p>
+</section>
+
+<dialog id="beta-dialog" class="modal" aria-labelledby="beta-dialog-title">
+  <div class="modal-body">
+    <h3 id="beta-dialog-title"><span aria-hidden="true">🧪</span> Turn on experimental features?</h3>
+    <p>These features are new and still being tested. They may change, behave unexpectedly, or be removed.</p>
+    <p>The Add-ons tab installs other people's open-source homebrew onto your Switch — system modules and
+      overlays among it. Some need a restart of the console to start, and a module that does not suit your
+      firmware can keep it from booting until it is removed from the SD card by hand.</p>
+    <p class="settings-hint">You can turn them off here at any time; what is already on the Switch stays there.</p>
+  </div>
+  <div class="modal-actions">
+    <button type="button" class="btn btn-secondary" id="beta-cancel">Cancel</button>
+    <button type="button" class="btn btn-primary" id="beta-confirm">Turn on</button>
+  </div>
+</dialog>
+
 <section class="settings-section">
   <h3>Appearance</h3>
   <label>Animation
@@ -151,6 +182,7 @@
   </p>
 </section>
 
+
 <section class="settings-section">
   <h3>Devices</h3>
   <p>{{ devices|length }} known device(s) — see the <a href="/devices">Devices</a> page to rename.</p>
@@ -187,4 +219,5 @@
 <script src="{{ static_url('preferences.js') }}"></script>
 <script src="{{ static_url('motion_preferences.js') }}"></script>
 <script src="{{ static_url('settings.js') }}"></script>
+<script src="{{ static_url('beta.js') }}"></script>
 {% endblock %}

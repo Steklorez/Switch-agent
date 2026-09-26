@@ -594,6 +594,10 @@ a { color: var(--accent); text-decoration: none; }
 }
 .switch input:checked + .switch-slider { background: var(--danger); border-color: var(--danger); }
 .switch input:checked + .switch-slider::before { transform: translateX(16px); background: #fff; }
+.switch-beta input:checked + .switch-slider { background: var(--accent); border-color: var(--accent); }
+.beta-toggle { display: flex; align-items: flex-start; gap: 12px; cursor: pointer; }
+.beta-toggle .switch { margin-top: 2px; }
+#beta-dialog { max-width: 520px; }
 .switch input:focus-visible + .switch-slider { outline: 2px solid var(--accent); outline-offset: 2px; }
 .switch input:disabled + .switch-slider { opacity: 0.6; cursor: default; }
 
@@ -628,6 +632,7 @@ a { color: var(--accent); text-decoration: none; }
 .job-tag-sd     { background: var(--sd); }
 .job-tag-amiibo { background: var(--amiibo); }
 .job-tag-emuiibo { background: var(--amiibo); }
+.job-tag-addon { background: #3fb6a8; }
 .job-meta, .history-meta { color: var(--text-dim); font-size: 0.8rem; margin-top: 2px; }
 .job-progress-text { color: var(--accent); font-size: 0.8rem; font-weight: 600; margin-top: 2px; }
 .history-note { color: var(--text-dim); font-size: 0.8rem; margin-top: 2px; overflow-wrap: anywhere; }

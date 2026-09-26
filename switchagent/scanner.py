@@ -17,7 +17,7 @@ import time
 from pathlib import Path
 from typing import Callable, Optional
 
-from . import config, db, emuiibo, extractor, nro, sd_files, title_id
+from . import addons, config, db, emuiibo, extractor, nro, sd_files, title_id
 from .model import ContentType
 
 TITLE_ID_DIR_RE = re.compile(rf"^{config.TITLE_ID_RE}$")
@@ -33,7 +33,9 @@ TITLE_ID_DIR_RE = re.compile(rf"^{config.TITLE_ID_RE}$")
 #   3  archives holding a loose .nro
 #   4  emuiibo releases and virtual amiibo; an .nsp inside atmosphere/contents/
 #      (a sysmodule's exefs.nsp) is no longer taken for an installable package
-CLASSIFICATION_REVISION = 4
+#   5  Add-ons catalog releases (switchagent/addons.py): Ultrahand's
+#      sdout.zip, SaltyNX, Fizeau, a catalog overlay or app
+CLASSIFICATION_REVISION = 5
 
 # A library item that is a program for this PC, not something for a Switch
 # (emuiibo's emutool / emuiigen): shown for what it is, never installable,
@@ -54,6 +56,23 @@ def emuiibo_details(plan: emuiibo.ReleasePlan, version: Optional[str]) -> dict:
 
 def amiibo_details(collection: emuiibo.Collection) -> dict:
     return {"amiibo": collection.summary()}
+
+
+def addon_details(match: addons.ReleaseMatch, version: Optional[str]) -> dict:
+    return {"addon": match.to_dict(version)}
+
+
+# A Tesla overlay. Indexed only when it is an Add-ons catalog utility's
+# (addons.match_program): any other .ovl has nowhere SwitchAgent knows to put it.
+OVL_EXTENSION = ".ovl"
+
+
+def _addon_program(path: Path) -> Optional[addons.ReleaseMatch]:
+    try:
+        size = path.stat().st_size
+    except OSError:
+        return None
+    return addons.match_program(path.name, nro.read_nro_info(path), size)
 
 
 # What the library indexes as single files. .nro is deliberately not in
@@ -117,10 +136,36 @@ def classify_file(abs_path: Path) -> dict:
     if ext in config.ARCHIVE_EXTENSIONS:
         return _classify_archive_file(abs_path, ext)
 
-    if ext == sd_files.NRO_EXTENSION:
-        return _classify_nro_file(abs_path)
+    if ext in (sd_files.NRO_EXTENSION, OVL_EXTENSION):
+        match = _addon_program(abs_path)
+        if match is not None:
+            return _addon_fields(abs_path, match, file_type=ext.lstrip(".").upper(),
+                                 content_hash=sha256_file(abs_path),
+                                 version=(nro.read_nro_info(abs_path) or nro.NroInfo(None, None, None)).version)
+        if ext == sd_files.NRO_EXTENSION:
+            return _classify_nro_file(abs_path)
+        return dict(
+            item_type="FILE", file_type="OVL", content_type=ContentType.UNKNOWN.value, package_format=None,
+            content_hash=sha256_file(abs_path), title_id=None, title_id_source=None, title_id_confident=False,
+            status="NEEDS_REVIEW", suggested_action=None, suggested_target=None,
+            note="a Tesla overlay that is not one of the Add-ons catalog's", error=None, details_json=None,
+        )
 
     raise ValueError(f"unsupported extension for classify_file: {ext}")
+
+
+def _addon_fields(abs_path: Path, match: addons.ReleaseMatch, *, file_type: str,
+                  content_hash: Optional[str], version: Optional[str]) -> dict:
+    addon = addons.by_id(match.addon_id)
+    label = f"{addon.name if addon else match.addon_id}{' ' + version if version else ''}"
+    return dict(
+        item_type="FILE", file_type=file_type, content_type=ContentType.ADDON.value,
+        package_format=None, content_hash=content_hash,
+        title_id=None, title_id_source=None, title_id_confident=False,
+        status="ANALYZED", suggested_action="COPY_MERGE", suggested_target="SD_CARD",
+        note=f"{label} -- an Add-ons utility, copied only to the places its catalog entry names",
+        error=None, details_json=_details_json(extra=addon_details(match, version)),
+    )
 
 
 def _classify_nro_file(abs_path: Path) -> dict:
@@ -253,6 +298,16 @@ def _classify_archive_file(abs_path: Path, ext: str) -> dict:
             note="emuiibo (virtual amiibo sysmodule and overlay), copied to where its release lays it out",
             details_json=_details_json(extra=emuiibo_details(plan, version)),
         )
+
+    if cls.content_type is ContentType.ADDON:
+        version = None
+        if cls.addon.version_source:
+            data = extractor.read_archive_member(abs_path, cls.addon.version_source,
+                                                 max_bytes=addons.CONSOLE_READ_MAX_BYTES)
+            info = nro.nro_info_from_bytes(data) if data else None
+            version = info.version if info else None
+        return _addon_fields(abs_path, cls.addon, file_type=archive_format, content_hash=content_hash,
+                             version=version)
 
     if cls.content_type is ContentType.AMIIBO:
         return dict(
@@ -883,6 +938,11 @@ def scan_library_once(
                 continue
             if lowered_name.endswith(".bin"):
                 bin_files.append(candidate)
+                continue
+            if (candidate.suffix.lower() == OVL_EXTENSION and candidate.is_file()
+                    and not path_is_inside_any(candidate, mod_folders)
+                    and _addon_program(candidate) is not None):
+                candidate_files.append(candidate)
                 continue
             if (candidate.suffix.lower() in _LIBRARY_FILE_EXTENSIONS
                     and candidate.is_file()

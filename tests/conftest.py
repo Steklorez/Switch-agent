@@ -16,6 +16,14 @@ import pytest
 from switchagent import config, db, known_folders
 
 
+@pytest.fixture(autouse=True)
+def _own_preferences(tmp_path_factory, monkeypatch):
+    """preferences.json (auto-scan, covers, the beta features) lives in
+    config.DATA_DIR -- never the real one: a test must not depend on what
+    the person running it turned on in Settings, nor change it."""
+    monkeypatch.setattr(config, "DATA_DIR", tmp_path_factory.mktemp("data"))
+
+
 def build_zip(path: Path, entries: dict[str, bytes]) -> Path:
     with zipfile.ZipFile(path, "w") as zf:
         for name, data in entries.items():

@@ -71,8 +71,10 @@ def test_read_nro_info_rejects_a_non_nro(tmp_path):
 
 def test_lone_nro_is_indexed_as_sd_files_named_after_the_app(isolated_db, monkeypatch):
     conn, _ = isolated_db
-    path = config.LIBRARY_DIR / "checkpoint-release.nro"
-    path.write_bytes(make_nro("Checkpoint", "BG", "3.8.0"))
+    # Not one of the Add-ons catalog's apps -- those are ADDON items
+    # (switchagent/addons.py), this is about any other homebrew app.
+    path = config.LIBRARY_DIR / "nx-shell-release.nro"
+    path.write_bytes(make_nro("NX-Shell", "joel16", "3.8.0"))
 
     _scan(conn, monkeypatch)
 
@@ -81,7 +83,7 @@ def test_lone_nro_is_indexed_as_sd_files_named_after_the_app(isolated_db, monkey
     assert row["content_type"] == ContentType.SD_FILES.value
     assert row["suggested_target"] == "SD_CARD"
     names = [g["name"] for g in services.list_library_view(conn)["games"]]
-    assert names == ["Checkpoint 3.8.0"]
+    assert names == ["NX-Shell 3.8.0"]
 
 
 def test_nro_without_metadata_is_named_after_its_file(isolated_db, monkeypatch):
@@ -178,8 +180,8 @@ def test_lone_nro_transfers_into_its_own_switch_folder(tmp_path):
 
 def test_queued_nro_lands_on_the_sd_card(isolated_db, monkeypatch):
     conn, _ = isolated_db
-    path = config.LIBRARY_DIR / "Goldleaf.nro"
-    path.write_bytes(make_nro("Goldleaf", "XorTroll", "1.0.0"))
+    path = config.LIBRARY_DIR / "NX-Shell.nro"
+    path.write_bytes(make_nro("NX-Shell", "joel16", "1.0.0"))
     _scan(conn, monkeypatch)
     row = db.get_library_item(conn, str(path))
 
@@ -193,19 +195,19 @@ def test_queued_nro_lands_on_the_sd_card(isolated_db, monkeypatch):
     registry.register("mock-switch", backend)
 
     assert queue_worker.run_worker_once(conn, registry).status == "DONE"
-    assert backend.storage_tree("SD_CARD").list_files() == ["switch/Goldleaf/Goldleaf.nro"]
-    assert queue_worker.display_name_for_job(conn, db.get_job(conn, job_id)).startswith("Goldleaf 1.0.0")
+    assert backend.storage_tree("SD_CARD").list_files() == ["switch/NX-Shell/NX-Shell.nro"]
+    assert queue_worker.display_name_for_job(conn, db.get_job(conn, job_id)).startswith("NX-Shell 1.0.0")
 
 
 def test_nro_already_on_the_card_is_a_conflict_not_an_overwrite(isolated_db, monkeypatch):
     conn, _ = isolated_db
-    path = config.LIBRARY_DIR / "Goldleaf.nro"
-    path.write_bytes(make_nro("Goldleaf"))
+    path = config.LIBRARY_DIR / "NX-Shell.nro"
+    path.write_bytes(make_nro("NX-Shell"))
     _scan(conn, monkeypatch)
     row = db.get_library_item(conn, str(path))
     backend = _backend()
-    backend.ensure_directory("SD_CARD", "switch/Goldleaf")
-    backend.storage_tree("SD_CARD").write_file("switch/Goldleaf/Goldleaf.nro", b"older version")
+    backend.ensure_directory("SD_CARD", "switch/NX-Shell")
+    backend.storage_tree("SD_CARD").write_file("switch/NX-Shell/NX-Shell.nro", b"older version")
 
     job_id = queue_worker.create_job_from_report(
         conn, preview.preview_path(path), library_item_id=row["id"], action="COPY_MERGE",
@@ -216,4 +218,4 @@ def test_nro_already_on_the_card_is_a_conflict_not_an_overwrite(isolated_db, mon
     registry.register("mock-switch", backend)
 
     assert queue_worker.run_worker_once(conn, registry).status == "DESTINATION_CONFLICT"
-    assert backend.storage_tree("SD_CARD").read_file("switch/Goldleaf/Goldleaf.nro") == b"older version"
+    assert backend.storage_tree("SD_CARD").read_file("switch/NX-Shell/NX-Shell.nro") == b"older version"

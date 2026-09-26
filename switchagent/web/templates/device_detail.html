@@ -107,7 +107,8 @@
     with {{ view.emuiibo.amiibo }} virtual amiibo.{% else %}emuiibo is not on this Switch.{% endif %}
     {% if view.emuiibo.missing %}Missing: {{ view.emuiibo.missing|join(", ") }}.{% endif %}
     {% if amiibo_tab %}<a href="/amiibo?device={{ view.device_fingerprint }}">Amiibo →</a>
-    {% else %}<a href="/addons?device={{ view.device_fingerprint }}#addon-emuiibo">Install it from Add-ons →</a>{% endif %}
+    {% elif beta %}<a href="/addons?device={{ view.device_fingerprint }}#addon-emuiibo">Install it from Add-ons →</a>
+    {% else %}<a href="/amiibo?device={{ view.device_fingerprint }}">Install it →</a>{% endif %}
   </p>
 </section>
 {% endif %}

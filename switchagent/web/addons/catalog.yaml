@@ -2,8 +2,13 @@
 # each one is, how it works, how it gets onto a console and how to use it.
 #
 # The list is curated by hand -- add an entry here and it shows up on the tab,
-# in this order. Loaded and checked by switchagent/web/addons_views.py
+# in this order. Loaded and checked by switchagent/addons.py
 # (tests/test_addons.py fails on an entry that breaks a rule below).
+#
+# Only what goes onto a console as plain files on its SD card -- over DBI's
+# MTP responder, while it runs -- belongs here. Never the boot chain
+# (Atmosphère, hekate, payloads): switchagent/addons.py refuses any install
+# block that could write there.
 #
 # Fields (all text is shown as written; `backticks` render as code):
 #   id            unique, lowercase, used by `requires`
@@ -13,10 +18,26 @@
 #   author, license, source (the project's page), releases (where builds are)
 #   preview       optional: an image in web/static/ (a small, honest picture
 #                 of the program), with preview_caption saying what it shows
-#   status        optional: a built-in check SwitchAgent runs against a
-#                 connected Switch -- one of: emuiibo, tesla_menu, ovlloader
-#   install       optional: SwitchAgent installs it itself -- one of: emuiibo
-#   requires      ids of other entries it cannot work without
+#   status        optional: a built-in check -- emuiibo
+#   install       optional: how SwitchAgent installs it itself --
+#                   emuiibo            (the built-in emuiibo installer), or a block:
+#                   repo:              owner/name on GitHub
+#                   asset:             the release file to take (exact, or a
+#                                      pattern like "Fizeau-*.zip")
+#                   name:              the name in its NACP (what the overlay
+#                                      menu / Homebrew Menu shows)
+#                 for one .ovl/.nro:
+#                   to:                where it goes on the SD card
+#                 for an archive laid out like the SD card:
+#                   places:            every folder ("x/y/") or file it may
+#                                      write -- nothing else of it is copied
+#                   sign:              the files that, all present, are it
+#                   version_from:      its .ovl/.nro whose NACP has the version
+#                   keep:              files a person edits: written when
+#                                      missing, never replaced
+#                 kefir: true          kefir ships it and keeps it updated
+#   requires      ids of other entries it cannot work without -- installed
+#                 first by Install when the console does not have them
 #   related       optional: {label, href} -- a SwitchAgent page for it
 #   about         paragraphs (blank line between them)
 #   how_it_works  list of sentences
@@ -26,6 +47,58 @@
 #   tips          list of {problem, answer} or plain sentences
 
 addons:
+  - id: ultrahand
+    name: Ultrahand Overlay
+    tagline: The overlay menu — every overlay below opens from it, in any game.
+    category: Overlays
+    author: ppkantorski
+    license: GPL-2.0
+    source: https://github.com/ppkantorski/Ultrahand-Overlay
+    releases: https://github.com/ppkantorski/Ultrahand-Overlay/releases/latest
+    install:
+      repo: ppkantorski/Ultrahand-Overlay
+      asset: sdout.zip
+      name: Ultrahand
+      places:
+        - switch/.overlays/ovlmenu.ovl
+        - switch/.packages/
+        - switch/Ultrahand-Reload/
+        - config/ultrahand/
+        - atmosphere/contents/420000000007E51A/
+        - atmosphere/contents/420000000007E51B/
+        - atmosphere/exefs_patches/audio_mastervolume/
+      sign:
+        - switch/.overlays/ovlmenu.ovl
+        - atmosphere/contents/420000000007E51A/exefs.nsp
+      version_from: switch/.overlays/ovlmenu.ovl
+      kefir: true
+    about: |
+      A menu drawn over whatever is on screen — a game or the home menu — listing every overlay in
+      `switch/.overlays/`. It replaces Tesla Menu (unmaintained since 2023) under the same file name
+      and the same buttons, so every Tesla overlay works with it.
+
+      Its release carries nx-ovlloader, the background module that loads the menu when you press the
+      buttons: one install gives you both.
+    how_it_works:
+      - nx-ovlloader starts with the console from `atmosphere/contents/420000000007E51A` and waits for the button combination.
+      - The menu itself is `switch/.overlays/ovlmenu.ovl`; every other `.ovl` in that folder is an entry in it.
+      - Its settings, languages and themes live in `config/ultrahand/`.
+    install_steps:
+      - Press Install. SwitchAgent takes `sdout.zip` from its latest GitHub release, checks it, adds it to your Library and queues it for this Switch.
+      - Restart the Switch — nx-ovlloader loads only when the console starts.
+      - "By hand instead: extract `sdout.zip` to the root of the SD card, then restart."
+    usage:
+      - Hold L and D-pad Down, then press the right stick (R3) — in a game or on the home menu.
+      - Pick an overlay with A; B goes back.
+    controls:
+      - {keys: "L + D-pad Down, then R3", action: "Open or close the menu"}
+      - {keys: "A / B", action: "Open / back"}
+    tips:
+      - problem: Nothing happens on L + D-pad Down + R3.
+        answer: nx-ovlloader is not running — restart the Switch after installing. Check that `atmosphere/contents/420000000007E51A/flags/boot2.flag` is on the card.
+      - problem: A Tesla Menu is already installed.
+        answer: Installing Ultrahand replaces it — same file, same buttons; your overlays stay.
+
   - id: emuiibo
     name: emuiibo
     tagline: Virtual amiibo — use any amiibo in games without the figure.
@@ -38,7 +111,7 @@ addons:
     preview_caption: The emuiibo overlay in a game (illustration — its own labels and layout).
     status: emuiibo
     install: emuiibo
-    requires: [nx-ovlloader, tesla-menu]
+    requires: [ultrahand]
     related: {label: "Manage amiibo", href: "/amiibo"}
     about: |
       Games that read amiibo over NFC get a virtual one from emuiibo instead of a real figure:
@@ -50,13 +123,12 @@ addons:
       collections from the Amiibo tab.
     how_it_works:
       - The module starts with the console (Atmosphère launches it from `atmosphere/contents/0100000000000352`) and, while emulation is on, answers every game that asks for an amiibo.
-      - The overlay, opened through Tesla Menu, turns emulation on and off and picks the active amiibo. It works only with the module of its own version.
+      - The overlay, opened through Ultrahand, turns emulation on and off and picks the active amiibo. It works only with the module of its own version.
       - Each virtual amiibo is a folder in `emuiibo/amiibo/` holding `amiibo.json` and `amiibo.flag`; sub-folders are how the overlay groups them.
       - What a game saves on an amiibo is kept in that amiibo's `areas/` folder — and goes with it if the amiibo is removed.
     install_steps:
       - Connect the Switch with DBI's MTP responder running.
-      - Press Install on this card. SwitchAgent fetches the current `emuiibo.zip` from its GitHub releases, checks its size and published SHA-256, adds it to your Library and queues it for this Switch.
-      - Make sure Tesla Menu and nx-ovlloader show as installed too — the overlay cannot be opened without them.
+      - Press Install on this card. SwitchAgent fetches the current `emuiibo.zip` from its GitHub releases, checks its size and published SHA-256, adds it to your Library and queues it for this Switch — with Ultrahand first, if the Switch does not have it.
       - Restart the Switch. emuiibo loads only when the console starts.
       - "By hand instead: extract `emuiibo.zip` and copy what is inside its `SdOut` folder to the root of the SD card, then restart."
     usage:
@@ -66,7 +138,7 @@ addons:
       - Open the overlay again, go into a folder and select an amiibo with A. It becomes the active amiibo and is connected — as if the figure were on the reader. The game reads it.
       - When the game asks you to remove the amiibo, disconnect it with R3 in the overlay (or select it again).
     controls:
-      - {keys: "L + D-pad Down, then R3", action: "Open the overlay menu (Tesla Menu), then pick emuiibo"}
+      - {keys: "L + D-pad Down, then R3", action: "Open the overlay menu (Ultrahand), then pick emuiibo"}
       - {keys: "R / L", action: "Emulation on / off"}
       - {keys: "A", action: "Open a folder, or make an amiibo the active one"}
       - {keys: "R3", action: "Connect / disconnect the active amiibo"}
@@ -88,50 +160,699 @@ addons:
         answer: The overlay lists folders when it opens — close and reopen it. An amiibo without `amiibo.flag` is hidden on purpose.
       - Names longer than 10 characters are shortened in games; the folder name in the overlay stays as it is.
 
-  - id: tesla-menu
-    name: Tesla Menu
-    tagline: The overlay menu that emuiibo and other overlays open from.
+  - id: status-monitor
+    name: Status Monitor
+    tagline: FPS, temperatures, clocks and battery drawn over the game.
     category: Overlays
-    author: WerWolv
+    author: masagrator, ppkantorski
     license: GPL-2.0
-    source: https://github.com/WerWolv/Tesla-Menu
-    releases: https://github.com/WerWolv/Tesla-Menu/releases/latest
-    status: tesla_menu
-    requires: [nx-ovlloader]
+    source: https://github.com/ppkantorski/Status-Monitor-Overlay
+    releases: https://github.com/ppkantorski/Status-Monitor-Overlay/releases/latest
+    install:
+      repo: ppkantorski/Status-Monitor-Overlay
+      asset: Status-Monitor-Overlay.ovl
+      name: Status Monitor
+      to: switch/.overlays/Status-Monitor-Overlay.ovl
+    requires: [ultrahand]
     about: |
-      A small menu drawn over any game, listing every overlay installed in `switch/.overlays/`.
-      Ultrahand Overlay is a newer menu that installs under the same file name and works the same way.
-    how_it_works:
-      - It is itself an overlay, `switch/.overlays/ovlmenu.ovl`, loaded by nx-ovlloader when you press the key combination.
-      - Every other `.ovl` file in `switch/.overlays/` shows up in it as an entry.
-    install_steps:
-      - Download `ovlmenu.zip` from its releases page.
-      - Extract it and copy its `switch` folder to the root of the SD card — `ovlmenu.ovl` ends up in `switch/.overlays/`.
-      - nx-ovlloader has to be installed as well; restart the Switch after installing both.
-    usage:
-      - Hold L and D-pad Down, then press the right stick (R3), anywhere — in a game or on the home screen.
-      - Pick an overlay with A; B goes back.
-    tips:
-      - problem: Nothing happens on L + D-pad Down + R3.
-        answer: nx-ovlloader is missing or the console was not restarted after installing it.
+      Shows what the console is doing while you play: CPU, GPU and memory load and clocks, SoC and
+      board temperatures, fan speed, battery and charger power — as a full panel, a small corner
+      readout or just a frame counter.
 
-  - id: nx-ovlloader
-    name: nx-ovlloader
-    tagline: The background loader that makes overlays possible at all.
-    category: Overlays
-    author: WerWolv
-    license: ISC
-    source: https://github.com/WerWolv/nx-ovlloader
-    releases: https://github.com/WerWolv/nx-ovlloader/releases/latest
-    status: ovlloader
-    about: |
-      A background module that Atmosphère starts with the console. It waits for the overlay key
-      combination and loads Tesla Menu — and through it every other overlay.
+      The maintained build: masagrator's original repository is archived, this is where it lives on.
     how_it_works:
-      - Lives in `atmosphere/contents/420000000007E51A`; its `flags/boot2.flag` makes Atmosphère start it at boot.
+      - An overlay, `switch/.overlays/Status-Monitor-Overlay.ovl`, opened from Ultrahand.
+      - The frame counter needs SaltyNX running (installed with FPSLocker); everything else works without it.
     install_steps:
-      - Download `nx-ovlloader.zip` from its releases page.
-      - Extract it and copy its `atmosphere` folder to the root of the SD card.
+      - Press Install. SwitchAgent takes `Status-Monitor-Overlay.ovl` from its latest GitHub release and queues it — with Ultrahand first, if the Switch does not have it.
+      - No restart needed; open the overlay menu again to see it.
+    usage:
+      - Open Ultrahand (L + D-pad Down, then R3) and pick Status Monitor.
+      - Choose a mode — Full, Mini, Micro or FPS — and close the menu; the readout stays on screen.
+      - Open it again and choose the mode again to turn the readout off.
+    tips:
+      - problem: The FPS counter shows nothing.
+        answer: SaltyNX is not running — install FPSLocker (which brings it) and restart the Switch.
+
+  - id: fpslocker
+    name: FPSLocker
+    tagline: Higher frame rates — unlock 30 FPS games, cap others to save battery.
+    category: Overlays
+    author: masagrator
+    license: GPL-3.0
+    source: https://github.com/masagrator/FPSLocker
+    releases: https://github.com/masagrator/FPSLocker/releases/latest
+    install:
+      repo: masagrator/FPSLocker
+      asset: FPSLocker.ovl
+      name: FPSLocker
+      to: switch/.overlays/FPSLocker.ovl
+    requires: [ultrahand, saltynx]
+    about: |
+      Sets the frame-rate target of the game you are playing, remembered per game: 60 FPS where the
+      game can go past its 30 FPS lock, or a lower cap to keep a game steady and the battery going.
+
+      Many games need a small patch before they run faster than they were shipped; FPSLocker checks
+      for one and downloads it on the console itself.
+    how_it_works:
+      - An overlay, `switch/.overlays/FPSLocker.ovl`, working through SaltyNX — which is why SaltyNX is installed with it.
+      - Per-game settings and patches live in `SaltySD/plugins/FPSLocker/` on the SD card.
+    install_steps:
+      - Press Install. SwitchAgent queues SaltyNX and Ultrahand first where the Switch lacks them, then `FPSLocker.ovl` from its latest GitHub release.
+      - Restart the Switch once — SaltyNX starts only with the console.
+    usage:
+      - Start the game, open Ultrahand (L + D-pad Down, then R3) and pick FPSLocker.
+      - Choose the frame-rate target; it is saved for this game.
+      - If the game needs a patch, use the overlay's own check / download option, then restart the game.
+    tips:
+      - problem: FPSLocker says SaltyNX is not running.
+        answer: Restart the Switch after installing. If it stays, the game may be on SaltyNX's exceptions list (`SaltySD/exceptions.txt`).
+      - A higher target only helps where the game can keep up; a heavy game may stay below it.
+
+  - id: saltynx
+    name: SaltyNX
+    tagline: The background module FPSLocker, ReverseNX-RT and Status Monitor's FPS counter run on.
+    category: System modules
+    author: masagrator
+    license: GPL-2.0
+    source: https://github.com/masagrator/SaltyNX
+    releases: https://github.com/masagrator/SaltyNX/releases/latest
+    install:
+      repo: masagrator/SaltyNX
+      asset: SaltyNX.zip
+      name: SaltyNX
+      places:
+        - atmosphere/contents/0000000000534C56/
+        - atmosphere/exefs_patches/SaltyNX_Fixes/
+        - SaltySD/
+      sign:
+        - atmosphere/contents/0000000000534C56/exefs.nsp
+      keep:
+        - SaltySD/exceptions.txt
+    about: |
+      A background module that loads small plugins into games as they start — the way FPSLocker
+      changes the frame rate and ReverseNX-RT the display mode. On its own it does nothing you see.
+    how_it_works:
+      - Starts with the console from `atmosphere/contents/0000000000534C56`; its own files live in `SaltySD/`.
+      - Games listed in `SaltySD/exceptions.txt` are left alone — that file is yours and is never replaced by an update.
+    install_steps:
+      - Installed on its own, or together with FPSLocker or ReverseNX-RT. SwitchAgent takes `SaltyNX.zip` from its latest GitHub release.
       - Restart the Switch.
     usage:
-      - Nothing to do by hand — once it runs, the Tesla Menu key combination works.
+      - Nothing to do by hand — the overlays that need it say so when it is not running.
+    tips:
+      - problem: A game crashes at start since SaltyNX was installed.
+        answer: Add that game's title id to `SaltySD/exceptions.txt` and restart.
+
+  - id: reversenx-rt
+    name: ReverseNX-RT
+    tagline: Switch a game between handheld and docked mode on the fly.
+    category: Overlays
+    author: masagrator
+    license: GPL-2.0
+    source: https://github.com/masagrator/ReverseNX-RT
+    releases: https://github.com/masagrator/ReverseNX-RT/releases/latest
+    install:
+      repo: masagrator/ReverseNX-RT
+      asset: ReverseNX-RT-ovl.ovl
+      name: ReverseNX-RT
+      to: switch/.overlays/ReverseNX-RT-ovl.ovl
+    requires: [ultrahand, saltynx]
+    about: |
+      Makes a game believe it is docked while you hold the console — sharper graphics where the
+      game has a docked profile — or handheld while docked, for a steadier frame rate.
+    how_it_works:
+      - An overlay, `switch/.overlays/ReverseNX-RT-ovl.ovl`, working through SaltyNX.
+      - It changes what the game is told about the mode, not the console's clocks; not every game reacts.
+    install_steps:
+      - Press Install. SwitchAgent queues SaltyNX and Ultrahand first where the Switch lacks them, then the overlay from its latest GitHub release.
+      - Restart the Switch once — SaltyNX starts only with the console.
+    usage:
+      - Start the game, open Ultrahand (L + D-pad Down, then R3) and pick ReverseNX-RT.
+      - Choose Docked or Handheld; the game switches right away.
+    tips:
+      - Docked mode in handheld drains the battery faster and can run the console warmer.
+
+  - id: fizeau
+    name: Fizeau
+    tagline: Screen colour, night filter and brightness beyond the system's own.
+    category: Display
+    author: averne
+    license: GPL-2.0
+    source: https://github.com/averne/Fizeau
+    releases: https://github.com/averne/Fizeau/releases/latest
+    install:
+      repo: averne/Fizeau
+      asset: Fizeau-*.zip
+      name: Fizeau
+      places:
+        - atmosphere/contents/0100000000000F12/
+        - atmosphere/exefs_patches/nvnflinger_cmu/
+        - config/Fizeau/
+        - switch/Fizeau/
+        - switch/.overlays/Fizeau.ovl
+      sign:
+        - atmosphere/contents/0100000000000F12/exefs.nsp
+        - switch/.overlays/Fizeau.ovl
+      version_from: switch/.overlays/Fizeau.ovl
+      keep:
+        - config/Fizeau/config.ini
+    about: |
+      Adjusts the whole picture the console draws: colour temperature (a warm night filter),
+      saturation, hue, contrast, gamma and a dimmer screen than the system allows — on a schedule,
+      separately for day and night.
+    how_it_works:
+      - A background module (`atmosphere/contents/0100000000000F12`) applies the settings; an overlay and an app change them.
+      - Settings are kept in `config/Fizeau/config.ini`, which an update never replaces.
+    install_steps:
+      - Press Install. SwitchAgent takes the `Fizeau-….zip` of its latest GitHub release and queues it.
+      - Restart the Switch.
+    usage:
+      - Open Ultrahand (L + D-pad Down, then R3) and pick Fizeau, or start the Fizeau app from the Homebrew Menu.
+      - Turn correction on, then set temperature and the rest for day and for night, with the times they switch.
+    tips:
+      - problem: The colours do not change.
+        answer: The module is not running — restart the Switch after installing.
+
+  - id: quickntp
+    name: QuickNTP
+    tagline: Set the console's clock from the internet in one click.
+    category: Overlays
+    author: nedex
+    license: Unlicense
+    source: https://github.com/nedex/QuickNTP
+    releases: https://github.com/nedex/QuickNTP/releases/latest
+    install:
+      repo: nedex/QuickNTP
+      asset: sdout.zip
+      name: QuickNTP
+      places:
+        - switch/.overlays/QuickNTP.ovl
+        - config/quickntp.ini
+      sign:
+        - switch/.overlays/QuickNTP.ovl
+      version_from: switch/.overlays/QuickNTP.ovl
+      keep:
+        - config/quickntp.ini
+    requires: [ultrahand]
+    about: |
+      A console kept offline drifts, and games that follow real time (Animal Crossing among them)
+      follow the drift. QuickNTP asks a time server and sets the clock, without going online for
+      anything else.
+    how_it_works:
+      - An overlay, `switch/.overlays/QuickNTP.ovl`; the servers it can ask are listed in `config/quickntp.ini`, which an update never replaces.
+    install_steps:
+      - Press Install. SwitchAgent takes `sdout.zip` from its latest GitHub release and queues it — with Ultrahand first, if the Switch does not have it.
+    usage:
+      - Connect to Wi-Fi, open Ultrahand (L + D-pad Down, then R3) and pick QuickNTP.
+      - Pick a server and sync; the clock is set at once.
+    tips:
+      - Setting the time needs a network connection only for that moment.
+
+  - id: jksv
+    name: JKSV
+    tagline: Back up and restore game saves.
+    category: Apps
+    author: J-D-K
+    license: GPL-3.0
+    source: https://github.com/J-D-K/JKSV
+    releases: https://github.com/J-D-K/JKSV/releases/latest
+    install:
+      repo: J-D-K/JKSV
+      asset: JKSV.nro
+      name: JKSV
+      to: switch/JKSV/JKSV.nro
+    about: |
+      Copies any game's save data to the SD card and back — before a risky update, to move saves
+      between users, or to keep a copy of a hundred hours of play.
+    how_it_works:
+      - An app for the Homebrew Menu, `switch/JKSV/JKSV.nro`.
+      - Backups are folders under `JKSV/` on the SD card, one per game.
+    install_steps:
+      - Press Install. SwitchAgent takes `JKSV.nro` from its latest GitHub release and queues it.
+    usage:
+      - Start it from the Homebrew Menu — hold R while opening a game (title override) for full access.
+      - Pick a user, then a game; create a new backup, or restore one.
+    tips:
+      - problem: Restoring a save does nothing.
+        answer: Close the game completely before restoring its save.
+
+  - id: moonlight
+    name: Moonlight
+    tagline: Play PC games on the Switch, streamed from your computer.
+    category: Apps
+    author: XITRIX
+    license: GPL-3.0
+    source: https://github.com/XITRIX/Moonlight-Switch
+    releases: https://github.com/XITRIX/Moonlight-Switch/releases/latest
+    install:
+      repo: XITRIX/Moonlight-Switch
+      asset: Moonlight-Switch.nro
+      name: Moonlight
+      to: switch/Moonlight-Switch/Moonlight-Switch.nro
+    about: |
+      A client for Sunshine (or NVIDIA GameStream): the PC runs the game and sends the picture, the
+      Switch sends back its buttons. Works best over 5 GHz Wi-Fi or a wired dock.
+    how_it_works:
+      - An app for the Homebrew Menu, `switch/Moonlight-Switch/Moonlight-Switch.nro`.
+      - The PC side is Sunshine, installed on the computer.
+    install_steps:
+      - Press Install. SwitchAgent takes `Moonlight-Switch.nro` from its latest GitHub release and queues it.
+      - Install Sunshine on the PC.
+    usage:
+      - Start it from the Homebrew Menu — hold R while opening a game (title override) for the full memory it needs.
+      - Add the PC, enter the PIN it shows into Sunshine, then pick a game.
+    tips:
+      - problem: The stream stutters.
+        answer: Lower the resolution or bitrate in Moonlight's settings, or move to 5 GHz Wi-Fi.
+
+  - id: amiigo
+    name: Amiigo
+    tagline: Make virtual amiibo for emuiibo on the console itself.
+    category: Amiibo
+    author: CompSciOrBust
+    license: Not stated (source on GitHub)
+    source: https://github.com/CompSciOrBust/Amiigo
+    releases: https://github.com/CompSciOrBust/Amiigo/releases/latest
+    install:
+      repo: CompSciOrBust/Amiigo
+      asset: Amiigo.nro
+      name: Amiigo
+      to: switch/Amiigo/Amiigo.nro
+    requires: [emuiibo]
+    about: |
+      Browses the full list of amiibo figures and creates any of them as a virtual amiibo for
+      emuiibo, straight into `emuiibo/amiibo/` — no PC needed. It also switches the active amiibo,
+      like emuiibo's overlay.
+    how_it_works:
+      - An app for the Homebrew Menu, `switch/Amiigo/Amiigo.nro`, working with emuiibo's files on the SD card.
+      - The figure list comes from AmiiboAPI over the internet; what it creates is an ordinary emuiibo folder.
+    install_steps:
+      - Press Install. SwitchAgent takes `Amiigo.nro` from its latest GitHub release and queues it — with emuiibo first, if the Switch does not have it.
+    usage:
+      - Start it from the Homebrew Menu, connected to the internet.
+      - Pick a series and a figure and create it; it shows up in emuiibo's overlay the next time the overlay is opened.
+
+  - id: nxthemes
+    name: NXThemes Installer
+    tagline: Themes for the home menu — colours, backgrounds, layouts.
+    category: Themes
+    author: exelix11
+    license: GPL-2.0
+    source: https://github.com/exelix11/SwitchThemeInjector
+    releases: https://github.com/exelix11/SwitchThemeInjector/releases/latest
+    install:
+      repo: exelix11/SwitchThemeInjector
+      asset: NXThemesInstaller.nro
+      name: NXThemes Installer
+      to: switch/NXThemesInstaller/NXThemesInstaller.nro
+      kefir: true
+    about: |
+      Installs home-menu themes (`.nxtheme` files) and takes them off again. The standard tool for
+      themes; Themezer-NX, below, finds and downloads them.
+    how_it_works:
+      - An app for the Homebrew Menu, `switch/NXThemesInstaller/NXThemesInstaller.nro`.
+      - Themes are copied into Atmosphère's own theme folder; the system reads them on the next start.
+    install_steps:
+      - Press Install. SwitchAgent takes `NXThemesInstaller.nro` from its latest GitHub release and queues it.
+    usage:
+      - Put `.nxtheme` files in `themes/` on the SD card, or download them with Themezer-NX.
+      - Start NXThemes Installer, pick a theme and install it; restart the console to see it.
+      - To go back to the original look, use its option to remove the installed theme.
+    tips:
+      - problem: The console shows an error after a system update.
+        answer: A theme made for an older firmware — remove the installed theme with NXThemes Installer.
+
+  - id: themezer
+    name: Themezer-NX
+    tagline: Browse and download home-menu themes on the console.
+    category: Themes
+    author: suchmememanyskill
+    license: GPL-3.0
+    source: https://github.com/suchmememanyskill/themezer-nx
+    releases: https://github.com/suchmememanyskill/themezer-nx/releases/latest
+    install:
+      repo: suchmememanyskill/themezer-nx
+      asset: themezer-nx.nro
+      name: Themezer-NX
+      to: switch/themezer-nx/themezer-nx.nro
+    requires: [nxthemes]
+    about: |
+      A client for themezer.net, the largest collection of Switch themes: browse, preview and
+      download without a PC. NXThemes Installer then puts the theme on.
+    how_it_works:
+      - An app for the Homebrew Menu, `switch/themezer-nx/themezer-nx.nro`; downloads go to `themes/` on the SD card.
+    install_steps:
+      - Press Install. SwitchAgent queues NXThemes Installer first where the Switch lacks it, then `themezer-nx.nro`.
+    usage:
+      - Start it connected to the internet, browse, and download a theme.
+      - Install the downloaded theme with NXThemes Installer.
+
+  - id: checkpoint
+    name: Checkpoint
+    tagline: Back up and restore game saves — a simple second choice to JKSV.
+    category: Apps
+    author: BernardoGiordano
+    license: GPL-3.0
+    source: https://github.com/BernardoGiordano/Checkpoint
+    releases: https://github.com/BernardoGiordano/Checkpoint/releases/latest
+    install:
+      repo: BernardoGiordano/Checkpoint
+      asset: Checkpoint.nro
+      name: Checkpoint
+      to: switch/Checkpoint/Checkpoint.nro
+    about: |
+      A save manager with a plain two-panel screen: the game on one side, its backups on the other.
+      Backups are yours — an update of Checkpoint never touches them.
+    how_it_works:
+      - An app for the Homebrew Menu, `switch/Checkpoint/Checkpoint.nro`.
+      - Backups live in `switch/Checkpoint/saves/`, next to it; SwitchAgent only ever writes the app itself.
+    install_steps:
+      - Press Install. SwitchAgent takes `Checkpoint.nro` from its latest GitHub release and queues it.
+    usage:
+      - Start it from the Homebrew Menu, pick a game.
+      - Back up with its backup button; restore by choosing a backup and restoring it.
+    tips:
+      - Close the game before restoring its save.
+
+  - id: goldleaf
+    name: Goldleaf
+    tagline: File manager, content browser and account tools.
+    category: Apps
+    author: XorTroll
+    license: GPL-3.0
+    source: https://github.com/XorTroll/Goldleaf
+    releases: https://github.com/XorTroll/Goldleaf/releases/latest
+    install:
+      repo: XorTroll/Goldleaf
+      asset: Goldleaf.nro
+      name: Goldleaf
+      to: switch/Goldleaf/Goldleaf.nro
+    about: |
+      A multipurpose tool: browse the SD card and the console's storage, see what is installed and
+      how much space it takes, manage user accounts, and more. It can install packages too —
+      SwitchAgent does that through DBI, Goldleaf is for everything around it.
+    how_it_works:
+      - An app for the Homebrew Menu, `switch/Goldleaf/Goldleaf.nro`.
+    install_steps:
+      - Press Install. SwitchAgent takes `Goldleaf.nro` from its latest GitHub release and queues it.
+    usage:
+      - Start it from the Homebrew Menu (hold R while opening a game for full access).
+      - Pick what to explore from its main menu — SD card, installed content, accounts.
+    tips:
+      - Take care with deleting in its file browser — it works on the real console storage.
+
+  - id: sphaira
+    name: sphaira
+    tagline: A modern Homebrew Menu with a file manager and an app store.
+    category: Apps
+    author: ITotalJustice
+    license: GPL-3.0
+    source: https://github.com/NaGaa95/sphaira
+    releases: https://github.com/NaGaa95/sphaira/releases/latest
+    install:
+      repo: NaGaa95/sphaira
+      asset: sphaira.zip
+      name: sphaira
+      places:
+        - switch/sphaira/
+      sign:
+        - switch/sphaira/sphaira.nro
+      version_from: switch/sphaira/sphaira.nro
+    about: |
+      Lists and starts homebrew like the Homebrew Menu, and adds a file manager, a homebrew store
+      and themes. Installed here as an app; it can also take over from the Homebrew Menu, which is
+      its own option inside it — SwitchAgent never does that.
+    how_it_works:
+      - An app, `switch/sphaira/sphaira.nro`, started from the Homebrew Menu.
+    install_steps:
+      - Press Install. SwitchAgent takes `sphaira.zip` from its latest GitHub release and queues it.
+    usage:
+      - Start it from the Homebrew Menu; the tabs along the top are its apps, the store and the file manager.
+
+  - id: simplemodmanager
+    name: SimpleModManager
+    tagline: Turn game mods on and off from the console.
+    category: Mods
+    author: nadrino
+    license: GPL-3.0
+    source: https://github.com/nadrino/SimpleModManager
+    releases: https://github.com/nadrino/SimpleModManager/releases/latest
+    install:
+      repo: nadrino/SimpleModManager
+      asset: SimpleModManager.nro
+      name: SimpleModManager
+      to: switch/SimpleModManager/SimpleModManager.nro
+    about: |
+      Keeps several mods per game and applies the ones you choose, so switching between them does
+      not need a PC.
+    how_it_works:
+      - An app for the Homebrew Menu, `switch/SimpleModManager/SimpleModManager.nro`.
+      - Mods are kept in `mods/<game>/<mod>/`; applying one copies it into Atmosphère's `atmosphere/contents/` for that game.
+    install_steps:
+      - Press Install. SwitchAgent takes `SimpleModManager.nro` from its latest GitHub release and queues it.
+    usage:
+      - Put each mod in `mods/<game name>/<mod name>/` on the SD card, laid out like the SD root.
+      - Start it, pick the game and apply or remove a mod.
+
+  - id: simplemoddownloader
+    name: SimpleModDownloader
+    tagline: Download game mods from GameBanana on the console.
+    category: Mods
+    author: PoloNX
+    license: GPL-3.0
+    source: https://github.com/PoloNX/SimpleModDownloader
+    releases: https://github.com/PoloNX/SimpleModDownloader/releases/latest
+    install:
+      repo: PoloNX/SimpleModDownloader
+      asset: SimpleModDownloader.nro
+      name: SimpleModDownloader
+      to: switch/SimpleModDownloader/SimpleModDownloader.nro
+    about: |
+      Searches GameBanana for mods of the games on the console and downloads them straight into
+      SimpleModManager's folders.
+    how_it_works:
+      - An app for the Homebrew Menu, `switch/SimpleModDownloader/SimpleModDownloader.nro`, online.
+    install_steps:
+      - Press Install. SwitchAgent takes `SimpleModDownloader.nro` from its latest GitHub release and queues it.
+    usage:
+      - Start it connected to the internet, pick a game, then a mod to download.
+      - Apply it with SimpleModManager.
+
+  - id: edizon
+    name: EdiZon Overlay
+    tagline: Cheats, turned on and off during the game.
+    category: Overlays
+    author: proferabg
+    license: Not stated (based on WerWolv's EdiZon, GPL-2.0)
+    source: https://github.com/proferabg/EdiZon-Overlay
+    releases: https://github.com/proferabg/EdiZon-Overlay/releases/latest
+    install:
+      repo: proferabg/EdiZon-Overlay
+      asset: ovlEdiZon.ovl
+      name: EdiZon
+      to: switch/.overlays/ovlEdiZon.ovl
+      kefir: true
+    requires: [ultrahand]
+    about: |
+      Lists the cheats Atmosphère has for the running game and switches them on and off, from the
+      overlay menu. The cheats themselves are files you add.
+    how_it_works:
+      - An overlay, `switch/.overlays/ovlEdiZon.ovl`, opened from Ultrahand.
+      - Cheats are read from `atmosphere/contents/<game id>/cheats/<build id>.txt`.
+    install_steps:
+      - Press Install. SwitchAgent takes `ovlEdiZon.ovl` from its latest GitHub release and queues it — with Ultrahand first, if the Switch does not have it.
+    usage:
+      - Put a game's cheat file in its `cheats/` folder.
+      - Start the game, open Ultrahand and pick EdiZon; switch cheats on and off with A.
+    tips:
+      - A cheat file is made for one exact game version (build id); after a game update it needs a new one.
+
+  - id: ovl-sysmodules
+    name: Sysmodules
+    tagline: Switch background modules on and off without editing the SD card.
+    category: Overlays
+    author: WerWolv, ppkantorski
+    license: GPL-2.0
+    source: https://github.com/ppkantorski/ovl-sysmodules
+    releases: https://github.com/ppkantorski/ovl-sysmodules/releases/latest
+    install:
+      repo: ppkantorski/ovl-sysmodules
+      asset: ovlSysmodules.ovl
+      name: Sysmodules
+      to: switch/.overlays/ovlSysmodules.ovl
+      kefir: true
+    requires: [ultrahand]
+    about: |
+      Lists every background module on the console (emuiibo, SaltyNX, Fizeau…) and turns each on
+      or off, now or from the next start. The maintained fork of WerWolv's overlay.
+    how_it_works:
+      - An overlay, `switch/.overlays/ovlSysmodules.ovl`; it toggles each module's `flags/boot2.flag`.
+    install_steps:
+      - Press Install. SwitchAgent takes `ovlSysmodules.ovl` from its latest GitHub release and queues it — with Ultrahand first, if the Switch does not have it.
+    usage:
+      - Open Ultrahand and pick Sysmodules; A starts or stops a module now, Y changes whether it starts with the console.
+    tips:
+      - A module that misbehaves can be kept from starting here instead of taking it off the SD card.
+
+  - id: saltynx-tool
+    name: SaltyNX-Tool
+    tagline: SaltyNX's own settings and plugins, in one app.
+    category: Apps
+    author: masagrator
+    license: GPL-3.0
+    source: https://github.com/masagrator/SaltyNX-Tool
+    releases: https://github.com/masagrator/SaltyNX-Tool/releases/latest
+    install:
+      repo: masagrator/SaltyNX-Tool
+      asset: SaltyNX-Tool.nro
+      name: SaltyNX-Tool
+      to: switch/SaltyNX-Tool/SaltyNX-Tool.nro
+    requires: [saltynx]
+    about: |
+      Shows whether SaltyNX runs, and manages its plugins and the list of games it leaves alone —
+      without editing `SaltySD/exceptions.txt` by hand.
+    how_it_works:
+      - An app for the Homebrew Menu, `switch/SaltyNX-Tool/SaltyNX-Tool.nro`.
+    install_steps:
+      - Press Install. SwitchAgent queues SaltyNX first where the Switch lacks it, then `SaltyNX-Tool.nro`.
+    usage:
+      - Start it from the Homebrew Menu and choose what to change; changes to SaltyNX itself apply after a restart.
+
+  - id: nx-activity-log
+    name: NX Activity Log
+    tagline: How long you have played each game, per user.
+    category: Apps
+    author: tallbl0nde, zdm65477730
+    license: MIT
+    source: https://github.com/zdm65477730/NX-Activity-Log
+    releases: https://github.com/zdm65477730/NX-Activity-Log/releases/latest
+    install:
+      repo: zdm65477730/NX-Activity-Log
+      asset: NX-Activity-Log.nro
+      name: NX Activity Log
+      to: switch/NX-Activity-Log/NX-Activity-Log.nro
+      kefir: true
+    about: |
+      Play time per game and per day, with charts, from the console's own records — more than the
+      system shows. The maintained fork of tallbl0nde's app.
+    how_it_works:
+      - An app for the Homebrew Menu, `switch/NX-Activity-Log/NX-Activity-Log.nro`; it only reads the console's records.
+    install_steps:
+      - Press Install. SwitchAgent takes `NX-Activity-Log.nro` from its latest GitHub release and queues it.
+    usage:
+      - Start it from the Homebrew Menu and pick a user; games are listed by play time.
+
+  - id: nx-update-checker
+    name: NX-Update-Checker
+    tagline: Which of your games have an update you have not installed.
+    category: Apps
+    author: 16BitWonder
+    license: MIT
+    source: https://github.com/16BitWonder/NX-Update-Checker
+    releases: https://github.com/16BitWonder/NX-Update-Checker/releases/latest
+    install:
+      repo: 16BitWonder/NX-Update-Checker
+      asset: NX-Update-Checker.nro
+      name: NX-Update-Checker
+      to: switch/NX-Update-Checker/NX-Update-Checker.nro
+    about: |
+      Compares the version of every installed game with the latest one listed online and shows
+      those that are behind. It only tells you; nothing is downloaded.
+    how_it_works:
+      - An app for the Homebrew Menu, `switch/NX-Update-Checker/NX-Update-Checker.nro`, online.
+    install_steps:
+      - Press Install. SwitchAgent takes `NX-Update-Checker.nro` from its latest GitHub release and queues it.
+    usage:
+      - Start it connected to the internet; games with a newer update are listed with both versions.
+
+  - id: nxmp
+    name: NXMP
+    tagline: A video player — files from the SD card, a network share or the web.
+    category: Media
+    author: proconsule
+    license: GPL-3.0
+    source: https://github.com/proconsule/nxmp
+    releases: https://github.com/proconsule/nxmp/releases/latest
+    install:
+      repo: proconsule/nxmp
+      asset: nxmp-*.zip
+      name: NXMP
+      layout:
+        "nxmp/": switch/nxmp/
+      places:
+        - switch/nxmp/
+      sign:
+        - switch/nxmp/nxmp.nro
+      version_from: switch/nxmp/nxmp.nro
+      keep:
+        - switch/nxmp/config.ini
+        - switch/nxmp/eqpresets.ini
+    about: |
+      Plays almost any video (mpv inside) with subtitles and hardware decoding — from the SD card,
+      a USB drive, SMB/FTP/HTTP shares on your network, or Jellyfin.
+    how_it_works:
+      - An app for the Homebrew Menu, in `switch/nxmp/`; its settings are `switch/nxmp/config.ini`, which an update never replaces.
+    install_steps:
+      - Press Install. SwitchAgent takes the `nxmp-….zip` of its latest GitHub release (about 45 MB) and queues it.
+    usage:
+      - Start it from the Homebrew Menu — hold R while opening a game (title override) for the memory it needs.
+      - Pick a source (SD card, network share), then a file.
+
+  - id: noods
+    name: NooDS
+    tagline: A Nintendo DS emulator.
+    category: Emulators
+    author: Hydr8gon
+    license: GPL-3.0
+    source: https://github.com/Hydr8gon/NooDS
+    releases: https://github.com/Hydr8gon/NooDS/releases/latest
+    install:
+      repo: Hydr8gon/NooDS
+      asset: noods-switch.zip
+      name: NooDS
+      layout:
+        "": switch/noods/
+      places:
+        - switch/noods/
+      sign:
+        - switch/noods/noods.nro
+    about: |
+      Plays Nintendo DS games with both screens, touch on the handheld screen and save states.
+      Its releases are rolling builds: the version it shows does not change between them.
+    how_it_works:
+      - An app for the Homebrew Menu, `switch/noods/noods.nro`.
+    install_steps:
+      - Press Install. SwitchAgent takes `noods-switch.zip` from its GitHub release and queues it.
+      - Your own DS BIOS files, if you have them, go in the same folder — most games run without them.
+    usage:
+      - Put your game files on the SD card, start NooDS and pick one.
+
+  - id: turnips
+    name: Turnips
+    tagline: Animal Crossing's turnip prices for the week, read from your save.
+    category: Apps
+    author: averne
+    license: GPL-3.0
+    source: https://github.com/averne/Turnips
+    releases: https://github.com/averne/Turnips/releases/latest
+    install:
+      repo: averne/Turnips
+      asset: Turnips-*.zip
+      name: Turnips
+      layout:
+        "out/": switch/Turnips/
+      places:
+        - switch/Turnips/
+      sign:
+        - switch/Turnips/Turnips.nro
+      version_from: switch/Turnips/Turnips.nro
+    about: |
+      Reads Animal Crossing: New Horizons' save and shows the turnip prices the game has already
+      decided for the whole week — no guessing, no spreadsheets.
+    how_it_works:
+      - An app for the Homebrew Menu, `switch/Turnips/Turnips.nro`; it only reads the save.
+    install_steps:
+      - Press Install. SwitchAgent takes the `Turnips-….zip` of its latest GitHub release and queues it.
+    usage:
+      - Close Animal Crossing, start Turnips; the week's prices are shown morning and afternoon.

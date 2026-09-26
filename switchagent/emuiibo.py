@@ -16,10 +16,11 @@ What runs on the console
     refuses to work with any other emuiibo version than its own, so the two
     always come from the same release. 1.x releases also carry its
     translations, `emuiibo/overlay/lang/*.json`.
-  - the overlay needs Tesla: nx-ovlloader
-    (`atmosphere/contents/420000000007E51A/exefs.nsp` + boot2.flag) and a
-    menu, `switch/.overlays/ovlmenu.ovl` (Tesla Menu, or Ultrahand, which
-    ships under the same file name). Neither is part of emuiibo's release.
+  - the overlay needs an overlay menu: nx-ovlloader
+    (`atmosphere/contents/420000000007E51A/exefs.nsp` + boot2.flag) and
+    `switch/.overlays/ovlmenu.ovl` -- Ultrahand Overlay, whose release
+    carries both (Tesla Menu, unmaintained since 2023, used the same file).
+    Neither is part of emuiibo's release.
 
 What lives on the SD card
   - `emuiibo/amiibo/` -- the library. A virtual amiibo is a FOLDER, at any
@@ -41,8 +42,9 @@ What lives on the SD card
 What SwitchAgent does with that: it recognises a release and a collection in
 the Library by their structure, never by name, copies them to exactly those
 places over the existing DBI MTP backend, reads what is on the console back
-the same way, and removes an amiibo folder when asked to. It does not
-install Tesla -- it says it is missing and where it comes from.
+the same way, and removes an amiibo folder when asked to. The overlay menu
+is the Add-ons catalog's Ultrahand entry, installed with emuiibo when the
+console lacks it (switchagent/addons.py).
 """
 
 from __future__ import annotations
@@ -71,8 +73,8 @@ TESLA_MENU_FILE = "switch/.overlays/ovlmenu.ovl"
 # than this is said to be outdated. Where the current one always is:
 LATEST_KNOWN_VERSION = "1.1.3"
 RELEASES_URL = "https://github.com/XorTroll/emuiibo/releases/latest"
-TESLA_MENU_URL = "https://github.com/WerWolv/Tesla-Menu/releases/latest"
-OVLLOADER_URL = "https://github.com/WerWolv/nx-ovlloader/releases/latest"
+TESLA_MENU_URL = "https://github.com/ppkantorski/Ultrahand-Overlay/releases/latest"
+OVLLOADER_URL = "https://github.com/ppkantorski/nx-ovlloader/releases/latest"
 
 AMIIBO_JSON = "amiibo.json"
 AMIIBO_FLAG = "amiibo.flag"
@@ -124,8 +126,8 @@ COMPONENTS: tuple[Component, ...] = (
         OVLLOADER_URL, "loads overlays in the background", False,
     ),
     Component(
-        "tesla_menu", "Tesla Menu", (TESLA_MENU_FILE,), TESLA_MENU_URL,
-        "opens overlays with L + D-pad Down + R3 (Ultrahand's ovlmenu.ovl works as well)", False,
+        "tesla_menu", "Ultrahand Overlay", (TESLA_MENU_FILE,), TESLA_MENU_URL,
+        "the overlay menu -- opens overlays with L + D-pad Down + R3", False,
     ),
 )
 COMPONENTS_BY_KEY = {c.key: c for c in COMPONENTS}

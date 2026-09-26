@@ -268,6 +268,44 @@ def test_a_folder_holding_two_games_does_not_hand_its_switch_folder_to_either(is
     assert standalone[0]["has_detail_page"] is False
 
 
+def test_a_releases_switch_folder_goes_to_the_game_at_its_top_ticked_by_hand(isolated_db, tmp_path, monkeypatch):
+    """Animal Crossing's real release: the game, its update and a DLC at
+    the top, the Island Transfer Tool (a game of its own) in a sub-folder,
+    and "Events Unlock (1.11.1a)/switch/" -- DBI, JKSV, switch-time and a
+    dbi.config for the game's events. It is Animal Crossing's, but the game
+    does not need it: it is not ticked along with the game."""
+    conn, _ = isolated_db
+    ac = config.LIBRARY_DIR / "Animal Crossing New Horizons [NSP]"
+    (ac / "Official Transfer Tool").mkdir(parents=True)
+    (ac / "Events Unlock (1.11.1a)" / "switch").mkdir(parents=True)
+    (ac / "Animal Crossing New Horizons [01006F8002326000][v0].nsp").write_bytes(b"base")
+    (ac / "Animal Crossing New Horizons [01006F8002326800][v2228224].nsp").write_bytes(b"upd")
+    (ac / "Official Transfer Tool" / "Island Transfer Tool [0100F38011CFE000][v0].nsp").write_bytes(b"tool")
+    for name in ("DBI.nro", "JKSV.nro", "switch-time.nro", "dbi.config"):
+        (ac / "Events Unlock (1.11.1a)" / "switch" / name).write_bytes(b"x")
+    scanner.scan_library_once(conn)
+
+    events = next(r for r in db.list_library_items(conn) if r["content_type"] == ContentType.SD_FILES.value)
+    assert (events["title_id"], events["title_id_source"]) == ("01006F8002326000", "release")
+    view = services.list_library_view(conn, kind="games")
+    by_base = {g["base_title_id"]: g for g in view["games"]}
+    assert [e["id"] for e in by_base["01006F8002326000"]["sd_files"]] == [events["id"]]
+    assert by_base["01006F8002326000"]["sd_files"][0]["sd_optional"] is True
+    # The Transfer Tool stays a card of its own: it is a different program.
+    assert by_base["0100F38011CFE000"]["sd_files"] == []
+    assert not any(g["base"]["content_type"] == ContentType.SD_FILES.value for g in view["games"])
+
+    monkeypatch.setattr(config, "CONFIG_YAML_PATH", tmp_path / "config.yaml")
+    monkeypatch.setattr(known_folders, "downloads_dir", lambda: None)
+    db_path = conn.execute("PRAGMA database_list").fetchone()["file"]
+    from pathlib import Path
+    html = TestClient(create_app(build_mock_context(Path(db_path)))).get("/").text
+    marker = f'class="select-box" value="{events["id"]}"'
+    assert marker in html
+    row = html[html.index(marker):][:900]
+    assert 'data-optional="1"' in row and 'data-role="sd"' in row
+
+
 def test_a_download_folder_called_switch_is_left_to_its_packages(isolated_db):
     conn, _ = isolated_db
     category = config.LIBRARY_DIR / "Switch"
@@ -522,7 +560,8 @@ def test_a_missing_nro_is_said_on_the_card_itself(tmp_path, monkeypatch):
     _megaman(library_dir, with_unpacked_nro=False)
     with db.open_db(db_path) as conn:
         scanner.scan_library_once(conn)
-    html = TestClient(create_app(build_mock_context(db_path))).get("/").text
+    from pathlib import Path
+    html = TestClient(create_app(build_mock_context(Path(db_path)))).get("/").text
     card = html.split('class="game-group"', 1)[1].split("game-variants", 1)[0]
     assert "Needs sdmc:/switch/mmxregenesis_nx/mmxregenesis_nx.nro" in card
 

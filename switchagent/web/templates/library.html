@@ -84,6 +84,7 @@
          data-cover-id="{{ family or '' }}"
          data-existing-copy="{{ '1' if (e.confirmed_on_device or e.status in ('INSTALLED', 'INSTALLED_UNVERIFIED')) else '' }}"
          {% if family %}data-family="{{ family }}" data-role="{{ role }}" data-family-name="{{ family_name }}"{% endif %}
+         {% if e.sd_optional %}data-optional="1" title="Came with the game, not needed by it -- tick it to install it too"{% endif %}
          {{ "disabled" if not e.can_install }}>
   <div class="variant-body card-body" data-detail-url="/api/library/{{ e.id }}">
     {% if role == "sd" %}
@@ -239,10 +240,16 @@
     emuiibo and virtual amiibo from your Library ({{ view.on_amiibo_tab }}) are on the Amiibo tab →
   </a>
   {% else %}
-  <a class="library-elsewhere" href="/addons#addon-emuiibo">
-    Virtual amiibo from your Library ({{ view.on_amiibo_tab }}) are used through emuiibo — install it from Add-ons →
+  <a class="library-elsewhere" href="{{ emuiibo_home }}">
+    Virtual amiibo from your Library ({{ view.on_amiibo_tab }}) are used through emuiibo — install it →
   </a>
   {% endif %}
+  {% endif %}
+  {% if view.on_addons_tab and beta %}
+  {#- Add-ons catalog releases (Ultrahand, FPSLocker...) are not games either. -#}
+  <a class="library-elsewhere" href="/addons">
+    Add-ons from your Library ({{ view.on_addons_tab }}) are on the Add-ons tab →
+  </a>
   {% endif %}
   {% if not view.games %}
   <p class="empty-state">
@@ -297,7 +304,7 @@
       {% if g.has_detail_page %}
       <a class="game-details-link" href="/games/{{ g.base_title_id }}">Game details →</a>
       {% elif g.base and g.base.content_type in ("AMIIBO", "EMUIIBO") %}
-      <a class="game-details-link" href="{{ '/amiibo' if amiibo_tab else '/addons#addon-emuiibo' }}">{{ 'Amiibo' if amiibo_tab else 'emuiibo' }} →</a>
+      <a class="game-details-link" href="{{ '/amiibo' if amiibo_tab else emuiibo_home }}">{{ 'Amiibo' if amiibo_tab else 'emuiibo' }} →</a>
       {% endif %}
     </div>
     {% endfor %}

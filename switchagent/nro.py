@@ -47,24 +47,38 @@ def read_nro_info(path: Path) -> Optional[NroInfo]:
     """Name/author/version from the NRO's embedded NACP. None when the file
     is not an NRO at all; an NroInfo of all-None fields when it is one but
     carries no metadata (nothing to show, but still a valid app). Never
-    raises for a malformed file -- a scan must not fail on one."""
+    raises for a malformed file -- a scan must not fail on one. A Tesla
+    overlay (.ovl) is an NRO too, and reads the same way."""
     try:
         with path.open("rb") as f:
-            header = f.read(0x80)
-            if len(header) < 0x20 or header[_NRO_MAGIC_OFFSET:_NRO_MAGIC_OFFSET + 4] != b"NRO0":
-                return None
-            (nro_size,) = struct.unpack_from("<I", header, _NRO_SIZE_OFFSET)
-            f.seek(nro_size)
-            aset = f.read(0x38)
-            if len(aset) < 0x38 or aset[:4] != b"ASET":
-                return NroInfo(None, None, None)
-            nacp_offset, nacp_size = struct.unpack_from("<QQ", aset, _ASET_NACP_OFFSET)
-            if nacp_size < _NACP_VERSION_OFFSET + _NACP_VERSION_SIZE:
-                return NroInfo(None, None, None)
-            f.seek(nro_size + nacp_offset)
-            nacp = f.read(_NACP_VERSION_OFFSET + _NACP_VERSION_SIZE)
+            return _read_info(f.read, f.seek)
     except OSError:
         return None
+
+
+def nro_info_from_bytes(data: bytes) -> Optional[NroInfo]:
+    """read_nro_info() for a file already in memory -- one read back off a
+    console, say."""
+    import io
+
+    stream = io.BytesIO(data)
+    return _read_info(stream.read, stream.seek)
+
+
+def _read_info(read, seek) -> Optional[NroInfo]:
+    header = read(0x80)
+    if len(header) < 0x20 or header[_NRO_MAGIC_OFFSET:_NRO_MAGIC_OFFSET + 4] != b"NRO0":
+        return None
+    (nro_size,) = struct.unpack_from("<I", header, _NRO_SIZE_OFFSET)
+    seek(nro_size)
+    aset = read(0x38)
+    if len(aset) < 0x38 or aset[:4] != b"ASET":
+        return NroInfo(None, None, None)
+    nacp_offset, nacp_size = struct.unpack_from("<QQ", aset, _ASET_NACP_OFFSET)
+    if nacp_size < _NACP_VERSION_OFFSET + _NACP_VERSION_SIZE:
+        return NroInfo(None, None, None)
+    seek(nro_size + nacp_offset)
+    nacp = read(_NACP_VERSION_OFFSET + _NACP_VERSION_SIZE)
     if len(nacp) < _NACP_VERSION_OFFSET + _NACP_VERSION_SIZE:
         return NroInfo(None, None, None)
 

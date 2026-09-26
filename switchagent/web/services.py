@@ -266,6 +266,9 @@ def _sd_fields(row) -> dict:
         "sd_destinations": [f"sdmc:/{app}" for app in summary.apps] if summary else [],
         "sd_label": sd_files.part_label(row["absolute_path"]),
         "launches": f"sdmc:/{launches}" if launches else None,
+        # Part of the game's release, not needed by the game (sd_files.
+        # assign_owners' "release" rule): ticked by hand, not with the game.
+        "sd_optional": row["content_type"] == ContentType.SD_FILES.value and row["title_id_source"] == "release",
     }
 
 
@@ -646,8 +649,12 @@ def list_library_view(
     # (web/amiibo_views.py), which has everything to do with them. Library
     # only says how many are over there, so nothing seems to vanish.
     elsewhere = [e for e in all_entries if _lives_on_amiibo_tab(e)]
+    # Add-ons catalog releases (Ultrahand, FPSLocker...) are the Add-ons
+    # tab's, the same way.
+    addon_items = [e for e in all_entries if e["content_type"] == ContentType.ADDON.value]
     others = [e for e in all_entries
-              if e not in mods and e not in packages and e not in sd_parts and e not in elsewhere]
+              if e not in mods and e not in packages and e not in sd_parts and e not in elsewhere
+              and e not in addon_items]
 
     # Mods are tagged with the base game's own TITLE_ID directly (the
     # atmosphere/contents/<TITLE_ID>/ convention) -- no variant arithmetic
@@ -760,7 +767,7 @@ def list_library_view(
     family_key_fn = _FAMILY_SORT_KEYS.get(sort, _FAMILY_SORT_KEYS["date_added"])
     games.sort(key=family_key_fn, reverse=reverse)
 
-    return {"kind": "games", "games": games, "on_amiibo_tab": len(elsewhere)}
+    return {"kind": "games", "games": games, "on_amiibo_tab": len(elsewhere), "on_addons_tab": len(addon_items)}
 
 
 def _lives_on_amiibo_tab(entry: dict) -> bool:
@@ -1086,7 +1093,7 @@ def _resolve_latest_retry(conn, row):
 # untagged (there, everything hangs under a base-game header that names it);
 # Queue is a flat list with no such header, so a plain game needs saying too.
 _VARIANT_ROLE_LABEL = {"base": "Game", "update": "Update", "dlc": "DLC", "mod": "Mod", "sd": "SD files",
-                       "amiibo": "Amiibo", "emuiibo": "emuiibo"}
+                       "amiibo": "Amiibo", "emuiibo": "emuiibo", "addon": "Add-on"}
 
 _TITLE_VARIANT_TO_ROLE = {"BASE": "base", "UPDATE": "update", "DLC": "dlc"}
 
@@ -1109,6 +1116,8 @@ def _job_variant_role(job_row) -> Optional[str]:
         return "amiibo"
     if manifest.content_type == ContentType.EMUIIBO.value:
         return "emuiibo"
+    if manifest.content_type == ContentType.ADDON.value:
+        return "addon"
     if manifest.content_type != ContentType.GAME_PACKAGE.value or not manifest.title_id:
         return None
     variant, _base_id = title_id_mod.classify_title_variant(manifest.title_id)
@@ -1145,7 +1154,7 @@ def _job_view(conn, row) -> dict:
     # which the [Mod] badge below now says instead (History keeps it: no
     # badge there).
     display_name = queue_worker.display_name_for_job(
-        conn, row, mod_suffix=variant_role not in ("mod", "sd", "amiibo", "emuiibo"))
+        conn, row, mod_suffix=variant_role not in ("mod", "sd", "amiibo", "emuiibo", "addon"))
     stall_seconds = _stall_seconds(row)
     return {
         # Queue badge: what this job installs (see _job_variant_role).
@@ -1573,7 +1582,7 @@ def _dock_parts_label(parts: list) -> str:
         role = part["role"] or "other"
         counts[role] = counts.get(role, 0) + 1
     labels = []
-    for role in ("base", "update", "dlc", "mod", "sd", "emuiibo", "amiibo", "other"):
+    for role in ("base", "update", "dlc", "mod", "sd", "emuiibo", "amiibo", "addon", "other"):
         n = counts.get(role)
         if not n:
             continue
@@ -2303,7 +2312,7 @@ _ACTIVITY_FLAGS = {
 }
 
 _ROLE_LABELS = {"base": "Game", "update": "Update", "dlc": "DLC", "mod": "Mod", "sd": "SD files",
-                "amiibo": "Amiibo", "emuiibo": "emuiibo"}
+                "amiibo": "Amiibo", "emuiibo": "emuiibo", "addon": "Add-on"}
 
 
 def _local(created_at: str) -> Optional[datetime]:

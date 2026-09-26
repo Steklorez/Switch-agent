@@ -30,7 +30,7 @@ from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import Optional
 
-from . import config, emuiibo, sd_files, title_id
+from . import addons, config, emuiibo, sd_files, title_id
 from .model import ArchiveEntry, ConflictEntry, ConflictState, ContentType
 
 
@@ -307,6 +307,8 @@ class ClassifiedArchive:
     emuiibo_release: Optional[emuiibo.ReleasePlan] = None
     # AMIIBO: every virtual amiibo in the archive, with its destination.
     amiibo: Optional[emuiibo.Collection] = None
+    # ADDON: which catalog add-on's release this is, file by file.
+    addon: Optional["addons.ReleaseMatch"] = None
     # An archive holding just an .nro (or a few), with no switch/ folder to
     # say where: each is placed like a lone .nro in the library
     # (sd_files.loose_nro_relative). Entry names, in listing order.
@@ -345,6 +347,16 @@ def classify_entries(entries: list[ArchiveEntry], *, archive_name: Optional[str]
             content_type=ContentType.EMUIIBO, package_format=None, package_entry_name=None,
             package_title_id_guess=package_title_id_guess, atmosphere_title_id_guess=atmosphere_title_id_guess,
             atmosphere_root=None, emuiibo_release=release,
+        )
+    # So is an Add-ons catalog utility's release (Ultrahand's sdout.zip,
+    # SaltyNX...): only the places its catalog entry names, never "a mod"
+    # of a program id that is no game.
+    addon = addons.match_archive(file_list(entries))
+    if addon is not None:
+        return ClassifiedArchive(
+            content_type=ContentType.ADDON, package_format=None, package_entry_name=None,
+            package_title_id_guess=package_title_id_guess, atmosphere_title_id_guess=atmosphere_title_id_guess,
+            atmosphere_root=None, addon=addon,
         )
 
     for entry in entries:

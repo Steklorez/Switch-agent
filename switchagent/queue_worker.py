@@ -107,7 +107,7 @@ def _target_storage_for(report: PreviewReport) -> str:
     if report.content_type is ContentType.GAME_PACKAGE:
         return STORAGE_SD_INSTALL
     if report.content_type in (ContentType.ATMOSPHERE_MOD, ContentType.SD_FILES,
-                               ContentType.EMUIIBO, ContentType.AMIIBO):
+                               ContentType.EMUIIBO, ContentType.AMIIBO, ContentType.ADDON):
         return STORAGE_SD_CARD
     raise manifest_mod.ManifestError(
         f"content type {report.content_type.value} is not eligible for transfer"
@@ -573,6 +573,16 @@ def resolve_library_item_display_name(
     filename). See find_family_base_name_source's own docstring for why
     `library_items` matters at scale."""
     raw_name = Path(row["absolute_path"]).name
+    if row["content_type"] == ContentType.ADDON.value:
+        # "sdout.zip" names nothing; the catalog's name and the version in
+        # the release itself do ("Ultrahand Overlay 2.5.3").
+        from . import addons
+
+        found = sd_files.row_details(row).get("addon") or {}
+        addon = addons.by_id(found.get("id") or "")
+        if addon is not None:
+            return f"{addon.name} {found['version']}" if found.get("version") else addon.name
+        return raw_name
     if row["content_type"] == ContentType.SD_FILES.value:
         # "switch.7z" or a folder called "switch" names the SD layout, not
         # the game: borrow the game's name when it belongs to one (exactly
@@ -635,8 +645,8 @@ def _with_mod_suffix(name: str, job_row: sqlite3.Row, content_type: Optional[str
         return f"{name} — SD files"
     if content_type == ContentType.AMIIBO.value:
         return f"{name} — Amiibo"
-    if content_type == ContentType.EMUIIBO.value:
-        return name  # "emuiibo-v1.1.3.zip" already says what it is
+    if content_type in (ContentType.EMUIIBO.value, ContentType.ADDON.value):
+        return name  # "emuiibo-v1.1.3.zip", "Ultrahand Overlay 2.5.3.zip" already say what it is
     if job_row["target_storage"] == STORAGE_SD_CARD:
         return f"{name} — Mod"
     return name
@@ -979,8 +989,13 @@ def _run_job_transfer(
     # emuiibo's own program files are replaced whatever is there -- they
     # belong to emuiibo, not to anybody's data, and installing a release
     # over another one is exactly what updating emuiibo means.
+    # ADDON: the same for an Add-ons utility's own files -- except the ones a
+    # person edits (manifest.keep: a config.ini), which are written only
+    # where missing and never replaced.
     amiibo_plan: Optional[AmiiboPlan] = None
-    always_overwrite = manifest.content_type == ContentType.EMUIIBO.value
+    always_overwrite = manifest.content_type in (ContentType.EMUIIBO.value, ContentType.ADDON.value)
+    kept_paths = {k.lower() for k in manifest.keep}
+    kept = 0
     if manifest.content_type == ContentType.AMIIBO.value:
         try:
             amiibo_plan = _plan_amiibo(conn, backend, job_row, manifest, delivered=delivered,
@@ -1068,7 +1083,8 @@ def _run_job_transfer(
             # MTP round-trips this loop doesn't need.
             result = backend.send_file(
                 storage, file.dest_relative_path, source_path,
-                overwrite=(bool(job_row["force_overwrite"]) or always_overwrite
+                overwrite=(bool(job_row["force_overwrite"])
+                           or (always_overwrite and file.dest_relative_path.lower() not in kept_paths)
                            or file.dest_relative_path in replaceable
                            or file.dest_relative_path.startswith(replace_units)),
                 progress=report_progress,
@@ -1082,6 +1098,11 @@ def _run_job_transfer(
             db.log_job_event(conn, job_id, f"aborted by user mid-file -> INTERRUPTED ({error})")
             return JobRunOutcome(job_id=job_id, status="INTERRUPTED", error=error)
         except FileAlreadyExistsError:
+            if file.dest_relative_path.lower() in kept_paths:
+                # A person's own settings file: already there, so it stays.
+                kept += 1
+                db.log_job_event(conn, job_id, f"kept as it is on the console: {file.dest_relative_path}")
+                continue
             # Exists on the device, but WE have no record (progress.json) of
             # having put it there ourselves during this job -- cannot prove
             # it's the same content, so refuse rather than guess. This is
@@ -1175,6 +1196,8 @@ def _run_job_transfer(
     note = None
     if amiibo_plan is not None:
         note = amiibo_plan.note(len(emuiibo.manifest_units(f.dest_relative_path for f in manifest.files)))
+    elif kept:
+        note = f"your own settings kept ({kept} file{'s' if kept != 1 else ''} already on the console)"
     db.update_job_status(conn, job_id, "DONE", bytes_done=bytes_done, finished_at=db.now_iso(), error=note)
     db.log_job_event(conn, job_id, f"done, {len(manifest.files) - len(skipped)} file(s)"
                      + (f" -- {note}" if note else ""))

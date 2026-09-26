@@ -48,9 +48,12 @@
     <span class="nav-icon">⭐</span><span class="nav-label">Amiibo</span>
   </a>
   {% endif %}
+  {#- A beta feature (Settings -> Beta features); off by default. -#}
+  {% if beta %}
   <a href="/addons" class="{{ 'active' if active_page == 'addons' }}">
     <span class="nav-icon">🧩</span><span class="nav-label">Add-ons</span>
   </a>
+  {% endif %}
   <a href="/settings" class="{{ 'active' if active_page == 'settings' }}">
     <span class="nav-icon">⚙</span><span class="nav-label">Settings</span>
   </a>
@@ -81,6 +84,7 @@
 </main>
 
 <script src="{{ static_url('app.js') }}"></script>
+<script src="{{ static_url('addon_install.js') }}"></script>
 {% block scripts %}{% endblock %}
 </body>
 </html>

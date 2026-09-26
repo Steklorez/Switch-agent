@@ -114,6 +114,11 @@ class WebContext:
         # emuiibo's current release from GitHub, on request -- its own
         # thread, network only (see web/emuiibo_service.ReleaseDownloader).
         self.emuiibo_downloads = ReleaseDownloader(db_path, self.preparations)
+        # Which release of each Add-ons catalog entry is current -- asked of
+        # GitHub at start and once a day, only once start() is called (the
+        # app does; tests never do). See web/addons_service.ReleaseChecker.
+        from .addons_service import ReleaseChecker
+        self.addon_releases = ReleaseChecker(Path(db_path).parent / "addon_releases.json")
         self.registry = registry
         self._discover_devices = discover_devices
         self.worker_poll_interval_seconds = worker_poll_interval_seconds

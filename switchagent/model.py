@@ -23,6 +23,9 @@ class ContentType(str, Enum):
     EMUIIBO = "EMUIIBO"
     # Virtual amiibo for emuiibo: folders copied into emuiibo/amiibo/.
     AMIIBO = "AMIIBO"
+    # A release of an Add-ons catalog utility (switchagent/addons.py):
+    # copied only to the places its catalog entry names.
+    ADDON = "ADDON"
     MIXED = "MIXED"
     UNKNOWN = "UNKNOWN"
 

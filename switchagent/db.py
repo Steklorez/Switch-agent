@@ -207,6 +207,16 @@ CREATE TABLE IF NOT EXISTS device_amiibo (
     data_json   TEXT NOT NULL,
     PRIMARY KEY (device_id, path)
 );
+
+-- The Add-ons catalog's utilities on a console, as last READ off it
+-- (switchagent/addons.py read_device): which of their files are there, the
+-- version inside each overlay/app read back, whether it runs kefir. Like
+-- device_emuiibo: what the console held, never what SwitchAgent sent.
+CREATE TABLE IF NOT EXISTS device_addons (
+    device_id   TEXT PRIMARY KEY,
+    state_json  TEXT NOT NULL,
+    read_at     TEXT NOT NULL
+);
 """
 
 # Full job status vocabulary. DEVICE_UNAVAILABLE and FAILED were added in
@@ -1470,6 +1480,7 @@ def forget_device(conn: sqlite3.Connection, device_id: str) -> bool:
     conn.execute("DELETE FROM device_storage_mappings WHERE device_id = ?", (device_id,))
     conn.execute("DELETE FROM device_installed_titles WHERE device_id = ?", (device_id,))
     conn.execute("DELETE FROM device_emuiibo WHERE device_id = ?", (device_id,))
+    conn.execute("DELETE FROM device_addons WHERE device_id = ?", (device_id,))
     conn.execute("DELETE FROM device_amiibo WHERE device_id = ?", (device_id,))
     conn.execute("DELETE FROM devices WHERE device_id = ?", (device_id,))
     conn.commit()
@@ -1652,6 +1663,25 @@ def set_device_emuiibo(
         [(device_id, a["path"], json.dumps(a, ensure_ascii=False)) for a in amiibo],
     )
     conn.commit()
+
+
+def set_device_addons(conn: sqlite3.Connection, device_id: str, state: dict, *, read_at: Optional[str] = None) -> None:
+    import json
+
+    conn.execute(
+        "INSERT INTO device_addons (device_id, state_json, read_at) VALUES (?, ?, ?) "
+        "ON CONFLICT(device_id) DO UPDATE SET state_json = excluded.state_json, read_at = excluded.read_at",
+        (device_id, json.dumps(state, ensure_ascii=False), read_at or now_iso()),
+    )
+    conn.commit()
+
+
+def get_device_addons(conn: sqlite3.Connection, device_id: str) -> Optional[tuple[dict, str]]:
+    """(state, read_at) of the last complete read, or None if never read."""
+    import json
+
+    row = conn.execute("SELECT state_json, read_at FROM device_addons WHERE device_id = ?", (device_id,)).fetchone()
+    return (json.loads(row["state_json"]), row["read_at"]) if row else None
 
 
 def get_device_emuiibo(conn: sqlite3.Connection, device_id: str) -> Optional[tuple[dict, list[dict], str]]:

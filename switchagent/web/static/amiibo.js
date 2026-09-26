@@ -70,6 +70,23 @@
     }
   }
 
+  async function installAddon(button, addon) {
+    const original = button.textContent;
+    button.disabled = true;
+    button.textContent = "Starting…";
+    try {
+      await post("/api/addons/install", { device: view.device.fingerprint, addon: addon });
+      view.activity = Object.assign({}, view.activity, { download: { state: "checking" } });
+      lastBusy = true;
+      renderActivity();
+      button.textContent = "Downloading…";
+    } catch (e) {
+      button.textContent = original;
+      button.disabled = false;
+      alert("Could not start the install: " + e.message);
+    }
+  }
+
   function matches(entry) {
     if (!search) return true;
     const hay = [entry.label, entry.name, entry.amiibo_id, entry.group, entry.path, entry.dest]
@@ -185,16 +202,8 @@
     if (a.read_error) lines.push("The last read did not finish: " + a.read_error);
     const d = a.download;
     if (d && (downloading(d) || (d.finished && Date.now() / 1000 - d.finished < 300))) {
-      const version = d.version ? "emuiibo " + d.version : "emuiibo";
-      if (d.state === "checking") lines.push("Asking GitHub for the current emuiibo…");
-      else if (d.state === "downloading") lines.push("Downloading " + version + " from GitHub… " + kb(d.received) +
-        (d.total ? " of " + kb(d.total) : ""));
-      else if (d.state === "adding") lines.push(version + " downloaded and checked — adding it to your Library…");
-      else if (d.state === "done") lines.push(version + (d.reused ? " was already in your Library" :
-        " downloaded from GitHub" + (d.verified ? ", its SHA-256 checked against GitHub's," : "") +
-        " and added to your Library") +
-        (d.queued ? " — it is in the Queue for this Switch. Restart the Switch once it is installed." : "."));
-      else if (d.state === "failed") lines.push("Downloading emuiibo failed: " + (d.error || "unknown error"));
+      lines.push(window.SwitchAgentAddons.describe(d) +
+        (d.state === "done" && d.queued ? " Restart the Switch once it is installed." : ""));
     }
     for (const r of (a.finished_removals || []).slice(0, 1)) {
       if (Date.now() / 1000 - r.finished > 120) continue;
@@ -255,6 +264,12 @@
             title: "Downloads emuiibo.zip from github.com/XorTroll/emuiibo, checks it, adds it to your Library " +
                    "and queues it for this Switch",
             onclick: (ev) => downloadEmuiibo(ev.currentTarget, true) }));
+        } else if (item.kind === "install_addon") {
+          const busy = downloading(view.activity && view.activity.download);
+          li.append(el("button", { type: "button", class: "btn btn-primary btn-small",
+            disabled: !view.device.connected || busy, text: busy ? "Downloading…" : "Install",
+            title: "Downloads it from its GitHub releases, checks it, adds it to your Library and queues it for this Switch",
+            onclick: (ev) => installAddon(ev.currentTarget, item.addon) }));
         } else if (item.kind === "link") {
           li.append(el("a", { class: "btn btn-secondary btn-small", href: item.href, target: "_blank",
             rel: "noopener", text: "Open releases" }));

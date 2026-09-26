@@ -138,8 +138,12 @@ the real Zuma / Mega Man layouts, so change a test on purpose or not at all:
 
 - **It belongs to its game, never a card called "switch".** Owner, in order:
   a `[TITLE_ID]` in its own name; a forwarder in the library that launches an
-  `.nro` inside it; the nearest folder above it holding any game — only if
-  that is exactly one game. Two games in one folder: it stays its own card
+  `.nro` inside it; the nearest folder above it holding any game — if that
+  is exactly one game, or else the one game whose package lies directly in
+  that folder (a release with a companion app in a sub-folder: Animal
+  Crossing and its Island Transfer Tool). That last case is the game's but
+  not needed by it (`title_id_source` "release"): ticked by hand, never
+  along with the game. Two games side by side: it stays its own card
   (named after the folder), never guessed onto either.
 - **Only `switch/`, only verbatim.** Every destination is `switch/<path as in
   the release>`; nothing else of a release (a README beside it) is copied to
@@ -206,22 +210,66 @@ pack's layout.
   (`emuiibo_download.py`): only `emuiibo.zip` of XorTroll/emuiibo, only from
   GitHub's hosts, size and published SHA-256 checked, emuiibo by structure,
   into a Library folder -- then the ordinary queue. Nothing fetched is run.
-- Tesla (nx-ovlloader + Tesla Menu) is required and never installed -- the
-  page says it is missing and where it comes from.
+- Its overlay menu is the Add-ons catalog's Ultrahand entry (it carries
+  nx-ovlloader): installed with emuiibo when the console lacks a menu. A
+  Tesla Menu already there does the same job and is never replaced behind
+  anybody's back -- only an explicit Install of Ultrahand replaces it.
 
-## Add-ons: a curated catalog, not an installer
+## Add-ons: a curated catalog SwitchAgent installs from
 
 The Add-ons tab lists open-source Switch utilities from
 `switchagent/web/addons/catalog.yaml`, in file order -- what each is, how it
-works, how it gets onto a console, how to use it. Entries are added by hand;
-the file's header lists every field, and `tests/test_addons.py` refuses an
-entry the tab could not show truthfully (a `requires` naming nothing, a
-`status` check or `install` SwitchAgent does not have, a missing preview).
+works, how it gets onto a console, how to use it -- and installs them.
+Entries are added by hand; the file's header lists every field, and
+`tests/test_addons.py` refuses an entry the tab could not show truthfully,
+or an install that could write where it must not. The rules live in
+`switchagent/addons.py`, the installer in `web/addons_service.py`.
 
-- A status line appears only where SwitchAgent really checks the console
-  (`status:`), as of that console's last read -- never a guess.
-- An Install button appears only where SwitchAgent installs it itself
-  (`install:`, today only emuiibo, through the ordinary queue). Everything
-  else is instructions and a link to the project's own releases.
-- A preview is a small honest picture in `web/static/`; the emuiibo one is an
-  illustration drawn from the overlay's own labels, said so in its caption.
+- **A beta feature, off by default.** Settings -> "Beta features" turns
+  it on, after a dialog saying it is experimental (`preferences.json`
+  `beta`). Off: no Add-ons tab, `/addons` goes to Settings, and
+  `/api/addons/install` refuses everything but emuiibo and Ultrahand --
+  emuiibo and amiibo are not beta; they are installed from the Amiibo page
+  and Library's install confirmation instead.
+- **Only what goes on the SD card as plain files, over MTP, while DBI
+  runs.** Never the boot chain: an install block cannot even name
+  `bootloader/`, Atmosphère's own files and config, payloads, `Nintendo/`,
+  `emummc/`, DBI itself, or a whole shared folder (`switch/`,
+  `atmosphere/contents/`). Old or unmaintained projects stay out too.
+- **Written only to its `places`.** A release is the catalog's add-on when
+  it holds all its `sign` files and nothing outside its places (an archive),
+  or when the NACP inside names it (one .ovl/.nro) -- never by file name.
+  The destination is asked of the catalog again when the manifest is built.
+  An archive not laid out like the SD card says where its folders go
+  (`layout:` -- NXMP's `nxmp/`, NooDS's bare `.nro`); what a Mac or
+  Explorer adds (`__MACOSX/`, `.DS_Store`, `Thumbs.db`) is never copied.
+- **For every console, not only kefir.** `kefir: true` only keeps
+  SwitchAgent off what kefir updates on a console that runs kefir; on any
+  other CFW setup the entry installs and updates as usual.
+- **Apps and overlays first; system modules only when proven.** A module
+  that does not suit the firmware can stop the console from booting, and
+  firmware support cannot be read over MTP -- MissionControl, sys-con 2.x,
+  SysDVR, ldn_mitm, PNGShot wait (docs/ADDONS-CANDIDATES.md).
+- **A person's settings are never replaced** (`keep:` -- Fizeau's
+  config.ini, SaltyNX's exceptions.txt): written only where missing.
+  Everything else of the add-on is its own and is overwritten on update.
+- **Install brings what it needs, all or nothing.** The add-on and every
+  requirement the console lacks (FPSLocker -> Ultrahand, SaltyNX), from each
+  project's own GitHub release (size, published SHA-256, recognised by
+  structure), into the Library, then the ordinary queue together. One
+  failed download queues nothing.
+- **kefir keeps its own.** On a console running kefir (its updater app is
+  on the card), what kefir ships (`kefir: true`) is shown but not installed
+  from here -- two updaters would take turns overwriting it.
+- **Updates: GitHub is asked at start and once a day** (`ReleaseChecker`,
+  one plain GET per entry, nothing about the user in it; answers cached in
+  `addon_releases.json`). An installed add-on older than its latest release
+  gets "Update to X" -- its version from the console, or, where the console
+  cannot say (no NACP, too big to read back), from what SwitchAgent itself
+  last installed there; neither known: "Reinstall latest". What kefir
+  updates gets no Update button. A check never downloads anything.
+- A status line comes from the console's last read (file presence, the
+  version inside each overlay/app) -- never a guess. A downloaded release
+  is an ADDON Library item: off the game grid, counted in one line there.
+- **Bump `scanner.CLASSIFICATION_REVISION`** when an install block that
+  existing Library files could match is added or changed.

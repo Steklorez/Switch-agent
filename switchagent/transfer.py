@@ -33,7 +33,7 @@ from typing import Optional
 from . import config, sd_files
 from .model import ContentType
 from .mtp.base import MtpBackend, TransferResult, TransferStatus
-from .mtp.errors import MtpError
+from .mtp.errors import FileAlreadyExistsError, MtpError
 from .preview import PreviewReport
 
 STORAGE_SD_CARD = "SD_CARD"
@@ -65,7 +65,7 @@ def transfer_report(
         return _transfer_atmosphere_mod(backend, report, overwrite=overwrite)
     if report.content_type is ContentType.SD_FILES:
         return _transfer_sd_files(backend, report, overwrite=overwrite)
-    if report.content_type in (ContentType.EMUIIBO, ContentType.AMIIBO):
+    if report.content_type in (ContentType.EMUIIBO, ContentType.AMIIBO, ContentType.ADDON):
         return _transfer_copy_plan(backend, report, overwrite=overwrite)
     return TransferOutcome(
         ok=False,
@@ -178,18 +178,24 @@ def _transfer_copy_plan(
         return TransferOutcome(ok=False, error="nothing staged locally to copy (call preview_path(path, extract=True))")
     try:
         for _src, dest in report.copy_plan:
-            _check_copy_destination(report.content_type, dest)
+            _check_copy_destination(report.content_type, dest, report.addon_id)
     except ManifestError as exc:
         return TransferOutcome(ok=False, error=str(exc))
     per_file: list[TransferResult] = []
     sent = 0
     total_bytes = 0
+    keep = {k.lower() for k in report.addon_keep}
     for src, dest in sorted(report.copy_plan, key=lambda pair: pair[1]):
         parent = "/".join(dest.split("/")[:-1])
+        own_files = report.content_type in (ContentType.EMUIIBO, ContentType.ADDON) and dest.lower() not in keep
         try:
             backend.ensure_directory(STORAGE_SD_CARD, parent)
             result = backend.send_file(STORAGE_SD_CARD, dest, report.copy_root / src,
-                                       overwrite=overwrite or report.content_type is ContentType.EMUIIBO)
+                                       overwrite=overwrite or own_files)
+        except FileAlreadyExistsError:
+            if dest.lower() in keep:
+                continue  # a person's own settings file: it stays as it is
+            raise
         except MtpError as exc:
             return TransferOutcome(ok=False, storage=STORAGE_SD_CARD, files_sent=sent,
                                    files_total=len(report.copy_plan), bytes_sent=total_bytes,

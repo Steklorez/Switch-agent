@@ -79,6 +79,16 @@ class AmiiboDeviceRequest(BaseModel):
     device: str = Field(min_length=1)  # the console's fingerprint, never its raw id
 
 
+class BetaRequest(BaseModel):
+    enabled: bool
+
+
+class AddonInstallRequest(BaseModel):
+    # The console to install it on (fingerprint) and the catalog entry's id.
+    device: str
+    addon: str
+
+
 class EmuiiboDownloadRequest(BaseModel):
     # The console to install it on (fingerprint); None only downloads it
     # into the Library.

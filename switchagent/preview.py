@@ -13,7 +13,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional
 
-from . import config, emuiibo, extractor, nro, scanner, sd_files, title_id
+from . import addons, config, emuiibo, extractor, nro, scanner, sd_files, title_id
 from .model import ConflictEntry, ConflictState, ContentType
 
 
@@ -77,6 +77,11 @@ class PreviewReport:
     # AMIIBO: the whole collection, so a selection can narrow copy_plan to
     # some of its amiibo (see web/services.create_and_confirm_jobs).
     amiibo_collection: Optional[emuiibo.Collection] = None
+    # ADDON: which catalog add-on (switchagent/addons.py), its version, and
+    # the files of copy_plan a person edits -- written only when missing.
+    addon_id: Optional[str] = None
+    addon_version: Optional[str] = None
+    addon_keep: tuple[str, ...] = ()
 
 
 def amiibo_copy_plan(collection: emuiibo.Collection, selected=None) -> list[tuple[str, str]]:
@@ -224,6 +229,22 @@ def _preview_archive(path: Path, *, extract: bool) -> PreviewReport:
                     report.emuiibo_version = emuiibo.overlay_version(overlay.read_bytes()) or report.emuiibo_version
         return report
 
+    if cls.content_type is ContentType.ADDON:
+        match = cls.addon
+        report = _addon_report(path, match)
+        if match.version_source:
+            data = extractor.read_archive_member(path, match.version_source, max_bytes=addons.CONSOLE_READ_MAX_BYTES)
+            info = nro.nro_info_from_bytes(data) if data else None
+            report.addon_version = info.version if info else None
+        if extract:
+            job_id = extractor.new_job_id()
+            result = extractor.safe_extract(path, job_id)
+            report.job_id = job_id
+            report.work_dir = result.dest_root
+            report.copy_root = result.dest_root
+            report.copy_plan = [(src, dest) for src, dest, _size in match.files]
+        return report
+
     if cls.content_type is ContentType.AMIIBO:
         summary = cls.amiibo.summary()
         report = PreviewReport(
@@ -297,6 +318,30 @@ def _stage_loose_nro(report: PreviewReport, names: list[str], dest_root: Path) -
         target.parent.mkdir(parents=True, exist_ok=True)
         extracted.replace(target)
     report.sd_source_dir = staged
+
+
+def _addon_report(path: Path, match: addons.ReleaseMatch) -> PreviewReport:
+    addon = addons.by_id(match.addon_id)
+    return PreviewReport(
+        content_type=ContentType.ADDON, source=str(path),
+        size=sum(size for _s, _d, size in match.files), file_count=len(match.files),
+        destination=f"SD Card ({addon.name if addon else match.addon_id})", mode="MERGE",
+        addon_id=match.addon_id, addon_keep=match.keep,
+    )
+
+
+def _preview_program_file(path: Path) -> Optional[PreviewReport]:
+    """One .ovl/.nro that is an Add-ons catalog utility: copied from where
+    it lies (like a mod folder, hashed in place), to its catalog place."""
+    info = nro.read_nro_info(path)
+    match = addons.match_program(path.name, info, path.stat().st_size)
+    if match is None:
+        return None
+    report = _addon_report(path, match)
+    report.addon_version = info.version if info else None
+    report.copy_root = path.parent
+    report.copy_plan = [(src, dest) for src, dest, _size in match.files]
+    return report
 
 
 def _preview_sd_folder(path: Path, summary: sd_files.SdSummary) -> PreviewReport:
@@ -403,6 +448,10 @@ def preview_path(path: Path, *, extract: bool = False) -> PreviewReport:
         return _preview_package_file(path)
     if ext in config.ARCHIVE_EXTENSIONS:
         return _preview_archive(path, extract=extract)
+    if ext in (sd_files.NRO_EXTENSION, scanner.OVL_EXTENSION):
+        report = _preview_program_file(path)
+        if report is not None:
+            return report
     if ext == sd_files.NRO_EXTENSION and nro.read_nro_info(path) is not None:
         size = path.stat().st_size
         return _preview_sd_folder(path, sd_files.summarize([(sd_files.loose_nro_relative(path.name), size)]))

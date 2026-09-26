@@ -82,13 +82,19 @@ class Manifest:
     # jobs created outside a batch (CLI/inbox pipeline) -- those keep the
     # original per-job frozen location, unchanged.
     batch_id: Optional[int] = None
+    # ADDON only: which Add-ons catalog entry, and the files of it a person
+    # edits -- written when missing, never replaced (queue_worker).
+    addon_id: Optional[str] = None
+    keep: tuple[str, ...] = ()
 
     def to_dict(self) -> dict:
+        extra = {"addon_id": self.addon_id, "keep": list(self.keep)} if self.addon_id else {}
         return {
             "content_type": self.content_type,
             "title_id": self.title_id,
             "target_storage": self.target_storage,
             "batch_id": self.batch_id,
+            **extra,
             "files": [
                 {
                     "dest_relative_path": f.dest_relative_path,
@@ -111,6 +117,8 @@ class Manifest:
             target_storage=d["target_storage"],
             batch_id=d.get("batch_id"),
             files=tuple(ManifestFile(**f) for f in d["files"]),
+            addon_id=d.get("addon_id"),
+            keep=tuple(d.get("keep") or ()),
         )
 
 
@@ -167,7 +175,7 @@ def build_manifest_and_stage(
         files = _build_mod_files(report, payload_dir)
     elif report.content_type is ContentType.SD_FILES:
         files = _build_sd_files(report, payload_dir)
-    elif report.content_type in (ContentType.EMUIIBO, ContentType.AMIIBO):
+    elif report.content_type in (ContentType.EMUIIBO, ContentType.AMIIBO, ContentType.ADDON):
         files = _build_copy_plan_files(report, payload_dir)
     else:
         raise ManifestError(f"content type {report.content_type.value} is not eligible for transfer")
@@ -175,6 +183,8 @@ def build_manifest_and_stage(
     manifest = Manifest(
         content_type=report.content_type.value, title_id=report.title_id,
         target_storage=target_storage, batch_id=batch_id, files=tuple(files),
+        addon_id=report.addon_id if report.content_type is ContentType.ADDON else None,
+        keep=tuple(report.addon_keep) if report.content_type is ContentType.ADDON else (),
     )
     manifest_path_for(job_id).write_text(
         json.dumps(manifest.to_dict(), ensure_ascii=False, indent=2), encoding="utf-8",
@@ -348,11 +358,21 @@ _COPY_PLAN_PREFIXES = {
 _COPY_PLAN_EXACT = {ContentType.EMUIIBO: (emuiibo.OVERLAY_FILE,)}
 
 
-def _check_copy_destination(content_type: ContentType, dest: str) -> None:
+def _check_copy_destination(content_type: ContentType, dest: str, addon_id: Optional[str] = None) -> None:
     parts = dest.split("/")
     if (not dest or dest.startswith("/") or "\\" in dest
             or any(p in ("", ".", "..") or ":" in p for p in parts)):
         raise ManifestError(f"refusing an unsafe destination path: {dest!r}")
+    if content_type is ContentType.ADDON:
+        # Asked of the catalog itself, never of what the Library row says.
+        from . import addons
+
+        addon = addons.by_id(addon_id) if addon_id else None
+        if addon is None or addon.spec is None:
+            raise ManifestError(f"{addon_id!r} is not an add-on of the catalog -- nothing of it may be written")
+        if not addon.spec.allows(dest):
+            raise ManifestError(f"{addon.name} may not be written to {dest!r}")
+        return
     if not (dest.startswith(_COPY_PLAN_PREFIXES[content_type])
             or dest in _COPY_PLAN_EXACT.get(content_type, ())):
         raise ManifestError(f"{content_type.value} content may not be written to {dest!r}")
@@ -368,7 +388,7 @@ def _build_copy_plan_files(report: PreviewReport, payload_dir: Path) -> list[Man
     if report.copy_root is None or not report.copy_plan:
         raise ManifestError("nothing staged locally to copy -- call preview_path(path, extract=True) first")
     for _src, dest in report.copy_plan:
-        _check_copy_destination(report.content_type, dest)
+        _check_copy_destination(report.content_type, dest, report.addon_id)
 
     files = []
     if report.work_dir is None:

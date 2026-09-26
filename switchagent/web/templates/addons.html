@@ -9,6 +9,8 @@
   itself where it can (emuiibo), by hand otherwise -- and how to use it.
   Where SwitchAgent can check a console for it, the chosen Switch's status
   is shown as of its last read; nothing here reads the console live.
+  Install takes the add-on and whatever it requires that this Switch
+  lacks, from GitHub, into the ordinary queue (web/addons_service.py).
 -#}
 
 {% macro steps(items, ordered=true) -%}
@@ -34,6 +36,18 @@
   </form>
   {% endif %}
 </div>
+
+{% if view.kefir %}
+<p class="settings-hint addons-kefir">{{ view.device.name }} runs kefir, which keeps its own utilities (Ultrahand among
+  them) up to date through kefir-updater — SwitchAgent leaves those to it.</p>
+{% endif %}
+
+{#- ReleaseChecker: GitHub asked at start and once a day. -#}
+<p class="settings-hint addons-checked">
+  {% if view.releases_checking %}Checking GitHub for new releases…
+  {% elif view.releases_checked_at %}New releases checked on GitHub {{ view.releases_checked_at|mtime }} — again once a day.
+  {% else %}New releases are checked on GitHub when SwitchAgent starts, and once a day.{% endif %}
+</p>
 
 <div id="addons-download" class="addons-download" role="status" aria-live="polite" hidden></div>
 
@@ -75,16 +89,17 @@
       {% endif %}
     </div>
     <div class="addon-actions">
-      {% if a.install %}
-      {% set state = e.status.state if e.status else None %}
-      <button type="button" class="btn btn-primary btn-small addon-install" data-install="{{ a.install }}"
+      {% if a.installable %}
+      <button type="button" class="btn btn-primary btn-small addon-install" data-addon="{{ a.id }}"
+              data-install="{{ a.install or a.id }}"
               data-device="{{ view.device.fingerprint if view.device else '' }}"
               {{ "disabled" if not e.can_install }}
-              title="{{ 'Connect the Switch first' if not (view.device and view.device.connected) else 'Downloads it from GitHub, checks it, adds it to your Library and queues it for this Switch' }}">
-        {%- if state == "installed" %}Installed{% elif state in ("outdated", "partial") %}Update{% else %}Install{% endif -%}
+              title="{{ 'kefir keeps it up to date on this Switch' if e.managed else ('Connect the Switch first' if not (view.device and view.device.connected) else 'Downloads it from GitHub, checks it, adds it to your Library and queues it for this Switch') }}">
+        {{- e.button -}}
       </button>
       {% endif %}
       <a class="btn btn-secondary btn-small" href="{{ a.releases }}" target="_blank" rel="noopener">Releases ↗</a>
+      {% if e.with and e.can_install %}<span class="addon-with">with {{ e.with|join(", ") }}</span>{% endif %}
       {#- The Amiibo tab exists only once emuiibo is on a console. -#}
       {% if a.related and (amiibo_tab or not a.related[1].startswith("/amiibo")) %}<a class="btn btn-secondary btn-small" href="{{ a.related[1] }}">{{ a.related[0] }}</a>{% endif %}
     </div>

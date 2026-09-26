@@ -248,13 +248,12 @@ def _advice(console: Optional[dict], releases: list[dict], connected: bool) -> l
     elif console["overlay_outdated"]:
         offer("", f"emuiibo {on_console} is on this Switch; {emuiibo.LATEST_KNOWN_VERSION} is current. Download it "
                   "from GitHub and update -- emuiibo's own files are replaced, amiibo and their save data stay")
-    for key in ("ovlloader", "tesla_menu"):
-        if not present.get(key):
-            component = emuiibo.COMPONENTS_BY_KEY[key]
-            out.append({"kind": "link", "href": component.source,
-                        "text": f"{component.name} is missing -- without it the emuiibo overlay cannot be "
-                                f"opened to choose an amiibo. Get it from its releases page and copy it to "
-                                f"the SD card ({component.paths[0]})."})
+    missing_menu = [emuiibo.COMPONENTS_BY_KEY[k].name for k in ("tesla_menu", "ovlloader") if not present.get(k)]
+    if missing_menu:
+        out.append({"kind": "install_addon", "addon": "ultrahand",
+                    "text": f"The overlay menu is missing ({' and '.join(missing_menu)}) -- without it the "
+                            "emuiibo overlay cannot be opened to choose an amiibo. Ultrahand Overlay brings "
+                            "both; restart the Switch after installing it."})
     return out
 
 
@@ -312,16 +311,16 @@ def emuiibo_offer(conn, ctx, device_id: str) -> dict:
     or an install of it is queued."""
     state = emuiibo_on_device(conn, device_id)
     download = ctx.emuiibo_downloads.snapshot()
-    stored = db.get_device_emuiibo(conn, device_id)
-    components = (stored[0].get("components") or {}) if stored else {}
-    tesla_missing = [emuiibo.COMPONENTS_BY_KEY[k].name for k in ("tesla_menu", "ovlloader")
-                     if stored is not None and not components.get(k)]
+    from . import addons_views
+
+    # What comes with it: its overlay menu, when the console lacks one.
+    also = [a.name for a in addons_views.plan_install(conn, device_id, "emuiibo") if a.id != "emuiibo"]
     busy = download is not None and download["state"] not in ("done", "failed")
     return {
         "state": state,
         "offer": state in ("missing", "partial", "unknown") and not busy,
         "busy": busy,
-        "tesla_missing": tesla_missing,
+        "also": also,
         "latest_version": emuiibo.LATEST_KNOWN_VERSION,
     }
 

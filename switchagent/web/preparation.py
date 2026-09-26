@@ -48,6 +48,8 @@ def _library_item_role(row):
         return "amiibo"
     if row["content_type"] == ContentType.EMUIIBO.value:
         return "emuiibo"
+    if row["content_type"] == ContentType.ADDON.value:
+        return "addon"
     if row["item_type"] == "MOD_FOLDER" or row["content_type"] == ContentType.ATMOSPHERE_MOD.value:
         return "mod"
     if not row["title_id"]:

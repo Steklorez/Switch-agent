@@ -147,6 +147,8 @@ def _run_primary_instance(args: argparse.Namespace) -> int:
     log.info("worker thread started")
     ctx.start_library_watcher()
     log.info("library watcher started (watching %s)", config.LIBRARY_DIR)
+    ctx.addon_releases.start()
+    log.info("add-on release checks started (now, then once a day)")
 
     app = create_app(ctx)
     from .web.network import home_network_only
@@ -175,6 +177,7 @@ def _run_primary_instance(args: argparse.Namespace) -> int:
         ctx.stop_library_watcher()
         log.info("shutdown: stopping worker thread")
         ctx.stop_worker()
+        ctx.addon_releases.stop()
         single_instance.clear_runtime_info(_runtime_info_path())
         log.info("shutdown complete")
 

@@ -786,7 +786,8 @@ def test_a_bare_switch_is_told_what_to_install_and_where_it_comes_from(client):
     kinds = [a["kind"] for a in view["advice"]]
     # emuiibo: the Library's 0.6.3 is outdated, so the current one from GitHub.
     assert kinds[0] == "download_release"
-    assert [a["href"] for a in view["advice"] if a["kind"] == "link"] == [emuiibo.OVLLOADER_URL, emuiibo.TESLA_MENU_URL]
+    # Its overlay menu is missing too: Ultrahand, installed from the page.
+    assert [a["addon"] for a in view["advice"] if a["kind"] == "install_addon"] == ["ultrahand"]
 
 
 def test_removal_over_the_api(client):
@@ -1229,18 +1230,29 @@ def _ac_client(tmp_path, monkeypatch, *, read_consoles=False):
 
 
 def test_without_emuiibo_anywhere_there_is_no_amiibo_tab(tmp_path, monkeypatch):
+    from switchagent import preferences
+
     client = _ac_client(tmp_path, monkeypatch, read_consoles=True)
     build_zip(config.LIBRARY_DIR / "emuiibo.zip", release_entries("1.1.3"))
     with db.open_db(client.ctx.db_path) as conn:
         scanner.scan_library_once(conn)
+    nav_tab = '<a href="/amiibo" class='
     html = client.get("/").text
-    assert 'href="/amiibo"' not in html
-    # What is off the grid says where emuiibo comes from, not a missing tab.
+    assert nav_tab not in html
+    # Beta features off (the default): emuiibo is installed from the Amiibo
+    # page itself, reachable from what is off the grid -- not a nav tab.
+    assert 'class="library-elsewhere" href="/amiibo"' in html
+    assert client.get("/amiibo", follow_redirects=False).status_code == 200
+    assert 'href="/amiibo">needs emuiibo →' in client.get(f"/games/{AC_BASE}").text
+    # With them on, Add-ons is where it comes from.
+    preferences.set_beta(True)
+    html = client.get("/").text
+    assert nav_tab not in html
     assert 'class="library-elsewhere" href="/addons#addon-emuiibo"' in html
     moved = client.get("/amiibo", follow_redirects=False)
     assert (moved.status_code, moved.headers["location"]) == (303, "/addons#addon-emuiibo")
-    addons = client.get("/addons").text
-    assert 'href="/amiibo"' not in addons and 'data-install="emuiibo"' in addons
+    addons_html = client.get("/addons").text
+    assert nav_tab not in addons_html and 'data-install="emuiibo"' in addons_html
     assert "needs emuiibo →" in client.get(f"/games/{AC_BASE}").text
 
 
@@ -1257,9 +1269,9 @@ def _fp(client, name):
 def test_amiibo_for_a_switch_without_emuiibo_come_with_the_offer_to_install_it(client):
     child = client.get(f"/api/amiibo/emuiibo/offer?device={_fp(client, 'Child')}").json()
     assert (child["state"], child["offer"]) == ("missing", True)
-    assert child["tesla_missing"] == ["Tesla Menu", "nx-ovlloader"]
+    assert child["also"] == ["Ultrahand Overlay"]
     parent = client.get(f"/api/amiibo/emuiibo/offer?device={_fp(client, 'Parent')}").json()
-    assert (parent["state"], parent["offer"], parent["tesla_missing"]) == ("installed", False, [])
+    assert (parent["state"], parent["offer"], parent["also"]) == ("installed", False, [])
     assert client.get("/api/amiibo/emuiibo/offer?device=nobody").status_code == 404
 
 
@@ -1277,7 +1289,7 @@ def test_a_switch_never_read_is_offered_emuiibo_without_assuming_it_lacks_it(tmp
         client.ctx.refresh_devices(conn)  # connected, not read yet
     fp = next(d["device_fingerprint"] for d in client.get("/api/devices").json() if "Parent" in d["display_name"])
     offer = client.get(f"/api/amiibo/emuiibo/offer?device={fp}").json()
-    assert (offer["state"], offer["offer"], offer["tesla_missing"]) == ("unknown", True, [])
+    assert (offer["state"], offer["offer"], offer["also"]) == ("unknown", True, ["Ultrahand Overlay"])
 
 
 def test_the_confirmation_has_room_for_the_offer(tmp_path, monkeypatch):

@@ -25,6 +25,8 @@ from .context import WebContext
 from .schemas import (
     AmiiboDeviceRequest,
     AmiiboRemoveRequest,
+    AddonInstallRequest,
+    BetaRequest,
     EmuiiboDownloadRequest,
     ConflictPolicyRequest,
     CreateJobsRequest,
@@ -49,18 +51,24 @@ def _nav_context(request: Request) -> dict:
     """What every page's navigation needs: whether there is an Amiibo tab
     (amiibo_views.amiibo_tab_visible). Never allowed to break a page -- an
     error page included -- so a failed read just leaves the tab out."""
+    from .. import preferences
+
+    beta = preferences.beta_enabled()
+    # Where emuiibo is installed from: Add-ons when the beta features are
+    # on, else the Amiibo page itself (emuiibo is not a beta feature).
+    nav = {"beta": beta, "emuiibo_home": "/addons#addon-emuiibo" if beta else "/amiibo"}
     ctx = getattr(request.app.state, "ctx", None)
     if ctx is None:
-        return {"amiibo_tab": False}
+        return {**nav, "amiibo_tab": False}
     try:
         conn = db.get_connection(ctx.db_path)
         try:
-            return {"amiibo_tab": amiibo_views.amiibo_tab_visible(conn)}
+            return {**nav, "amiibo_tab": amiibo_views.amiibo_tab_visible(conn)}
         finally:
             conn.close()
     except Exception:  # noqa: BLE001
         log.debug("could not tell whether emuiibo is installed anywhere", exc_info=True)
-        return {"amiibo_tab": False}
+        return {**nav, "amiibo_tab": False}
 
 
 _TEMPLATES = Jinja2Templates(directory=str(_WEB_DIR / "templates"), context_processors=[_nav_context])
@@ -410,7 +418,11 @@ def create_app(ctx: WebContext) -> FastAPI:
     def page_amiibo(request: Request, device: Optional[str] = None, conn=Depends(get_conn)):
         # No tab before emuiibo is on a console (amiibo_tab_visible): an old
         # link lands where it gets installed.
-        if not amiibo_views.amiibo_tab_visible(conn):
+        from .. import preferences
+
+        # With the beta features on, emuiibo is installed from Add-ons;
+        # without them this page is where it is installed from.
+        if not amiibo_views.amiibo_tab_visible(conn) and preferences.beta_enabled():
             return RedirectResponse("/addons#addon-emuiibo", status_code=303)
         # Everything on the page is rendered by amiibo.js from
         # GET /api/amiibo -- one source for the first paint and every
@@ -422,6 +434,11 @@ def create_app(ctx: WebContext) -> FastAPI:
     @app.get("/addons", response_class=HTMLResponse)
     def page_addons(request: Request, device: Optional[str] = None, conn=Depends(get_conn),
                     ctx: WebContext = Depends(get_ctx)):
+        from .. import preferences
+
+        # A beta feature: off, there is no Add-ons tab (Settings turns it on).
+        if not preferences.beta_enabled():
+            return RedirectResponse("/settings#beta", status_code=303)
         return _TEMPLATES.TemplateResponse(request, "addons.html", {
             "active_page": "addons", "view": addons_views.page(conn, ctx, device),
         })
@@ -453,10 +470,38 @@ def create_app(ctx: WebContext) -> FastAPI:
         from .emuiibo_service import DownloadRefused
 
         device_id = _resolve_fingerprint_or_404(conn, body.device) if body.device else None
+        # With a console: whatever emuiibo needs that it lacks (its overlay
+        # menu, Ultrahand) comes first, in the same install.
+        ids = [a.id for a in addons_views.plan_install(conn, device_id, "emuiibo")] if device_id else ["emuiibo"]
         try:
-            return ctx.emuiibo_downloads.start(device_id)
+            return ctx.emuiibo_downloads.start(device_id, ids)
         except DownloadRefused as exc:
             raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+    @app.post("/api/addons/install", status_code=202)
+    def api_addon_install(body: AddonInstallRequest, conn=Depends(get_conn), ctx: WebContext = Depends(get_ctx)):
+        """Install one Add-ons catalog entry -- and what it requires that
+        this console lacks -- from GitHub, through the ordinary queue."""
+        from .emuiibo_service import DownloadRefused
+
+        from .. import preferences
+
+        # emuiibo and the overlay menu it needs are not beta features.
+        if not preferences.beta_enabled() and body.addon not in ("emuiibo", "ultrahand"):
+            raise HTTPException(status_code=403, detail="Add-ons are a beta feature -- turn it on in Settings")
+        device_id = _resolve_fingerprint_or_404(conn, body.device)
+        try:
+            ids = [a.id for a in addons_views.plan_install(conn, device_id, body.addon)]
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail=f"no add-on {body.addon!r} in the catalog") from exc
+        try:
+            return ctx.emuiibo_downloads.start(device_id, ids)
+        except DownloadRefused as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+    @app.get("/api/addons/activity")
+    def api_addon_activity(ctx: WebContext = Depends(get_ctx)):
+        return {"download": ctx.emuiibo_downloads.snapshot()}
 
     @app.post("/api/amiibo/refresh")
     def api_amiibo_refresh(body: AmiiboDeviceRequest, conn=Depends(get_conn), ctx: WebContext = Depends(get_ctx)):
@@ -688,6 +733,12 @@ def create_app(ctx: WebContext) -> FastAPI:
         return services.get_update_check_status(force=True)
 
     # -- JSON API: library folder (W3-002) -------------------------------
+
+    @app.post("/api/preferences/beta")
+    def api_set_beta(body: BetaRequest):
+        from .. import preferences
+
+        return {"beta": preferences.set_beta(body.enabled)}
 
     @app.get("/api/preferences")
     def api_preferences(ctx: WebContext = Depends(get_ctx)):
